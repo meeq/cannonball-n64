@@ -1,9 +1,15 @@
 /***************************************************************************
     Cannonball Main Entry Point.
-    
+
+    SDL-only build entry. The whole file is gated on WITH_SDL so non-SDL
+    platforms (eg. N64 / libdragon — see src/main/n64/n64main.cpp) supply
+    their own main() and platform poll/tick loop without touching this file.
+
     Copyright Chris White.
     See license.txt for more details.
 ***************************************************************************/
+
+#if defined(WITH_SDL)
 
 #include <cstring>
 #include <iostream>
@@ -346,3 +352,5 @@ int main(int argc, char* argv[])
     // Never Reached
     return 0;
 }
+
+#endif // WITH_SDL

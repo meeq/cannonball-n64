@@ -15,7 +15,7 @@
 ***************************************************************************/
 
 #include "cabdiag.hpp"
-#include "sdl2/input.hpp"
+#include "input.hpp"
 
 #include "utils.hpp"
 #include "../video.hpp"

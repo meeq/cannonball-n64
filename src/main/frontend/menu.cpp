@@ -6,8 +6,7 @@
     See license.txt for more details.
 ***************************************************************************/
 
-// Boost string prediction
-#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/predicate.hpp> // boost::starts_with
 
 #include "main.hpp"
 #include "menu.hpp"
@@ -77,7 +76,7 @@ void Menu::populate()
     menu_musictest.push_back(ENTRY_MUSIC2);
     menu_musictest.push_back(ENTRY_BACK);
 
-    menu_about.push_back("CANNONBALL 0.35 © CHRIS WHITE 2022");
+    menu_about.push_back("CANNONBALL 0.35 ï¿½ CHRIS WHITE 2022");
     menu_about.push_back("REASSEMBLER.BLOGSPOT.COM");
     menu_about.push_back(" ");
     menu_about.push_back("CANNONBALL IS FREE AND MAY NOT BE SOLD.");

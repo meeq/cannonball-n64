@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "sdl2/input.hpp"
+#include "input.hpp"
 #include "outrun.hpp"
 
 class OInputs

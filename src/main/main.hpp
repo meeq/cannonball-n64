@@ -1,7 +1,7 @@
 #pragma once
 
 #include "globals.hpp"
-#include "sdl2/audio.hpp"
+#include "audio.hpp"
 
 namespace cannonball
 {

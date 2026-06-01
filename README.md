@@ -53,3 +53,46 @@ Build
 * Edit config.xml to reflect the paths of your roms and res directories. By default, they should be in the working directory.
 * Copy the OutRun revision B romset to the roms subdirectory. 
 * You can then compile, debug and run from Visual Studio as expected.
+
+### Nintendo 64 (libdragon)
+
+The N64 port targets the [libdragon](https://github.com/DragonMinded/libdragon) SDK
+and produces a self-contained `cannonball.z64` ROM with ROMs + tile data baked
+into a DFS payload. The host SDL/Boost dependencies are not required.
+
+Prerequisites:
+
+* A libdragon toolchain (mips64-elf-gcc, n64tool, mkdfs, etc.). Install via
+  [libdragon's docker image](https://github.com/DragonMinded/libdragon/wiki/Installing-libdragon)
+  or build from source.
+* `N64_INST` exported to the toolchain root (the directory containing
+  `bin/mips64-elf-gcc`).
+* OutRun revision B romset copied to `roms/` at the project root. The CMake
+  step stages the entire directory into the DFS image.
+
+Configure and build from the project root:
+
+    export N64_INST=$HOME/Projects/n64/toolchain   # adjust to your install
+
+    cmake -B build-n64 \
+          -DCMAKE_TOOLCHAIN_FILE="$(pwd)/cmake/n64-toolchain.cmake" \
+          -DTARGET=n64.cmake \
+          cmake
+
+    cmake --build build-n64 -j
+
+Outputs land in `build-n64/`:
+
+* `cannonball.z64` — the ROM to load on an emulator (ares, cen64) or flash
+  cart (EverDrive-64, 64drive).
+* `cannonball.elf` — the unstripped ELF, useful with `mips64-elf-gdb`.
+* `cannonball.dfs` — the DFS filesystem image embedded in the ROM.
+
+Status / scope (Phase 1):
+
+* Menu and cabinet diagnostics are excluded from the build; the ROM boots
+  straight into attract mode. They re-enable in Phase 5.
+* Audio and EEPROM save are stubbed — engine wiring lands in Phase 4 / 5.
+* `cmake/n64.cmake` is the target file and `cmake/n64-toolchain.cmake` is the
+  cross-compile toolchain. Per upstream policy, the base
+  `cmake/CMakeLists.txt` is not edited beyond the N64 carve-out block.

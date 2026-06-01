@@ -8,12 +8,16 @@
     See license.txt for more details.
 ***************************************************************************/
 
+#include <iostream>
+
+#if defined(WITH_XML_CONFIG)
 // see: http://www.boost.org/doc/libs/1_52_0/doc/html/boost_propertytree/tutorial.html
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 // Boost string prediction
 #include <boost/algorithm/string/predicate.hpp>
-#include <iostream>
+#include <boost/version.hpp>
+#endif
 
 #include "main.hpp"
 #include "config.hpp"
@@ -24,12 +28,13 @@
 #include "engine/outils.hpp"
 #include "engine/audio/osoundint.hpp"
 
+#if defined(WITH_XML_CONFIG)
 // api change in boost 1.56
-#include <boost/version.hpp>
 #if (BOOST_VERSION >= 105600)
 typedef boost::property_tree::xml_writer_settings<std::string> xml_writer_settings;
 #else
 typedef boost::property_tree::xml_writer_settings<char> xml_writer_settings;
+#endif
 #endif
 
 Config config;
@@ -66,9 +71,122 @@ void Config::set_config_file(const std::string& file)
     data.cfg_file = file;
 }
 
+#if defined(WITH_XML_CONFIG)
 using boost::property_tree::ptree;
 ptree pt_config;
+#endif
 
+#if !defined(WITH_XML_CONFIG)
+// Hardcoded defaults for builds without XML config support. The PC build reads
+// the same values from res/config.xml via boost::property_tree, which is
+// dropped here to avoid the dependency and the std::locale / exception
+// machinery it drags in. Engine access to the Config fields is unchanged —
+// only the load/save bodies differ. Save data persistence is delegated to the
+// platform layer (see eg. src/main/n64/save.cpp).
+void Config::load()
+{
+    // Data Settings — platform layer overrides rom_path/res_path/save_path
+    // after load() if defaults aren't right (eg. libdragon DFS "rom:/" prefix).
+    data.rom_path  = "./roms/";
+    data.res_path  = "./res/";
+    data.save_path = "./";
+    data.crc32     = 0;         // filename mode by default (no dirent assumed)
+
+    data.file_scores      = data.save_path + "hiscores.xml";
+    data.file_scores_jap  = data.save_path + "hiscores_jap.xml";
+    data.file_ttrial      = data.save_path + "hiscores_timetrial.xml";
+    data.file_ttrial_jap  = data.save_path + "hiscores_timetrial_jap.xml";
+    data.file_cont        = data.save_path + "hiscores_continuous.xml";
+    data.file_cont_jap    = data.save_path + "hiscores_continuous_jap.xml";
+
+    // Menu — boot straight into attract on first cut
+    menu.enabled           = 0;
+    menu.road_scroll_speed = 50;
+
+    // Video — minimal-output defaults (no widescreen, no hi-res). Concrete
+    // mode/scale set by the platform layer (eg. matches N64 framebuffer).
+    video.mode       = video_settings_t::MODE_FULL;
+    video.scale      = 1;
+    video.scanlines  = 0;
+    video.fps        = 0;
+    video.fps_count  = 0;
+    video.widescreen = 0;
+    video.hires      = 0;
+    video.filtering  = 0;
+    video.vsync      = 1;
+    video.shadow     = 0;
+
+    // Sound — disabled when no XML; platform layer can flip on after init.
+    sound.enabled     = 0;
+    sound.rate        = 22050;
+    sound.advertise   = 1;
+    sound.preview     = 1;
+    sound.fix_samples = 1;
+    sound.music_timer = MUSIC_TIMER;
+
+    // SMARTYPI — off by default
+    smartypi.enabled = 0;
+    smartypi.ouputs  = 0;
+    smartypi.cabinet = 1;
+
+    // Controls — platform layer overrides padconfig/axis to match its input
+    // backend. keyconfig is harmless on platforms without a keyboard.
+    controls.gear        = controls_settings_t::GEAR_AUTO;
+    controls.steer_speed = 3;
+    controls.pedal_speed = 4;
+    controls.rumble      = 1.0f;
+    for (int i = 0; i < 12; ++i)  controls.keyconfig[i] = 0;
+    for (int i = 0; i < 15; ++i)  controls.padconfig[i] = -1;
+    controls.analog        = 1;
+    controls.pad_id        = 0;
+    for (int i = 0; i < 4; ++i)   controls.axis[i] = -1;
+    for (int i = 0; i < 3; ++i)   controls.invert[i] = 0;
+    controls.asettings[0]  = 75;
+    controls.asettings[1]  = 0;
+    controls.haptic        = 0;
+    controls.max_force     = 9000;
+    controls.min_force     = 8500;
+    controls.force_duration= 20;
+
+    // Engine
+    engine.dip_time        = 0;
+    engine.dip_traffic     = 1;
+    engine.freeze_timer    = false;
+    engine.disable_traffic = false;
+    engine.freeplay        = false;
+    engine.jap             = 0;
+    engine.prototype       = 0;
+    engine.level_objects   = 1;
+    engine.randomgen       = 1;
+    engine.fix_bugs_backup = engine.fix_bugs = true;
+    engine.fix_timer       = false;
+    engine.layout_debug    = false;
+    engine.hiscore_delete  = 1;
+    engine.hiscore_timer   = HIGHSCORE_TIMER;
+    engine.new_attract     = 1;
+    engine.offroad         = false;
+    engine.grippy_tyres    = false;
+    engine.bumper          = false;
+    engine.turbo           = false;
+    engine.car_pal         = 0;
+
+    ttrial.laps    = 5;
+    ttrial.traffic = 3;
+    cont_traffic   = 3;
+}
+
+bool Config::save()                    { return true; }
+void Config::load_scores(bool)         { }
+void Config::save_scores(bool)         { }
+void Config::load_tiletrial_scores()
+{
+    static const uint16_t COUNTER_1M_15 = 0x11D0;
+    for (int i = 0; i < 15; i++)
+        ttrial.best_times[i] = COUNTER_1M_15;
+}
+void Config::save_tiletrial_scores()   { }
+bool Config::clear_scores()            { ohiscore.init_def_scores(); return true; }
+#else
 void Config::load()
 {
     // Load XML file and put its contents in property tree. 
@@ -499,6 +617,7 @@ bool Config::clear_scores()
     // remove returns 0 on success
     return clear == 6;
 }
+#endif // WITH_XML_CONFIG
 
 void Config::set_fps(int fps)
 {

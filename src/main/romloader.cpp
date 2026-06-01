@@ -11,22 +11,26 @@
 #include <iostream>
 #include <fstream>
 #include <cstddef>       // for std::size_t
-#include <boost/crc.hpp> // CRC Checking via Boost library.
 #include <unordered_map>
 
 #include "stdint.hpp"
 #include "romloader.hpp"
 #include "frontend/config.hpp"
+#include "utils_crc32.hpp"
 
 // In order to get a cross-platform directory listing I'm using a Visual Studio
 // version of Linux's Dirent from here: https://github.com/tronkko/dirent
 //
-// This appears to be the most lightweight solution available without resorting 
-// to enormous boost libraries or switching to C++17.
-#ifdef _MSC_VER
-#include "windirent.h"
-#else
-#include <dirent.h>
+// This appears to be the most lightweight solution available without resorting
+// to enormous boost libraries or switching to C++17. Builds that lack POSIX
+// dirent (e.g. libdragon DFS) leave WITH_DIRENT undefined and fall back to
+// load_rom() — CRC-based matching requires a directory listing.
+#if defined(WITH_DIRENT)
+    #if defined(_MSC_VER)
+        #include "windirent.h"
+    #else
+        #include <dirent.h>
+    #endif
 #endif
 
 // Unordered Map to store contents of directory by CRC 32 value. Similar to Hashmap.
@@ -86,7 +90,7 @@ int RomLoader::load_rom(const char* filename, const int offset, const int length
     src.read(buffer, length);
 
     // Check CRC on file
-    boost::crc_32_type result;
+    Crc32 result;
     result.process_bytes(buffer, (size_t) src.gcount());
 
     if (expected_crc != result.checksum())
@@ -120,6 +124,12 @@ int RomLoader::create_map()
 {
     map_created = true;
 
+#if !defined(WITH_DIRENT)
+    // No directory listing available — caller must set config.data.crc32 = 0
+    // so load_rom() (filename-based) is used instead.
+    std::cout << "Warning: CRC-based ROM lookup not available without dirent." << std::endl;
+    return 1;
+#else
     std::string path = config.data.rom_path;
     DIR* dir;
     struct dirent* ent;
@@ -143,7 +153,7 @@ int RomLoader::create_map()
         src.read(buffer, length);
 
         // Check CRC on file
-        boost::crc_32_type result;
+        Crc32 result;
         result.process_bytes(buffer, (size_t)src.gcount());
 
         // Insert file into MAP between CRC and filename
@@ -157,6 +167,7 @@ int RomLoader::create_map()
 
     closedir(dir);
     return 0; //success
+#endif
 }
 
 

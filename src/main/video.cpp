@@ -20,6 +20,8 @@
 #include "sdl2/rendergl.hpp"
 #elif WITH_OPENGLES
 #include "sdl2/rendergles.hpp"
+#elif WITH_LIBDRAGON
+#include "n64/rendersurface.hpp"
 #else
 #include "sdl2/rendersurface.hpp"
 #endif
