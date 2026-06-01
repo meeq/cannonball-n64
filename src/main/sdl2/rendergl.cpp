@@ -108,15 +108,19 @@ bool Render::init(int src_width, int src_height,
 
     // I don't know if there are platforms where ES is the default profile, so just in case
     // I force a GL2 core profile here (deprecated functions disabled for good).
+    // macOS only supports GL 2.1 in the legacy (compatibility) profile — Core is 3.2+ —
+    // and this renderer relies on immediate-mode GL anyway, so skip the profile request there.
+    #ifndef __APPLE__
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    #endif
 
     glcontext = SDL_GL_CreateContext(window);
 
-    if (!surface)
+    if (!glcontext)
     {
-        std::cerr << "Video mode set failed: " << SDL_GetError() << std::endl;
+        std::cerr << "GL context creation failed: " << SDL_GetError() << std::endl;
         return false;
     }
 
@@ -128,26 +132,9 @@ bool Render::init(int src_width, int src_height,
     Rshift = surface->format->Rshift;
     Gshift = surface->format->Gshift;
     Bshift = surface->format->Bshift;
-
-    // This hack is necessary to fix an Apple OpenGL with SDL issue
-    #ifdef __APPLE__
-      #if SDL_BYTEORDER == SDL_LIL_ENDIAN
-        Rmask = 0x000000FF;
-        Gmask = 0x0000FF00;
-        Bmask = 0x00FF0000;
-        Rshift += 8;
-        Gshift -= 8;
-        Bshift += 8;
-      #else
-        Rmask = 0xFF000000;
-        Gmask = 0x00FF0000;
-        Bmask = 0x0000FF00;
-      #endif
-    #else
-        Rmask  = surface->format->Rmask;
-        Gmask  = surface->format->Gmask;
-        Bmask  = surface->format->Bmask;
-    #endif
+    Rmask  = surface->format->Rmask;
+    Gmask  = surface->format->Gmask;
+    Bmask  = surface->format->Bmask;
 
     // --------------------------------------------------------------------------------------------
     // Initalize Open GL
