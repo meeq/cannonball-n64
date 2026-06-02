@@ -172,11 +172,11 @@ void Video::prepare_frame()
     if (!enabled)
         return;
 
-    // OutRun Hardware Video Emulation. road_bg + both tile layers (bg/fg
-    // at priority 0) are now handled by the renderer via RDP commands in
+    // OutRun Hardware Video Emulation. road_bg, both tile layers (bg/fg at
+    // priority 0), and the text layer are all drawn via RDP in
     // finalize_frame, so this pass only covers what still writes into
-    // pixels[]: road_fg, sprites (with shadow read-modify-write on existing
-    // pixels), and text.
+    // pixels[]: road_fg and sprites (with shadow read-modify-write on
+    // existing pixels).
     tile_layer->update_tile_values();
 
     N64_PROFILE_PHASE_BEGIN();
@@ -186,9 +186,6 @@ void Video::prepare_frame()
 
     sprite_layer->render(8);
     N64_PROFILE_PHASE_END(n64_profile::SUB_SPRITE);
-
-    tile_layer->render_text_layer(pixels, 1);
-    N64_PROFILE_PHASE_END(n64_profile::SUB_TEXT);
 }
 
 void Video::render_frame()

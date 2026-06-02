@@ -40,6 +40,14 @@ public:
                                uint8_t page_index, uint8_t priority_draw,
                                int x_offset, int y_offset);
 
+    // RDP text-layer renderer: walks the 32x64 text_ram grid (no scrolling,
+    // no page select) and emits one textured-rectangle per visible tile.
+    // Same atlas + TLUT cache as render_rdp_tile_layer; only the first 8
+    // TLUT slots are touched (text Colour is 3-bit).
+    void render_rdp_text_layer(const uint16_t* tile_tlut,
+                               uint8_t priority_draw,
+                               int x_offset, int y_offset);
+
 private:
     int16_t x_clamp;
     

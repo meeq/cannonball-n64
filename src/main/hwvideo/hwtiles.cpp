@@ -282,6 +282,57 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     }
 }
 
+// RDP path for the text layer. Same atlas + TLUT cache as the tile layer, but:
+//   * walks the 32x64 text_ram grid instead of tile_ram
+//   * no scrolling; tile origin is shifted by -192 (matches the CPU path)
+//   * Colour is 3-bit (0..7) — only the first 8 TLUT slots are touched
+//   * tile bank is always tile_banks[0] (text codes are 9-bit)
+void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
+                                    uint8_t priority_draw,
+                                    int x_offset, int y_offset)
+{
+    rdpq_set_mode_standard();
+    rdpq_mode_tlut(TLUT_RGBA16);
+    rdpq_mode_alphacompare(1);
+
+    uint32_t TileIndex = 0;
+    for (int my = 0; my < 32; my++)
+    {
+        for (int mx = 0; mx < 64; mx++, TileIndex += 2)
+        {
+            const uint16_t Code_raw =
+                (text_ram[TileIndex + 0] << 8) | text_ram[TileIndex + 1];
+
+            if (((Code_raw >> 15) & 1) != priority_draw)
+                continue;
+
+            const int Colour = (Code_raw >> 9) & 0x07;
+            uint32_t Code = Code_raw & 0x1ff;
+            Code += tile_banks[0] * 0x1000;
+            Code &= (NUM_TILES - 1);
+            if (Code == 0)
+                continue;
+
+            int x = 8 * mx - 192;
+            int y = 8 * my;
+
+            // CPU path's outer visibility test (clip path also excluded the
+            // 0..7 left strip via `x > -8 && y >= 0`). RDP scissor handles
+            // partial-edge tiles, so the same gate is sufficient.
+            if (x <= -8 || x >= s16_width_noscale) continue;
+            if (y < 0  || y >= S16_HEIGHT)         continue;
+
+            surface_t tile_surf = surface_make_linear(
+                (void*)&tiles[Code * 8], FMT_CI4, 8, 8);
+
+            rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
+            rdpq_tex_blit(&tile_surf,
+                          x + x_offset + config.s16_x_off,
+                          y + y_offset, NULL);
+        }
+    }
+}
+
 void hwtiles::render_tile_layer(uint16_t* buf, uint8_t page_index, uint8_t priority_draw)
 {
     int16_t Colour, x, y, Priority = 0;

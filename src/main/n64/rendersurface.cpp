@@ -268,6 +268,15 @@ bool Render::finalize_frame()
     rdpq_mode_alphacompare(1);
     rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
 
+    // Text layer sits on top of everything. Uses the same TLUT cache as the
+    // tile layers (Colour is 3-bit here, only slots 0..7 are touched).
+    uint64_t txt_t0 = get_ticks_us();
+    video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
+    uint64_t txt_t1 = get_ticks_us();
+    n64_profile::sub_us[n64_profile::SUB_TEXT] =
+        (n64_profile::sub_us[n64_profile::SUB_TEXT] * 7
+         + (uint32_t)(txt_t1 - txt_t0)) >> 3;
+
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
     // own mode setup, so the preceding copy-mode blit is fine to leave as-is.
     rdpq_text_printf(NULL, FPS_FONT_ID, 4, 12,
