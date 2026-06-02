@@ -1,4 +1,5 @@
 #include <cstring> // memcpy
+#include <libdragon.h>
 #include "hwvideo/hwroad.hpp"
 #include "globals.hpp"
 #include "frontend/config.hpp"
@@ -127,17 +128,11 @@ void HWRoad::init(const uint8_t* src_road, const bool hires)
 
     if (src_road)
         decode_road(src_road);
-    
-    if (hires)
-    {
-        render_background = &HWRoad::render_background_hires;
-        render_foreground = &HWRoad::render_foreground_hires;
-    }
-    else
-    {
-        render_background = &HWRoad::render_background_lores;
-        render_foreground = &HWRoad::render_foreground_lores;   
-    }
+
+    // Road background is drawn via RDP fill rects (see render_rdp_background);
+    // only the per-pixel road foreground texture path stays on the CPU.
+    render_foreground = hires ? &HWRoad::render_foreground_hires
+                              : &HWRoad::render_foreground_lores;
 }
 
 /*
@@ -234,55 +229,72 @@ void HWRoad::write_road_control(const uint8_t road_control)
 // Road Rendering: Lores Version
 // ------------------------------------------------------------------------------------------------
 
-// Background: Look for solid fill scanlines
-void HWRoad::render_background_lores(uint16_t* pixels)
+// Background: emit RDP fill rectangles for solid-fill scanline bands.
+//
+// The original CPU path filled pixels[y * s16_width + x] for each solid-fill
+// scanline. Here we resolve the per-scanline palette index using the same
+// road_control/road RAM rules, then batch consecutive same-color scanlines
+// into a single rdpq_fill_rectangle. Caller must have attached the display
+// and *not* set a render mode yet — we configure fill mode here.
+void HWRoad::render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_offset, int s16_width)
 {
-    int x, y;
     uint16_t* roadram = ramBuff;
 
-    for (y = 0; y < S16_HEIGHT; y++) 
-    {
-        int data0 = roadram[0x000 + y];
-        int data1 = roadram[0x100 + y];
+    int prev_color = -1;
+    int band_start = 0;
 
+    rdpq_set_mode_fill(RGBA32(0, 0, 0, 0));
+
+    for (int y = 0; y <= S16_HEIGHT; y++)
+    {
         int color = -1;
 
-        // based on the info->control, we can figure out which sky to draw
-        switch (road_control & 3) 
+        if (y < S16_HEIGHT)
         {
-            case 0:
-                if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                break;
+            int data0 = roadram[0x000 + y];
+            int data1 = roadram[0x100 + y];
 
-            case 1:
-                if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                else if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                break;
-
-            case 2:
-                if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                else if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                break;
-
-            case 3:
-                if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                break;
+            switch (road_control & 3)
+            {
+                case 0:
+                    if (data0 & 0x800)
+                        color = data0 & 0x7f;
+                    break;
+                case 1:
+                    if (data0 & 0x800)
+                        color = data0 & 0x7f;
+                    else if (data1 & 0x800)
+                        color = data1 & 0x7f;
+                    break;
+                case 2:
+                    if (data1 & 0x800)
+                        color = data1 & 0x7f;
+                    else if (data0 & 0x800)
+                        color = data0 & 0x7f;
+                    break;
+                case 3:
+                    if (data1 & 0x800)
+                        color = data1 & 0x7f;
+                    break;
+            }
         }
 
-        // fill the scanline with color
-        if (color != -1) 
+        if (color != prev_color)
         {
-            uint16_t* pPixel = pixels + (y * config.s16_width);
-            color |= color_offset3;
-            
-            for (x = 0; x < config.s16_width; x++)
-                *(pPixel)++ = color;
+            if (prev_color != -1)
+            {
+                uint16_t pixel = rgb_lut[prev_color | color_offset3];
+                uint8_t r = ((pixel >> 11) & 0x1F) << 3;
+                uint8_t g = ((pixel >>  6) & 0x1F) << 3;
+                uint8_t b = ((pixel >>  1) & 0x1F) << 3;
+                rdpq_set_fill_color(RGBA32(r, g, b, 0xFF));
+                rdpq_fill_rectangle(x_offset,
+                                    y_offset + band_start,
+                                    x_offset + s16_width,
+                                    y_offset + y);
+            }
+            band_start = y;
+            prev_color = color;
         }
     }
 }
@@ -408,64 +420,6 @@ void HWRoad::render_foreground_lores(uint16_t* pixels)
                 break;
             } // end switch
     } // end for
-}
-
-// ------------------------------------------------------------------------------------------------
-// High Resolution (Double Resolution) Road Rendering
-// ------------------------------------------------------------------------------------------------
-void HWRoad::render_background_hires(uint16_t* pixels)
-{
-    int x, y;
-    uint16_t* roadram = ramBuff;
-
-    for (y = 0; y < config.s16_height; y += 2) 
-    {
-        int data0 = roadram[0x000 + (y >> 1)];
-        int data1 = roadram[0x100 + (y >> 1)];
-
-        int color = -1;
-
-        // based on the info->control, we can figure out which sky to draw
-        switch (road_control & 3) 
-        {
-            case 0:
-                if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                break;
-
-            case 1:
-                if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                else if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                break;
-
-            case 2:
-                if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                else if (data0 & 0x800)
-                    color = data0 & 0x7f;
-                break;
-
-            case 3:
-                if (data1 & 0x800)
-                    color = data1 & 0x7f;
-                break;
-        }
-
-        // fill the scanline with color
-        if (color != -1) 
-        {
-            uint16_t* pPixel = pixels + (y * config.s16_width);
-            color |= color_offset3;
-            
-            for (x = 0; x < config.s16_width; x++)
-                *(pPixel)++ = color;
-        }
-
-        // Hi-Res Mode: Copy extra line of background
-        memcpy(pixels + ((y+1) * config.s16_width), pixels + (y * config.s16_width), sizeof(uint16_t) * config.s16_width);
-    }
 }
 
 // ------------------------------------------------------------------------------------------------

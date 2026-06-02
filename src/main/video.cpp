@@ -14,6 +14,7 @@
 #include "frontend/config.hpp"
 #include "engine/oroad.hpp"
 #include "n64/rendersurface.hpp"
+#include <cstring>
 #include <libdragon.h>
 
 // Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
@@ -158,41 +159,40 @@ void Video::set_shadow_intensity(float f)
 
 void Video::prepare_frame()
 {
-    // Renderer Specific Frame Setup
     if (!renderer->start_frame())
         return;
 
+    // pixels[] is the palette-indexed scratch the CPU rasterizers paint into.
+    // Index 0 is treated as transparent by the composite blit, so clearing
+    // here gives tile/sprite/text a clean transparent canvas to write into —
+    // and any unwritten region (notably the road area, now drawn directly to
+    // the framebuffer by the RDP) stays transparent and shows through.
+    std::memset(pixels, 0, config.s16_width * config.s16_height * sizeof(uint16_t));
+
     if (!enabled)
-    {
-        // Fill with black pixels
-        for (int i = 0; i < config.s16_width * config.s16_height; i++)
-            pixels[i] = 0;
-    }
-    else
-    {
-        // OutRun Hardware Video Emulation
-        tile_layer->update_tile_values();
+        return;
 
-        N64_PROFILE_PHASE_BEGIN();
-        (hwroad.*hwroad.render_background)(pixels);
-        N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_BG);
+    // OutRun Hardware Video Emulation. road_bg is handled by the renderer
+    // via RDP fill rectangles in finalize_frame — there's no longer a CPU
+    // road background pass writing into pixels[].
+    tile_layer->update_tile_values();
 
-        tile_layer->render_tile_layer(pixels, 1, 0);      // background layer
-        N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_BG);
+    N64_PROFILE_PHASE_BEGIN();
+    tile_layer->render_tile_layer(pixels, 1, 0);      // background layer
+    N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_BG);
 
-        tile_layer->render_tile_layer(pixels, 0, 0);      // foreground layer
-        N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_FG);
+    tile_layer->render_tile_layer(pixels, 0, 0);      // foreground layer
+    N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_FG);
 
-        if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
-            (hwroad.*hwroad.render_foreground)(pixels);
-        N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
+    if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
+        (hwroad.*hwroad.render_foreground)(pixels);
+    N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
 
-        sprite_layer->render(8);
-        N64_PROFILE_PHASE_END(n64_profile::SUB_SPRITE);
+    sprite_layer->render(8);
+    N64_PROFILE_PHASE_END(n64_profile::SUB_SPRITE);
 
-        tile_layer->render_text_layer(pixels, 1);
-        N64_PROFILE_PHASE_END(n64_profile::SUB_TEXT);
-     }
+    tile_layer->render_text_layer(pixels, 1);
+    N64_PROFILE_PHASE_END(n64_profile::SUB_TEXT);
 }
 
 void Video::render_frame()

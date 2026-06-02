@@ -14,9 +14,14 @@ public:
     void write32(uint32_t* adr, const uint32_t data);
     uint16_t read_road_control();
     void write_road_control(const uint8_t);
-    void (HWRoad::*render_background)(uint16_t*);
     void (HWRoad::*render_foreground)(uint16_t*);
-  
+
+    // RDP road background — looks up which scanlines are solid-filled per the
+    // S16 road_control / road RAM contents and emits batched rdpq fill rects
+    // directly into the framebuffer at (x_offset, y_offset). Assumes the
+    // caller has attached the display and not yet set a fill mode.
+    void render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_offset, int s16_width);
+
 private:
     uint8_t road_control;
     uint16_t color_offset1;
@@ -35,9 +40,7 @@ private:
     uint16_t ramBuff[ROAD_RAM_SIZE / 2];
 
     void decode_road(const uint8_t*);
-    void render_background_lores(uint16_t*);
     void render_foreground_lores(uint16_t*);
-    void render_background_hires(uint16_t*);
     void render_foreground_hires(uint16_t*);
 };
 

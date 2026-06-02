@@ -11,6 +11,7 @@
 
 #include "rendersurface.hpp"
 #include "platform.hpp"
+#include "hwvideo/hwroad.hpp"
 #include <cmath>
 #include <cstring>
 #include <malloc.h>
@@ -39,8 +40,9 @@ Render::~Render()
 }
 
 // Packs the S16 5-bit RGB channels into libdragon's FMT_RGBA16 framebuffer
-// format: RRRRR GGGGG BBBBB A (5/5/5/1). Alpha LSB is forced to 1 — the RDP
-// needs it set to draw the palette-expanded scratch surface in COPY mode.
+// format: RRRRR GGGGG BBBBB A (5/5/5/1). Alpha LSB is 1 for opaque texels —
+// finalize_frame composites with alpha compare so the LUT's zero-alpha
+// entries (palette index 0, see convert_palette) reveal the road background.
 static inline uint16_t pack_rgba5551(uint32_t r, uint32_t g, uint32_t b)
 {
     return (uint16_t)(((r & 0x1F) << 11) |
@@ -52,6 +54,19 @@ static inline uint16_t pack_rgba5551(uint32_t r, uint32_t g, uint32_t b)
 void Render::convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1)
 {
     adr >>= 1;
+
+    // Palette index 0 is the engine's transparency sentinel: tiles, sprites
+    // and text skip writing it, and prepare_frame() clears pixels[] to 0
+    // each frame. Encode it as zero (alpha LSB = 0) so finalize_frame's
+    // alpha-compare composite drops these pixels and the underlying RDP
+    // road-background fill shows through.
+    if (adr == 0)
+    {
+        rgb[0] = 0;
+        rgb[S16_PALETTE_ENTRIES] = 0;
+        return;
+    }
+
     rgb[adr] = pack_rgba5551(r1, g1, b1);
 
     // Shadow color: scale by shadow_multi/255. Stored in the upper half of
@@ -185,8 +200,22 @@ bool Render::finalize_frame()
 
     rdpq_attach_clear(disp, NULL);
 
-    rdpq_set_mode_copy(false);
     const int x = (disp->width - src_width) / 2;
+
+    // Road background: emit one rdpq_fill_rectangle per same-color band.
+    // Configures fill mode internally; safe to call before the composite blit.
+    uint64_t rbg_t0 = get_ticks_us();
+    hwroad.render_rdp_background(rgb, x, y_offset, src_width);
+    uint64_t rbg_t1 = get_ticks_us();
+    n64_profile::sub_us[n64_profile::SUB_ROAD_BG] =
+        (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
+         + (uint32_t)(rbg_t1 - rbg_t0)) >> 3;
+
+    // Composite the palette-expanded engine surface on top. Standard mode +
+    // alpha compare keeps RGBA5551 alpha=0 texels (palette index 0) from
+    // overwriting the road background underneath.
+    rdpq_set_mode_standard();
+    rdpq_mode_alphacompare(1);
     rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
 
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
