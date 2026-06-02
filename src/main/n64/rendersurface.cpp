@@ -241,7 +241,7 @@ bool Render::finalize_frame()
     n64_profile::wait_us =
         (n64_profile::wait_us * 7 + (uint32_t)(t1 - t0)) >> 3;
 
-    rdpq_attach_clear(disp, NULL);
+    rdpq_attach(disp, NULL);
 
     const int x = (disp->width - src_width) / 2;
 

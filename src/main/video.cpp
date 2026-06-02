@@ -167,7 +167,20 @@ void Video::prepare_frame()
     // here gives tile/sprite/text a clean transparent canvas to write into —
     // and any unwritten region (notably the road area, now drawn directly to
     // the framebuffer by the RDP) stays transparent and shows through.
-    std::memset(pixels, 0, config.s16_width * config.s16_height * sizeof(uint16_t));
+    //
+    // Clearing 143 KB through the 8 KB D-cache costs ~8.8 ms/frame — each
+    // missing line forces a read-for-ownership before the store, then later
+    // gets written back when displaced. We zero through KSEG1 instead so the
+    // stores go straight to RDRAM via the store buffer (no allocate, no
+    // eventual writeback). The cached lines from the prior frame are
+    // invalidated first so subsequent cached writes by the CPU rasterizers
+    // (hwroad, etc.) and the cached read by palette-expand don't see stale
+    // pre-zero data. Dirty lines are discarded rather than written back —
+    // they hold last-frame content we're about to overwrite with zeros.
+    const size_t pixels_bytes =
+        config.s16_width * config.s16_height * sizeof(uint16_t);
+    data_cache_hit_invalidate(pixels, pixels_bytes);
+    std::memset(UncachedAddr(pixels), 0, pixels_bytes);
 
     if (!enabled)
         return;

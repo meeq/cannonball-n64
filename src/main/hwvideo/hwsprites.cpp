@@ -573,6 +573,17 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     int pipeline = 0;
     shadow_body_ring_idx = 0;
 
+    // TLUT-upload cache. Each rdpq_tex_upload_tlut emits ~3 RDP commands
+    // (set_texture_image_raw + set_tile + load_tile) and writes to TILE7
+    // (RDPQ_TILE_INTERNAL). Many consecutive sprites in OutRun share a
+    // palette slot (crowd extras, banner pixels, smoke); skipping a repeat
+    // upload is the same win that PF4 got on the tile layer. We key off the
+    // source pointer because each unique palette (color_tlut[color*16],
+    // shadow_mask_tlut, or a fresh shadow-body scratch slot) has a distinct
+    // address. Scratch slots come from a ring, so identity-comparison is
+    // safe — pass-2 shadow uploads never alias prior slots within a frame.
+    const uint16_t* last_tlut = NULL;
+
     const uint32_t numbanks = SPRITES_LENGTH / 0x10000;
 
     for (uint16_t data = 0; data < SPRITE_RAM_SIZE; data += 8)
@@ -675,7 +686,11 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY_CONST);
                 pipeline = 1;
             }
-            rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
+            if (last_tlut != shadow_mask_tlut)
+            {
+                rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
+                last_tlut = shadow_mask_tlut;
+            }
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
 
             // Pass 2 — opaque body. Switch back, allocate a scratch TLUT in
@@ -692,10 +707,14 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 &shadow_body_tluts[shadow_body_ring_idx * 16];
             if (++shadow_body_ring_idx >= SHADOW_TLUT_RING)
                 shadow_body_ring_idx = 0;
-            for (int i = 0; i < 16; i++) scratch[i] = color_tlut[i];
-            scratch[10] = 0;
-            data_cache_hit_writeback(scratch, 16 * sizeof(uint16_t));
+            // Write through an uncached view so the 16 halfword stores go
+            // straight to RDRAM via the store buffer and the RDP TLUT-load
+            // DMA below sees fresh data without a data_cache writeback.
+            uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
+            for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
+            scratch_uc[10] = 0;
             rdpq_tex_upload_tlut(scratch, 0, 16);
+            last_tlut = scratch;
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
         }
         else
@@ -706,7 +725,11 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(0);
                 pipeline = 0;
             }
-            rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
+            if (last_tlut != color_tlut)
+            {
+                rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
+                last_tlut = color_tlut;
+            }
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
         }
     }
