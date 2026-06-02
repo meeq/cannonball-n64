@@ -29,6 +29,17 @@ public:
     void render_text_layer(uint16_t*, uint8_t);
     void render_all_tiles(uint16_t*);
 
+    // RDP tile-layer renderer: walks the tilemap the same way render_tile_layer
+    // does (page select, scrolling, code+colour decode) but emits one
+    // textured-rectangle per visible tile straight into the attached
+    // framebuffer at (x_offset, y_offset). Requires the renderer to have
+    // attached the display and to pass its per-palette TLUT cache
+    // (128 contiguous 16-entry RGBA5551 TLUTs, slot stride 8 entries —
+    // matches the engine's tile-palette layout).
+    void render_rdp_tile_layer(const uint16_t* tile_tlut,
+                               uint8_t page_index, uint8_t priority_draw,
+                               int x_offset, int y_offset);
+
 private:
     int16_t x_clamp;
     
@@ -36,8 +47,12 @@ private:
     uint16_t s16_width_noscale;
 
     static const int TILES_LENGTH = 0x10000;
-    uint32_t tiles[TILES_LENGTH];        // Converted tiles
-    uint32_t tiles_backup[TILES_LENGTH]; // Converted tiles (backup without patch)
+    // Aligned to 8 bytes so rdpq DMAs can read tile rows directly from this
+    // array as a CI4 atlas — each tile_idx*8 uint32_t row holds 8 nibbles
+    // (leftmost pixel in the high nibble of byte 0), which is the exact
+    // CI4 byte layout the RDP expects on a big-endian N64.
+    alignas(8) uint32_t tiles[TILES_LENGTH];        // Converted tiles
+    alignas(8) uint32_t tiles_backup[TILES_LENGTH]; // Converted tiles (backup without patch)
 
     uint16_t page[4];
     uint16_t scroll_x[4];

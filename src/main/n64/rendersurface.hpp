@@ -59,6 +59,19 @@ private:
     // format). Extended slots hold shadow colors at +S16_PALETTE_ENTRIES.
     uint16_t rgb[S16_PALETTE_ENTRIES * 2];
 
+    // Tile-palette TLUT cache: 128 contiguous 16-entry RGBA5551 TLUTs that
+    // mirror the engine tile palette layout. Engine palette entry E is read
+    // by the tile renderer as (nTilePalette<<3) + c where c in [0..15], so
+    // each slot i covers entries [i*8 .. i*8+15] (overlapping slots share 8
+    // entries). Slot i is a contiguous 16-entry RGBA5551 block at offset
+    // i*16, with entry 0 forced to 0 (alpha LSB clear) — the RDP alpha-
+    // compare composite then drops CI4 pixval=0 to transparent, matching
+    // the CPU mask path's `if (c0) buf[0] = nPalette + c0;`.
+    // 8-byte aligned so rdpq_tex_upload_tlut can DMA from any slot directly.
+    static constexpr int TILE_TLUT_SLOTS = 128;
+    static constexpr int TILE_TLUT_SLOT_SIZE = 16;
+    alignas(8) uint16_t tile_tlut[TILE_TLUT_SLOTS * TILE_TLUT_SLOT_SIZE];
+
     // Source S16 buffer dimensions (eg. 320x224).
     int src_width, src_height;
     int video_mode;

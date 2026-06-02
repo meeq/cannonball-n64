@@ -1,4 +1,5 @@
 #include <cstring> // memcpy
+#include <libdragon.h>
 #include "globals.hpp"
 #include "romloader.hpp"
 #include "hwvideo/hwtiles.hpp"
@@ -196,6 +197,87 @@ void hwtiles::render_all_tiles(uint16_t* buf)
         {
             (this->*render8x8_tile_mask)(buf, Code, x, y, Colour, 3, 0, TILEMAP_COLOUR_OFFSET);
             Code++;
+        }
+    }
+}
+
+// RDP path: emit one textured-rectangle per visible tile straight into the
+// attached framebuffer at (x_offset, y_offset). Mirrors render_tile_layer's
+// page/scroll/priority/code decode; per-tile RDP cost is:
+//   1) rdpq_tex_upload_tlut — 16 RGBA5551 entries from tile_tlut
+//   2) rdpq_tex_blit         — DMA the 8x8 CI4 tile from tiles[] and draw
+// tiles[] is already 8-byte aligned and in CI4 row order (see header), so
+// it doubles as the source atlas. Caller is responsible for setting the
+// render mode (standard + TLUT_RGBA16 + alpha compare) — done once here so
+// the per-tile loop only submits tile draws.
+void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
+                                    uint8_t page_index, uint8_t priority_draw,
+                                    int x_offset, int y_offset)
+{
+    rdpq_set_mode_standard();
+    rdpq_mode_tlut(TLUT_RGBA16);
+    rdpq_mode_alphacompare(1);
+
+    const uint16_t EffPage = page[page_index];
+    uint16_t xScroll = scroll_x[page_index];
+    uint16_t yScroll = scroll_y[page_index];
+
+    if ((xScroll & 0x8000) != 0)
+        xScroll = (text_ram[0xf80 + (0x40 * page_index) + 0] << 8)
+                | text_ram[0xf80 + (0x40 * page_index) + 1];
+    if ((yScroll & 0x8000) != 0)
+        yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
+                | text_ram[0xf16 + (0x40 * page_index) + 1];
+
+    for (int my = 0; my < 64; my++)
+    {
+        for (int mx = 0; mx < 128; mx++)
+        {
+            uint16_t ActPage = 0;
+            if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
+            if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
+            if (my >= 32 && mx < 64)   ActPage = (EffPage >>  8) & 0x0f;
+            if (my >= 32 && mx >= 64)  ActPage = (EffPage >> 12) & 0x0f;
+
+            const uint32_t TileIndex =
+                64 * 32 * 2 * ActPage + ((2 * 64 * my) & 0xfff) + ((2 * mx) & 0x7f);
+            const uint16_t Data =
+                (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
+
+            if (((Data >> 15) & 1) != priority_draw)
+                continue;
+
+            uint32_t Code = Data & 0x1fff;
+            Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
+            Code &= (NUM_TILES - 1);
+            if (Code == 0)
+                continue;
+
+            const int Colour = (Data >> 6) & 0x7f;
+
+            int x = 8 * mx;
+            int y = 8 * my;
+            x -= (x_clamp - xScroll) & 0x3ff;
+            if (x < -x_clamp) x += 1024;
+            y -= yScroll & 0x1ff;
+            if (y < -288) y += 512;
+
+            // Match the CPU path's visibility check: keep tiles whose 8x8
+            // box overlaps the S16 viewport. RDP's scissor handles partial-
+            // edge tiles for us, so no separate clip path is needed.
+            if (x <= -8 || x >= s16_width_noscale) continue;
+            if (y <= -8 || y >= S16_HEIGHT)        continue;
+
+            // CI4 tile descriptor: 8x8, 4 bytes/row, leftmost pixel in the
+            // high nibble. tiles[Code*8] is the first row of this tile.
+            surface_t tile_surf = surface_make_linear(
+                (void*)&tiles[Code * 8], FMT_CI4, 8, 8);
+
+            // Refresh the 16-entry TLUT for this tile palette into TMEM
+            // before drawing. The cache writeback that gates this call is
+            // done by the renderer once per frame, not per tile.
+            rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
+            rdpq_tex_blit(&tile_surf, x + x_offset, y + y_offset, NULL);
         }
     }
 }

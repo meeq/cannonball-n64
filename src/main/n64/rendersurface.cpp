@@ -11,7 +11,10 @@
 
 #include "rendersurface.hpp"
 #include "platform.hpp"
+#include "video.hpp"
 #include "hwvideo/hwroad.hpp"
+#include "hwvideo/hwtiles.hpp"
+#include "frontend/config.hpp"
 #include <cmath>
 #include <cstring>
 #include <malloc.h>
@@ -27,7 +30,7 @@ namespace n64_profile
 }
 
 Render::Render()
-    : rgb{}, src_width(0), src_height(0), video_mode(0),
+    : rgb{}, tile_tlut{}, src_width(0), src_height(0), video_mode(0),
       scanlines(0), scale(1), shadow_multi(0),
       scratch_pixels(nullptr), scratch_surface{}, y_offset(0),
       fps_font(nullptr), initialized(false)
@@ -67,7 +70,8 @@ void Render::convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1
         return;
     }
 
-    rgb[adr] = pack_rgba5551(r1, g1, b1);
+    uint16_t new_color = pack_rgba5551(r1, g1, b1);
+    rgb[adr] = new_color;
 
     // Shadow color: scale by shadow_multi/255. Stored in the upper half of
     // the table to match the original SDL backend's layout (osprites looks
@@ -76,6 +80,29 @@ void Render::convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1
     uint32_t sg = (g1 * shadow_multi) / 255;
     uint32_t sb = (b1 * shadow_multi) / 255;
     rgb[adr + S16_PALETTE_ENTRIES] = pack_rgba5551(sr, sg, sb);
+
+    // Mirror into tile_tlut. Each tile slot i covers engine entries
+    // [i*8 .. i*8+15] (stride 8, slot size 16), so adr lies in slot
+    // i_hi = adr>>3 (at entry adr&7) and also in i_lo = i_hi-1 (at
+    // entry 8+(adr&7)), when those slots are in range. Slot entry 0 is
+    // always 0 so the alpha-compare composite drops CI4 pixval=0.
+    constexpr uint32_t MAX_TILE_PAL = TILE_TLUT_SLOTS * 8;  // = 1024
+    if (adr < MAX_TILE_PAL + 8)
+    {
+        int slot_hi = (int)(adr >> 3);
+        int entry_hi = (int)(adr & 7);
+        if (slot_hi < TILE_TLUT_SLOTS)
+        {
+            tile_tlut[slot_hi * TILE_TLUT_SLOT_SIZE + entry_hi] =
+                (entry_hi == 0) ? 0 : new_color;
+        }
+        int slot_lo = slot_hi - 1;
+        if (slot_lo >= 0)
+        {
+            // entry_in_slot = adr - slot_lo*8 = adr - (slot_hi-1)*8 = 8 + entry_hi
+            tile_tlut[slot_lo * TILE_TLUT_SLOT_SIZE + 8 + entry_hi] = new_color;
+        }
+    }
 }
 
 void Render::set_shadow_intensity(float f)
@@ -210,6 +237,29 @@ bool Render::finalize_frame()
     n64_profile::sub_us[n64_profile::SUB_ROAD_BG] =
         (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
          + (uint32_t)(rbg_t1 - rbg_t0)) >> 3;
+
+    // Tile background + foreground: writeback the TLUT cache (the engine
+    // updates it from cached convert_palette writes) so the RDP TLUT load
+    // DMAs see fresh bytes, then walk both tilemap pages with RDP textured
+    // rectangles. Order matters — page 1 (bg) under page 0 (fg) — and both
+    // sit under the engine composite, which still owns road_fg/sprites/text
+    // via pixels[]. priority=1 tiles stay on the CPU (drawn in front of
+    // sprites at engine layer-5).
+    data_cache_hit_writeback(tile_tlut, sizeof(tile_tlut));
+
+    uint64_t tbg_t0 = get_ticks_us();
+    video.tile_layer->render_rdp_tile_layer(tile_tlut, 1, 0, x, y_offset);
+    uint64_t tbg_t1 = get_ticks_us();
+    n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
+        (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
+         + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
+
+    uint64_t tfg_t0 = get_ticks_us();
+    video.tile_layer->render_rdp_tile_layer(tile_tlut, 0, 0, x, y_offset);
+    uint64_t tfg_t1 = get_ticks_us();
+    n64_profile::sub_us[n64_profile::SUB_TILE_FG] =
+        (n64_profile::sub_us[n64_profile::SUB_TILE_FG] * 7
+         + (uint32_t)(tfg_t1 - tfg_t0)) >> 3;
 
     // Composite the palette-expanded engine surface on top. Standard mode +
     // alpha compare keeps RGBA5551 alpha=0 texels (palette index 0) from
