@@ -14,6 +14,7 @@
 #include "video.hpp"
 #include "hwvideo/hwroad.hpp"
 #include "hwvideo/hwtiles.hpp"
+#include "hwvideo/hwsprites.hpp"
 #include "frontend/config.hpp"
 #include <cmath>
 #include <cstring>
@@ -30,8 +31,8 @@ namespace n64_profile
 }
 
 Render::Render()
-    : rgb{}, tile_tlut{}, src_width(0), src_height(0), video_mode(0),
-      scanlines(0), scale(1), shadow_multi(0),
+    : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
+      video_mode(0), scanlines(0), scale(1), shadow_multi(0),
       scratch_pixels(nullptr), scratch_surface{}, y_offset(0),
       fps_font(nullptr), initialized(false)
 {
@@ -102,6 +103,21 @@ void Render::convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1
             // entry_in_slot = adr - slot_lo*8 = adr - (slot_hi-1)*8 = 8 + entry_hi
             tile_tlut[slot_lo * TILE_TLUT_SLOT_SIZE + 8 + entry_hi] = new_color;
         }
+    }
+
+    // Mirror into sprite_tlut. Sprite renderer reads (0x800 + color*16 + pix),
+    // so slots are non-overlapping (stride 16, slot size 16) covering engine
+    // indices [0x800 .. 0x1800). Slot entry 0 is forced to 0 so the alpha-
+    // compare composite drops CI4 pixval=0 to transparent.
+    constexpr uint32_t SPRITE_PAL_END =
+        SPRITE_PAL_BASE + SPRITE_TLUT_SLOTS * SPRITE_TLUT_SLOT_SIZE;
+    if (adr >= SPRITE_PAL_BASE && adr < SPRITE_PAL_END)
+    {
+        const uint32_t rel = adr - SPRITE_PAL_BASE;
+        const int slot  = (int)(rel >> 4);
+        const int entry = (int)(rel & 15);
+        sprite_tlut[slot * SPRITE_TLUT_SLOT_SIZE + entry] =
+            (entry == 0) ? 0 : new_color;
     }
 }
 
@@ -229,6 +245,15 @@ bool Render::finalize_frame()
 
     const int x = (disp->width - src_width) / 2;
 
+    // Clip all subsequent RDP work to the 320x224 game viewport so partial-
+    // edge tiles/sprites don't bleed into the top/bottom letterbox. The CPU
+    // tile renderer clips per-pixel against the 320x224 pixels[] buffer; the
+    // RDP path emits whole 8x8 textured rectangles, so a tile at engine
+    // y=223 would otherwise extend 7 px into the bottom letterbox (visible
+    // as a cyan strip going up the first hill — that's arcade "bezel-hidden"
+    // data leaking past the visible area).
+    rdpq_set_scissor(x, y_offset, x + src_width, y_offset + src_height);
+
     // Road background: emit one rdpq_fill_rectangle per same-color band.
     // Configures fill mode internally; safe to call before the composite blit.
     uint64_t rbg_t0 = get_ticks_us();
@@ -263,10 +288,23 @@ bool Render::finalize_frame()
 
     // Composite the palette-expanded engine surface on top. Standard mode +
     // alpha compare keeps RGBA5551 alpha=0 texels (palette index 0) from
-    // overwriting the road background underneath.
+    // overwriting the road background underneath. pixels[] holds road_fg
+    // plus CPU shadow sprites — the shadow read-modify-write has already
+    // happened during prepare_frame.
     rdpq_set_mode_standard();
     rdpq_mode_alphacompare(1);
     rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
+
+    // Sprite layer via RDP: opaque sprites are one blit each, shadow-flagged
+    // sprites get a darken pass + body pass. Lives above the composite (so it
+    // occludes road_fg) and below text.
+    data_cache_hit_writeback(sprite_tlut, sizeof(sprite_tlut));
+    uint64_t spr_t0 = get_ticks_us();
+    video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
+    uint64_t spr_t1 = get_ticks_us();
+    n64_profile::sub_us[n64_profile::SUB_SPRITE] =
+        (n64_profile::sub_us[n64_profile::SUB_SPRITE] * 7
+         + (uint32_t)(spr_t1 - spr_t0)) >> 3;
 
     // Text layer sits on top of everything. Uses the same TLUT cache as the
     // tile layers (Colour is 3-bit here, only slots 0..7 are touched).
@@ -279,13 +317,13 @@ bool Render::finalize_frame()
 
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
     // own mode setup, so the preceding copy-mode blit is fine to leave as-is.
-    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 12,
+    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 20,
                      "FPS %4.1f ras %5lu pal %4lu wait %5lu",
                      display_get_fps(),
                      (unsigned long)n64_profile::prepare_us,
                      (unsigned long)n64_profile::palette_us,
                      (unsigned long)n64_profile::wait_us);
-    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 22,
+    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 30,
                      "rbg%5lu tbg%5lu tfg%5lu rfg%5lu spr%5lu txt%5lu",
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_BG],

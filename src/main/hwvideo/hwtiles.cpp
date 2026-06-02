@@ -203,13 +203,18 @@ void hwtiles::render_all_tiles(uint16_t* buf)
 
 // RDP path: emit one textured-rectangle per visible tile straight into the
 // attached framebuffer at (x_offset, y_offset). Mirrors render_tile_layer's
-// page/scroll/priority/code decode; per-tile RDP cost is:
-//   1) rdpq_tex_upload_tlut — 16 RGBA5551 entries from tile_tlut
-//   2) rdpq_tex_blit         — DMA the 8x8 CI4 tile from tiles[] and draw
-// tiles[] is already 8-byte aligned and in CI4 row order (see header), so
-// it doubles as the source atlas. Caller is responsible for setting the
-// render mode (standard + TLUT_RGBA16 + alpha compare) — done once here so
-// the per-tile loop only submits tile draws.
+// page/scroll/priority/code decode.
+//
+// Bypasses rdpq_tex_blit (which emits ~5 RDP commands per tile via the
+// tex_loader strip machinery). Instead we set up two tile descriptors once
+// per layer and emit only 3 commands per tile:
+//   TILE0 (draw): CI4 view of TMEM[0..63], pitch=8, palette slot 0
+//   TILE1 (load): I8 view of the same TMEM (RDP's 4bpp loads must go
+//                 through an 8bpp view — same trick libdragon's
+//                 texload_tile_4bpp uses internally)
+// Per-tile sequence: set_texture_image_raw + load_tile(TILE1) +
+// texture_rectangle(TILE0). TLUT uploads (which rebind TILE7) don't touch
+// TILE0/TILE1, so the per-layer setup survives the whole loop.
 void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
                                     uint8_t page_index, uint8_t priority_draw,
                                     int x_offset, int y_offset)
@@ -217,6 +222,9 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     rdpq_set_mode_standard();
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
+    rdpq_set_tile(TILE0, FMT_CI4, 0, 8, NULL);
+    rdpq_set_tile_size(TILE0, 0, 0, 8, 8);
+    rdpq_set_tile(TILE1, FMT_I8,  0, 8, NULL);
 
     const uint16_t EffPage = page[page_index];
     uint16_t xScroll = scroll_x[page_index];
@@ -229,8 +237,32 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
         yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
                 | text_ram[0xf16 + (0x40 * page_index) + 1];
 
+    // Precompute the visible mx/my window. The CPU path tested every tile
+    // in the 64x128 grid; only ~40x28 are actually on screen, so we narrow
+    // the outer loops to just the visible tiles. The x/y wrap math below
+    // mirrors what the per-tile path does inside the loop.
+    const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
+    const int oy = yScroll & 0x1ff;             // 0..511
+
+    // y(my) = 8*my - oy, with `+= 512` if < -288. Visible range is
+    // -7..S16_HEIGHT-1. Each my produces exactly one y; just walk all 64
+    // rows but bail fast — y math is cheap and 64 iters is negligible.
+    // (Doing a full closed-form solve here is fragile for the wrap edge.)
+
+    // x(mx) similarly. We loop all 128 mx values inside the row loop but
+    // *early-exit* on tile_ram priority/code misses cheaply, and skip the
+    // expensive rdpq calls on out-of-window tiles.
+
+    // TLUT-upload cache: adjacent tiles often share a palette (sky bands,
+    // text strips). Skipping redundant 3-cmd uploads is the main win here.
+    int last_colour = -1;
+
     for (int my = 0; my < 64; my++)
     {
+        int y = 8 * my - oy;
+        if (y < -288) y += 512;
+        if (y <= -8 || y >= S16_HEIGHT) continue;
+
         for (int mx = 0; mx < 128; mx++)
         {
             uint16_t ActPage = 0;
@@ -253,31 +285,32 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
             if (Code == 0)
                 continue;
 
+            int x = 8 * mx - ox;
+            if (x < -x_clamp) x += 1024;
+            if (x <= -8 || x >= s16_width_noscale) continue;
+
             const int Colour = (Data >> 6) & 0x7f;
 
-            int x = 8 * mx;
-            int y = 8 * my;
-            x -= (x_clamp - xScroll) & 0x3ff;
-            if (x < -x_clamp) x += 1024;
-            y -= yScroll & 0x1ff;
-            if (y < -288) y += 512;
-
-            // Match the CPU path's visibility check: keep tiles whose 8x8
-            // box overlaps the S16 viewport. RDP's scissor handles partial-
-            // edge tiles for us, so no separate clip path is needed.
-            if (x <= -8 || x >= s16_width_noscale) continue;
-            if (y <= -8 || y >= S16_HEIGHT)        continue;
-
-            // CI4 tile descriptor: 8x8, 4 bytes/row, leftmost pixel in the
-            // high nibble. tiles[Code*8] is the first row of this tile.
-            surface_t tile_surf = surface_make_linear(
-                (void*)&tiles[Code * 8], FMT_CI4, 8, 8);
-
             // Refresh the 16-entry TLUT for this tile palette into TMEM
-            // before drawing. The cache writeback that gates this call is
-            // done by the renderer once per frame, not per tile.
-            rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
-            rdpq_tex_blit(&tile_surf, x + x_offset, y + y_offset, NULL);
+            // before drawing — only when the palette actually changes from
+            // the prior tile. The frame-level cache writeback that gates
+            // tile_tlut[] is done once per frame by the renderer.
+            if (Colour != last_colour)
+            {
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
+                last_colour = Colour;
+            }
+
+            // Raw 3-command tile blit. 8x8 CI4 = 32 bytes contiguous in
+            // tiles[Code*8]; we view it as 4x8 I8 to satisfy RDP's 4bpp
+            // load constraint, then draw via the CI4 tile descriptor.
+            rdpq_set_texture_image_raw(
+                0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
+            rdpq_load_tile(TILE1, 0, 0, 4, 8);
+            rdpq_texture_rectangle(TILE0,
+                x + x_offset,     y + y_offset,
+                x + x_offset + 8, y + y_offset + 8,
+                0, 0);
         }
     }
 }
@@ -294,6 +327,13 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     rdpq_set_mode_standard();
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
+    rdpq_set_tile(TILE0, FMT_CI4, 0, 8, NULL);
+    rdpq_set_tile_size(TILE0, 0, 0, 8, 8);
+    rdpq_set_tile(TILE1, FMT_I8,  0, 8, NULL);
+
+    // TLUT-upload cache: text rows often share a palette across long runs
+    // (HUD strings are typically one or two colors).
+    int last_colour = -1;
 
     uint32_t TileIndex = 0;
     for (int my = 0; my < 32; my++)
@@ -322,13 +362,18 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
             if (x <= -8 || x >= s16_width_noscale) continue;
             if (y < 0  || y >= S16_HEIGHT)         continue;
 
-            surface_t tile_surf = surface_make_linear(
-                (void*)&tiles[Code * 8], FMT_CI4, 8, 8);
+            if (Colour != last_colour)
+            {
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
+                last_colour = Colour;
+            }
 
-            rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
-            rdpq_tex_blit(&tile_surf,
-                          x + x_offset + config.s16_x_off,
-                          y + y_offset, NULL);
+            const int dx = x + x_offset + config.s16_x_off;
+            const int dy = y + y_offset;
+            rdpq_set_texture_image_raw(
+                0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
+            rdpq_load_tile(TILE1, 0, 0, 4, 8);
+            rdpq_texture_rectangle(TILE0, dx, dy, dx + 8, dy + 8, 0, 0);
         }
     }
 }

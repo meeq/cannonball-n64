@@ -42,7 +42,14 @@ namespace
 {
     void boot_subsystems()
     {
-        debug_init_isviewer();
+        debug_init_usblog();
+        debug_init_emulog();
+
+        // Direct emux probe — bypass the debug_writer indirection. If ares
+        // (or any emux-aware emulator) is running, this will appear in the
+        // console even if debug_init_emulog() failed to register a writer.
+        emux_log("cannonball: boot via emux_log\n");
+        debugf("cannonball: boot via debugf\n");
         joypad_init();
         timer_init();
 

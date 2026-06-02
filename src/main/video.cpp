@@ -173,19 +173,14 @@ void Video::prepare_frame()
         return;
 
     // OutRun Hardware Video Emulation. road_bg, both tile layers (bg/fg at
-    // priority 0), and the text layer are all drawn via RDP in
-    // finalize_frame, so this pass only covers what still writes into
-    // pixels[]: road_fg and sprites (with shadow read-modify-write on
-    // existing pixels).
+    // priority 0), all pri=8 sprites and the text layer are drawn via RDP in
+    // finalize_frame, so this CPU pass only covers road_fg into pixels[].
     tile_layer->update_tile_values();
 
     N64_PROFILE_PHASE_BEGIN();
     if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
         (hwroad.*hwroad.render_foreground)(pixels);
     N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
-
-    sprite_layer->render(8);
-    N64_PROFILE_PHASE_END(n64_profile::SUB_SPRITE);
 }
 
 void Video::render_frame()

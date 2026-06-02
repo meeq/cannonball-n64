@@ -72,6 +72,17 @@ private:
     static constexpr int TILE_TLUT_SLOT_SIZE = 16;
     alignas(8) uint16_t tile_tlut[TILE_TLUT_SLOTS * TILE_TLUT_SLOT_SIZE];
 
+    // Sprite-palette TLUT cache. Sprite renderer reads engine palette as
+    // 0x800 + (color<<4) + pix, color in [0..127], pix in [0..15] — so slots
+    // are non-overlapping (stride 16, slot size 16) covering engine indices
+    // [0x800 .. 0x1800). Entry 0 of each slot is forced to 0 so the RDP
+    // alpha-compare composite drops CI4 pixval=0 to transparent (the atlas
+    // extractor pads EOR-terminated short rows with 0 as well).
+    static constexpr int SPRITE_TLUT_SLOTS = 128;
+    static constexpr int SPRITE_TLUT_SLOT_SIZE = 16;
+    static constexpr uint32_t SPRITE_PAL_BASE = 0x800;
+    alignas(8) uint16_t sprite_tlut[SPRITE_TLUT_SLOTS * SPRITE_TLUT_SLOT_SIZE];
+
     // Source S16 buffer dimensions (eg. 320x224).
     int src_width, src_height;
     int video_mode;
