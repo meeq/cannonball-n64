@@ -300,12 +300,19 @@ void HWRoad::render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_
 }
 
 // Foreground: Render From ROM
-void HWRoad::render_foreground_lores(uint16_t* pixels)
+//
+// Writes RGBA5551 straight into the engine scratch surface. The original
+// path emitted palette indices into a uint16_t[] buffer that a separate pass
+// then expanded via the palette LUT — that expand pass cost ~7 ms/frame on
+// R4300 and the streaming src→dst writes thrashed the 8 KB D-cache. Resolving
+// the 12 used color_table slots into RGBA5551 once per scanline lets the
+// inner loop do a single uncached store per pixel with no follow-up pass.
+void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut)
 {
     int x, y;
     uint16_t* roadram = ramBuff;
-    
-    for (y = 0; y < S16_HEIGHT; y++) 
+
+    for (y = 0; y < S16_HEIGHT; y++)
     {
         uint16_t color_table[32];
 
@@ -322,7 +329,7 @@ void HWRoad::render_foreground_lores(uint16_t* pixels)
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
             continue;
 
-        uint16_t* pPixel = pixels + (y * config.s16_width);
+        uint16_t* pPixel = dst_rgba + (y * config.s16_width);
         int32_t hpos0, hpos1, color0, color1;
         int32_t control = road_control & 3;
 
@@ -339,21 +346,21 @@ void HWRoad::render_foreground_lores(uint16_t* pixels)
         hpos1  = roadram[0x400 + (((road_control & 4) != 0) ? (0x100 + y) : (data1 & 0x1ff))] & 0xfff;
         color1 = roadram[0x600 + (((road_control & 4) != 0) ? (0x100 + y) : (data1 & 0x1ff))];
 
-        // determine the 5 colors for road 0
-        color_table[0x00] = color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1);
-        color_table[0x01] = color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1);
-        color_table[0x02] = color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1);
+        // determine the 5 colors for road 0 — resolve straight to RGBA5551
+        color_table[0x00] = rgb_lut[color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1)];
+        color_table[0x01] = rgb_lut[color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1)];
+        color_table[0x02] = rgb_lut[color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1)];
         bgcolor = (color0 >> 8) & 0xf;
-        color_table[0x03] = ((data0 & 0x200) != 0) ? color_table[0x00] : (color_offset2 ^ 0x00 ^ bgcolor);
-        color_table[0x07] = color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1);
+        color_table[0x03] = ((data0 & 0x200) != 0) ? color_table[0x00] : rgb_lut[color_offset2 ^ 0x00 ^ bgcolor];
+        color_table[0x07] = rgb_lut[color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1)];
 
-        // determine the 5 colors for road 1
-        color_table[0x10] = color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1);
-        color_table[0x11] = color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1);
-        color_table[0x12] = color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1);
+        // determine the 5 colors for road 1 — resolve straight to RGBA5551
+        color_table[0x10] = rgb_lut[color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1)];
+        color_table[0x11] = rgb_lut[color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1)];
+        color_table[0x12] = rgb_lut[color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1)];
         bgcolor = (color1 >> 8) & 0xf;
-        color_table[0x13] = ((data1 & 0x200) != 0) ? color_table[0x10] : (color_offset2 ^ 0x10 ^ bgcolor);
-        color_table[0x17] = color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1);
+        color_table[0x13] = ((data1 & 0x200) != 0) ? color_table[0x10] : rgb_lut[color_offset2 ^ 0x10 ^ bgcolor];
+        color_table[0x17] = rgb_lut[color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1)];
 
         // Shift road dependent on whether we are in widescreen mode or not
         uint16_t s16_x = 0x5f8 + config.s16_x_off;
@@ -426,7 +433,7 @@ void HWRoad::render_foreground_lores(uint16_t* pixels)
 // Render Road Foreground - High Resolution Version
 // Interpolates previous scanline with next.
 // ------------------------------------------------------------------------------------------------
-void HWRoad::render_foreground_hires(uint16_t* pixels)
+void HWRoad::render_foreground_hires(uint16_t* dst_rgba, const uint16_t* rgb_lut)
 {
     int x, y, yy;
     uint16_t* roadram = ramBuff;
@@ -500,22 +507,22 @@ void HWRoad::render_foreground_hires(uint16_t* pixels)
         {            
             color0 = roadram[0x600 + (((road_control & 4) != 0) ? yy :           (data0 & 0x1ff))];
             color1 = roadram[0x600 + (((road_control & 4) != 0) ? (0x100 + yy) : (data1 & 0x1ff))];
-        
-            // determine the 5 colors for road 0
-            color_table[0x00] = color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1);
-            color_table[0x01] = color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1);
-            color_table[0x02] = color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1);
-            bgcolor = (color0 >> 8) & 0xf;
-            color_table[0x03] = ((data0 & 0x200) != 0) ? color_table[0x00] : (color_offset2 ^ 0x00 ^ bgcolor);
-            color_table[0x07] = color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1);
 
-            // determine the 5 colors for road 1
-            color_table[0x10] = color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1);
-            color_table[0x11] = color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1);
-            color_table[0x12] = color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1);
+            // determine the 5 colors for road 0 — resolve straight to RGBA5551
+            color_table[0x00] = rgb_lut[color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1)];
+            color_table[0x01] = rgb_lut[color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1)];
+            color_table[0x02] = rgb_lut[color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1)];
+            bgcolor = (color0 >> 8) & 0xf;
+            color_table[0x03] = ((data0 & 0x200) != 0) ? color_table[0x00] : rgb_lut[color_offset2 ^ 0x00 ^ bgcolor];
+            color_table[0x07] = rgb_lut[color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1)];
+
+            // determine the 5 colors for road 1 — resolve straight to RGBA5551
+            color_table[0x10] = rgb_lut[color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1)];
+            color_table[0x11] = rgb_lut[color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1)];
+            color_table[0x12] = rgb_lut[color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1)];
             bgcolor = (color1 >> 8) & 0xf;
-            color_table[0x13] = ((data1 & 0x200) != 0) ? color_table[0x10] : (color_offset2 ^ 0x10 ^ bgcolor);
-            color_table[0x17] = color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1);        
+            color_table[0x13] = ((data1 & 0x200) != 0) ? color_table[0x10] : rgb_lut[color_offset2 ^ 0x10 ^ bgcolor];
+            color_table[0x17] = rgb_lut[color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1)];
         }
         
         if (src0 == NULL)
@@ -525,7 +532,7 @@ void HWRoad::render_foreground_hires(uint16_t* pixels)
 
         // Shift road dependent on whether we are in widescreen mode or not
         uint16_t s16_x = 0x5f8 + config.s16_x_off;
-        uint16_t* const pPixel = pixels + (y * config.s16_width);
+        uint16_t* const pPixel = dst_rgba + (y * config.s16_width);
 
         // draw the road
         switch (road_control & 3)

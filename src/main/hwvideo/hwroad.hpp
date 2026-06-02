@@ -14,7 +14,12 @@ public:
     void write32(uint32_t* adr, const uint32_t data);
     uint16_t read_road_control();
     void write_road_control(const uint8_t);
-    void (HWRoad::*render_foreground)(uint16_t*);
+    // Per-pixel foreground rasteriser. Writes RGBA5551 directly into the
+    // engine scratch surface (320x224, uint16_t per pixel) using the supplied
+    // engine→RGBA5551 palette LUT. Pixels left untouched stay at whatever the
+    // caller's start_frame() zeroed them to — alpha=0, transparent under the
+    // composite blit so the underlying road_bg / tile layers show through.
+    void (HWRoad::*render_foreground)(uint16_t* dst_rgba, const uint16_t* rgb_lut);
 
     // RDP road background — looks up which scanlines are solid-filled per the
     // S16 road_control / road RAM contents and emits batched rdpq fill rects
@@ -40,8 +45,8 @@ private:
     uint16_t ramBuff[ROAD_RAM_SIZE / 2];
 
     void decode_road(const uint8_t*);
-    void render_foreground_lores(uint16_t*);
-    void render_foreground_hires(uint16_t*);
+    void render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut);
+    void render_foreground_hires(uint16_t* dst_rgba, const uint16_t* rgb_lut);
 };
 
 extern HWRoad hwroad;

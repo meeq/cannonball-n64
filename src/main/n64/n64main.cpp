@@ -186,9 +186,9 @@ int main(int /*argc*/, char* /*argv*/[])
         // The rasterizers (hwroad/hwtiles/hwsprites) are by far the most
         // expensive CPU work each frame. With config.video.fps = 1 tick_frame
         // alternates 1/0, and engine state only advances on tick frames — so
-        // pixels[] is bit-identical on the off-frames. Skip re-rasterizing in
-        // that case; render_frame() still runs every loop so display_get()
-        // continues to pace us.
+        // the scratch surface is bit-identical on the off-frames. Skip the
+        // CPU prepare pass in that case; render_frame() still runs every
+        // loop so display_get() continues to pace us.
         if (tick_frame)
             video.prepare_frame();
         uint64_t t2 = get_ticks_us();

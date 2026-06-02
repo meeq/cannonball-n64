@@ -18,9 +18,8 @@
 namespace n64_profile
 {
     extern uint32_t prepare_us;   // total prepare_frame
-    extern uint32_t render_us;    // palette expand + RDP blit + present
+    extern uint32_t render_us;    // RDP blit + present
     extern uint32_t tick_us;      // engine tick (excludes rasterize)
-    extern uint32_t palette_us;   // just the palette-expand loop + writeback
     extern uint32_t wait_us;      // display_get() vsync block
 
     enum {
@@ -46,13 +45,24 @@ public:
     void disable();
     bool start_frame();
     bool finalize_frame();
-    void draw_frame(uint16_t* pixels);
 
     // Palette plumbing — Video::refresh_palette() calls convert_palette()
     // when S16 palette RAM changes; set_shadow_intensity() scales the shadow
     // half of the LUT at init.
     void convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1);
     void set_shadow_intensity(float f);
+
+    // Engine scratch surface — RGBA5551, sized src_width × src_height. Held
+    // through KSEG1 so CPU writes go straight to RDRAM via the store buffer
+    // (no cache-line allocate, no writeback), then DMA-blit'd onto the
+    // framebuffer in finalize_frame. hwroad::render_foreground writes here.
+    uint16_t* scratch_uc() const { return scratch_uc_ptr; }
+
+    // RGBA5551 engine palette LUT (S16_PALETTE_ENTRIES * 2 entries). Lower
+    // half is normal colors, upper half is shadow-darkened. Indexed by engine
+    // palette entry; entry 0 is encoded as zero so the alpha-compare composite
+    // treats it as transparent.
+    const uint16_t* rgb_lut() const { return rgb; }
 
 private:
     // Palette Lookup — held as RGBA5551 (libdragon's DEPTH_16_BPP framebuffer
@@ -92,9 +102,12 @@ private:
     // Shadow intensity multiplier (0..255).
     int shadow_multi;
 
-    // Scratch RGBA5551 surface that draw_frame() populates and
-    // finalize_frame() blits.
+    // Scratch RGBA5551 surface populated by hwroad foreground (and possibly
+    // future CPU layers) and blit'd onto the framebuffer in finalize_frame.
+    // scratch_pixels is the cached allocation; scratch_uc_ptr is its KSEG1
+    // alias used by all CPU writers — see scratch_uc() accessor above.
     uint16_t*  scratch_pixels;
+    uint16_t*  scratch_uc_ptr;
     surface_t  scratch_surface;
     int        y_offset;          // letterbox top (pixels)
 

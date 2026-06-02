@@ -14,7 +14,6 @@
 #include "frontend/config.hpp"
 #include "engine/oroad.hpp"
 #include "n64/rendersurface.hpp"
-#include <cstring>
 #include <libdragon.h>
 
 // Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
@@ -33,7 +32,6 @@ Video video;
 Video::Video(void)
 {
     renderer     = new Render();
-    pixels       = NULL;
     sprite_layer = new hwsprites();
     tile_layer   = new hwtiles();
 
@@ -45,7 +43,6 @@ Video::~Video(void)
 {
     delete sprite_layer;
     delete tile_layer;
-    if (pixels) delete[] pixels;
     renderer->disable();
     delete renderer;
 }
@@ -54,10 +51,6 @@ int Video::init(Roms* roms, video_settings_t* settings)
 {
     if (!set_video_mode(settings))
         return 0;
-
-    // Internal pixel array. The size of this is always constant
-    if (pixels) delete[] pixels;
-    pixels = new uint16_t[config.s16_width * config.s16_height];
 
     // Convert S16 tiles to a more useable format
     tile_layer->init(roms->tiles.rom, config.video.hires != 0);
@@ -159,46 +152,33 @@ void Video::set_shadow_intensity(float f)
 
 void Video::prepare_frame()
 {
+    // start_frame() zeroes the engine scratch surface through KSEG1 — much
+    // cheaper than the old cached pass since stores skip the read-for-
+    // ownership + writeback round-trip. Untouched scratch pixels stay at
+    // alpha=0 and get dropped by the alpha-compare composite blit in
+    // finalize_frame, so anything we don't overwrite reveals the RDP layers
+    // (road_bg / tile_bg / tile_fg) underneath.
     if (!renderer->start_frame())
         return;
-
-    // pixels[] is the palette-indexed scratch the CPU rasterizers paint into.
-    // Index 0 is treated as transparent by the composite blit, so clearing
-    // here gives tile/sprite/text a clean transparent canvas to write into —
-    // and any unwritten region (notably the road area, now drawn directly to
-    // the framebuffer by the RDP) stays transparent and shows through.
-    //
-    // Clearing 143 KB through the 8 KB D-cache costs ~8.8 ms/frame — each
-    // missing line forces a read-for-ownership before the store, then later
-    // gets written back when displaced. We zero through KSEG1 instead so the
-    // stores go straight to RDRAM via the store buffer (no allocate, no
-    // eventual writeback). The cached lines from the prior frame are
-    // invalidated first so subsequent cached writes by the CPU rasterizers
-    // (hwroad, etc.) and the cached read by palette-expand don't see stale
-    // pre-zero data. Dirty lines are discarded rather than written back —
-    // they hold last-frame content we're about to overwrite with zeros.
-    const size_t pixels_bytes =
-        config.s16_width * config.s16_height * sizeof(uint16_t);
-    data_cache_hit_invalidate(pixels, pixels_bytes);
-    std::memset(UncachedAddr(pixels), 0, pixels_bytes);
 
     if (!enabled)
         return;
 
     // OutRun Hardware Video Emulation. road_bg, both tile layers (bg/fg at
     // priority 0), all pri=8 sprites and the text layer are drawn via RDP in
-    // finalize_frame, so this CPU pass only covers road_fg into pixels[].
+    // finalize_frame, so this CPU pass only covers road_fg — written straight
+    // to the scratch surface in its final RGBA5551 form.
     tile_layer->update_tile_values();
 
     N64_PROFILE_PHASE_BEGIN();
     if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
-        (hwroad.*hwroad.render_foreground)(pixels);
+        (hwroad.*hwroad.render_foreground)(renderer->scratch_uc(),
+                                           renderer->rgb_lut());
     N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
 }
 
 void Video::render_frame()
 {
-    renderer->draw_frame(pixels);
     renderer->finalize_frame();
 }
 

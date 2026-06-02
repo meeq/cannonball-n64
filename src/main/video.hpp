@@ -33,7 +33,6 @@ class Video
 public:
 	hwsprites* sprite_layer;
     hwtiles* tile_layer;
-	uint16_t *pixels;
 
     bool enabled;
 

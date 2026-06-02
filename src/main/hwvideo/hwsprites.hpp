@@ -15,15 +15,13 @@ public:
     void swap();
     uint8_t read(const uint16_t adr);
     void write(const uint16_t adr, const uint16_t data);
-    void render(const uint8_t);
 
-    // RDP sprite renderer. Walks ramBuff like render() but for each visible
-    // non-shadow sprite: pre-extracts a CI4 atlas (cached by bank/addr/
-    // height/pitch), uploads the sprite TLUT slot, and emits one
-    // rdpq_tex_blit per sprite with hzoom/vzoom scale + flip via blit parms.
-    // Shadow-flagged sprites are skipped here — they're still handled by
-    // the CPU render() so their shadow read-modify-write into pixels[] keeps
-    // working (over road_fg / other CPU-drawn pixels only).
+    // RDP sprite renderer. For each visible sprite at the requested priority:
+    // pre-extracts a CI4 atlas (cached by bank/addr/height/pitch), uploads
+    // the sprite TLUT slot, and emits one rdpq_tex_blit per sprite with
+    // hzoom/vzoom scale + flip via blit parms. Shadow-flagged sprites use a
+    // two-pass (darken + body) pipeline so the shadow correctly darkens the
+    // composited framebuffer underneath rather than just the engine scratch.
     void render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                     int x_offset, int y_offset);
 

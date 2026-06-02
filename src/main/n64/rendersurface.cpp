@@ -1,12 +1,12 @@
 /***************************************************************************
-    N64 Render — software palette expand + RDP blit.
+    N64 Render — direct-to-RGBA5551 scratch + RDP composite.
 
-    The S16 software rasterizers (hwroad/hwtiles/hwsprites) write palette
-    indices into a uint16_t[] buffer. draw_frame() expands those indices into
-    a scratch RGBA5551 (FMT_RGBA16) surface via the rgb[] LUT populated by
-    convert_palette(). finalize_frame() rdpq_tex_blit's the scratch surface
-    into the active display framebuffer using copy mode (4x faster than
-    standard, RGBA16-only, no scaling/rotation).
+    hwroad foreground rasterises straight into an RGBA5551 (FMT_RGBA16)
+    scratch surface (held through KSEG1 so CPU writes go to RDRAM via the
+    store buffer with no cache traffic). The tile, sprite, road-bg and text
+    layers go through the RDP. finalize_frame() composites everything onto
+    the framebuffer in z-order: road_bg fill → tile_bg → tile_fg → scratch
+    blit (road_fg, alpha-compared) → sprites → text → FPS overlay.
 ***************************************************************************/
 
 #include "rendersurface.hpp"
@@ -25,7 +25,6 @@ namespace n64_profile
     uint32_t prepare_us = 0;
     uint32_t render_us  = 0;
     uint32_t tick_us    = 0;
-    uint32_t palette_us = 0;
     uint32_t wait_us    = 0;
     uint32_t sub_us[SUB_COUNT] = {0};
 }
@@ -33,8 +32,8 @@ namespace n64_profile
 Render::Render()
     : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
       video_mode(0), scanlines(0), scale(1), shadow_multi(0),
-      scratch_pixels(nullptr), scratch_surface{}, y_offset(0),
-      fps_font(nullptr), initialized(false)
+      scratch_pixels(nullptr), scratch_uc_ptr(nullptr), scratch_surface{},
+      y_offset(0), fps_font(nullptr), initialized(false)
 {
 }
 
@@ -60,7 +59,7 @@ void Render::convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1
     adr >>= 1;
 
     // Palette index 0 is the engine's transparency sentinel: tiles, sprites
-    // and text skip writing it, and prepare_frame() clears pixels[] to 0
+    // and text skip writing it, and start_frame() zeroes the scratch surface
     // each frame. Encode it as zero (alpha LSB = 0) so finalize_frame's
     // alpha-compare composite drops these pixels and the underlying RDP
     // road-background fill shows through.
@@ -154,15 +153,21 @@ bool Render::init(int src_w, int src_h,
     if (scratch_pixels)
         free(scratch_pixels);
 
-    // 8-byte alignment is required for rdpq_tex_blit DMA reads.
+    // 16-byte alignment: rdpq_tex_blit DMA needs ≥8, and data_cache_hit_
+    // invalidate asserts 16-byte (cache-line) alignment on both base and
+    // length. 320×224×2 = 143360 bytes which is a multiple of 16, so the
+    // alloc alignment is the only knob to set.
     const int bytes = src_width * src_height * (int)sizeof(uint16_t);
-    scratch_pixels = (uint16_t*)memalign(8, bytes);
-    std::memset(scratch_pixels, 0, bytes);
+    scratch_pixels = (uint16_t*)memalign(16, bytes);
 
-    // draw_frame writes scratch_pixels through an uncached pointer, so flush
-    // and invalidate now — any cached lines left over from the memset above
-    // would otherwise win on eviction and overwrite our uncached writes.
-    data_cache_hit_writeback_invalidate(scratch_pixels, bytes);
+    // All CPU writes to the scratch surface go through KSEG1 so the store
+    // buffer coalesces sequential writes straight into RDRAM (no cache-line
+    // allocate, no eventual writeback). Invalidate any cached lines now so
+    // they can't shadow the uncached writes later — nothing in the engine
+    // path reads scratch_pixels through the cached pointer.
+    scratch_uc_ptr = (uint16_t*)UncachedAddr(scratch_pixels);
+    data_cache_hit_invalidate(scratch_pixels, bytes);
+    std::memset(scratch_uc_ptr, 0, bytes);
 
     scratch_surface = surface_make_linear(scratch_pixels, FMT_RGBA16,
                                           src_width, src_height);
@@ -180,6 +185,7 @@ void Render::disable()
     {
         free(scratch_pixels);
         scratch_pixels = nullptr;
+        scratch_uc_ptr = nullptr;
     }
     if (initialized)
     {
@@ -197,38 +203,15 @@ void Render::disable()
 
 bool Render::start_frame()
 {
+    // Zero the scratch surface through KSEG1 so the store buffer coalesces
+    // straight into RDRAM — no read-for-ownership, no later writeback. Any
+    // pixels not written by CPU rasterizers stay alpha=0 and get dropped by
+    // the alpha-compare composite blit in finalize_frame, letting the RDP
+    // road background and tile layers underneath show through.
+    if (scratch_uc_ptr)
+        std::memset(scratch_uc_ptr, 0,
+                    src_width * src_height * sizeof(uint16_t));
     return true;
-}
-
-void Render::draw_frame(uint16_t* pixels)
-{
-    uint64_t t0 = get_ticks_us();
-
-    // pixels[] holds palette indices into rgb[]. Expand to RGBA5551.
-    //
-    // Two micro-opts vs the obvious loop:
-    //  * Read/write 32 bits at a time — halves load/store transactions on
-    //    the streaming src and dst buffers (each is 143 KB, way bigger than
-    //    the 8 KB D-cache).
-    //  * Write through an uncached dst pointer. The store buffer coalesces
-    //    sequential writes to RDRAM, so we skip the cache-line allocate +
-    //    the ~143 KB writeback pass that would otherwise run after the
-    //    loop. The cached scratch_pixels is invalidated once at init().
-    const uint32_t* src32 = (const uint32_t*)pixels;
-    uint32_t*       dst32 = (uint32_t*)UncachedAddr(scratch_pixels);
-    const int       n32   = (src_width * src_height) >> 1;
-
-    for (int i = 0; i < n32; ++i)
-    {
-        uint32_t two = src32[i];
-        uint32_t hi  = rgb[(uint16_t)(two >> 16)];
-        uint32_t lo  = rgb[(uint16_t)(two & 0xFFFF)];
-        dst32[i] = (hi << 16) | lo;
-    }
-
-    uint64_t t1 = get_ticks_us();
-    n64_profile::palette_us =
-        (n64_profile::palette_us * 7 + (uint32_t)(t1 - t0)) >> 3;
 }
 
 bool Render::finalize_frame()
@@ -286,11 +269,11 @@ bool Render::finalize_frame()
         (n64_profile::sub_us[n64_profile::SUB_TILE_FG] * 7
          + (uint32_t)(tfg_t1 - tfg_t0)) >> 3;
 
-    // Composite the palette-expanded engine surface on top. Standard mode +
-    // alpha compare keeps RGBA5551 alpha=0 texels (palette index 0) from
-    // overwriting the road background underneath. pixels[] holds road_fg
-    // plus CPU shadow sprites — the shadow read-modify-write has already
-    // happened during prepare_frame.
+    // Composite the engine scratch surface on top. Standard mode + alpha
+    // compare keeps RGBA5551 alpha=0 texels (untouched scratch background)
+    // from overwriting the road background and tile layers underneath. The
+    // scratch holds road_fg pixels in their final RGBA5551 form — hwroad
+    // wrote them directly during prepare_frame.
     rdpq_set_mode_standard();
     rdpq_mode_alphacompare(1);
     rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
@@ -318,10 +301,9 @@ bool Render::finalize_frame()
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
     // own mode setup, so the preceding copy-mode blit is fine to leave as-is.
     rdpq_text_printf(NULL, FPS_FONT_ID, 4, 20,
-                     "FPS %4.1f ras %5lu pal %4lu wait %5lu",
+                     "FPS %4.1f ras %5lu wait %5lu",
                      display_get_fps(),
                      (unsigned long)n64_profile::prepare_us,
-                     (unsigned long)n64_profile::palette_us,
                      (unsigned long)n64_profile::wait_us);
     rdpq_text_printf(NULL, FPS_FONT_ID, 4, 30,
                      "rbg%5lu tbg%5lu tfg%5lu rfg%5lu spr%5lu txt%5lu",

@@ -52,9 +52,6 @@
 *
  *******************************************************************************************/
 
-// Enable for hardware pixel accuracy, where sprite shadowing delayed by 1 clock cycle (slower)
-#define PIXEL_ACCURACY 0 
-
 hwsprites::hwsprites()
     : atlas_pool(nullptr), atlas_used(0),
       atlas_extracts(0), atlas_hits(0), atlas_overflows(0),
@@ -161,211 +158,17 @@ void hwsprites::swap()
     }
 }
 
-#if PIXEL_ACCURACY
-
-// Reproduces glowy edge around sprites on top of shadows as seen on Hardware.
-// Believed to be caused by shadowing being out by one clock cycle / pixel.
-//
-// 1/ Sprites Drawn on top of Shadow clears the shadow flags for its opaque pixels.
-// 2/ Either the flag clear or the sprite itself is offset by one pixel horizontally.
-// 
-// Thanks to Alex B. for this implementation.
-
-#define draw_pixel()                                                                                  \
-{                                                                                                     \
-    if (x >= x1 && x < x2)                                                                            \
-    {                                                                                                 \
-        if (shadow && pix == 0xa)                                                                     \
-        {                                                                                             \
-            pPixel[x] &= 0xfff;                                                                       \
-            pPixel[x] += S16_PALETTE_ENTRIES;                                                         \
-        }                                                                                             \
-        else if ((uint32_t)(pix - 1u) < 14u)  /* drops transparent (0) + EOR (15) */                  \
-        {                                                                                             \
-            if (x > x1) pPixel[x-1] &= 0xfff;                                                         \
-            pPixel[x] = (pix | color);                                                                \
-        }                                                                                             \
-    }                                                                                                 \
-}
-
-#else
-
-#define draw_pixel()                                                                                  \
-{                                                                                                     \
-    if (x >= x1 && x < x2 && (uint32_t)(pix - 1u) < 14u) /* drops transparent (0) + EOR (15) */       \
-    {                                                                                                 \
-        if (shadow && pix == 0xa)                                                                     \
-        {                                                                                             \
-            pPixel[x] &= 0xfff;                                                                       \
-            pPixel[x] += S16_PALETTE_ENTRIES;                                                         \
-        }                                                                                             \
-        else                                                                                          \
-        {                                                                                             \
-            pPixel[x] = (pix | color);                                                                \
-        }                                                                                             \
-    }                                                                                                 \
-}
-
-#endif
-
-void hwsprites::render(const uint8_t priority)
-{
-    const uint32_t numbanks = SPRITES_LENGTH / 0x10000;
-
-    for (uint16_t data = 0; data < SPRITE_RAM_SIZE; data += 8)
-    {
-        // stop when we hit the end of sprite list
-        if ((ramBuff[data+0] & 0x8000) != 0) break;
-
-        uint32_t sprpri  = 1 << ((ramBuff[data+3] >> 12) & 3);
-        if (sprpri != priority) continue;
-
-        // N64 split: non-shadow sprites are drawn by render_rdp(). Shadow
-        // sprites stay on the CPU path so the pix==0xa read-modify-write
-        // into pixels[] keeps darkening underlying engine pixels (road_fg
-        // and other CPU-drawn sprites). Sprite shadows over RDP-drawn
-        // tiles/road_bg are still lost — same compromise as today.
-        uint8_t shadow  = (ramBuff[data+3] >> 14) & 1;
-        if (!shadow) continue;
-
-        // if hidden, or top greater than/equal to bottom, or invalid bank, punt
-        int16_t hide    = (ramBuff[data+0] & 0x5000);
-        int32_t height  = (ramBuff[data+5] >> 8) + 1;
-        if (hide != 0 || height == 0) continue;
-
-        int16_t bank    = (ramBuff[data+0] >> 9) & 7;
-        int32_t top     = (ramBuff[data+0] & 0x1ff) - 0x100;
-        uint32_t addr    = ramBuff[data+1];
-        int32_t pitch  = ((ramBuff[data+2] >> 1) | ((ramBuff[data+4] & 0x1000) << 3)) >> 8;
-        int32_t xpos    =  ramBuff[data+6]; // moved from original structure to accomodate widescreen
-        int32_t vzoom    = ramBuff[data+3] & 0x7ff;
-        int32_t ydelta = ((ramBuff[data+4] & 0x8000) != 0) ? 1 : -1;
-        int32_t flip   = (~ramBuff[data+4] >> 14) & 1;
-        int32_t xdelta = ((ramBuff[data+4] & 0x2000) != 0) ? 1 : -1;
-        int32_t hzoom    = ramBuff[data+4] & 0x7ff;     
-        int32_t color   = COLOR_BASE + ((ramBuff[data+5] & 0x7f) << 4);
-        int32_t x, y, ytarget, yacc = 0, pix;
-            
-        // adjust X coordinate
-        // note: the threshhold below is a guess. If it is too high, rachero will draw garbage
-        // If it is too low, smgp won't draw the bottom part of the road
-        if (xpos < 0x80 && xdelta < 0)
-            xpos += 0x200;
-        xpos -= 0xbe;
-
-        // initialize the end address to the start address
-        ramBuff[data+7] = addr;
-
-        // clamp to within the memory region size
-        if (numbanks)
-            bank %= numbanks;
-
-        const uint32_t* spritedata = sprites + 0x10000 * bank;
-
-        // clamp to a maximum of 8x (not 100% confirmed)
-        if (vzoom < 0x40) vzoom = 0x40;
-        if (hzoom < 0x40) hzoom = 0x40;
-
-        // loop from top to bottom
-        ytarget = top + ydelta * height;
-
-        // Adjust for widescreen mode
-        xpos += config.s16_x_off;
-
-        // Adjust for hi-res mode
-        if (config.video.hires)
-        {
-            xpos <<= 1;
-            top <<= 1;
-            ytarget <<= 1;
-            hzoom >>= 1;
-            vzoom >>= 1;
-        }
-
-        for (y = top; y != ytarget; y += ydelta)
-        {
-            // skip drawing if not within the cliprect
-            if (y >= 0 && y < config.s16_height)
-            {
-                uint16_t* pPixel = &video.pixels[y * config.s16_width];
-                int32_t xacc = 0;
-
-                // non-flipped case
-                if (flip == 0)
-                {
-                    // start at the word before because we preincrement below.
-                    // ramBuff[data+7] is a class-member array slot — the
-                    // compiler can't keep it in a register across the inner
-                    // loop because of aliasing, so we'd pay a load+store per
-                    // 32-bit chunk. Hoist into a local and flush on exit.
-                    uint32_t cur_addr = addr - 1;
-
-                    for (x = xpos; (xdelta > 0 && x < config.s16_width) || (xdelta < 0 && x >= 0); )
-                    {
-                        uint32_t pixels = spritedata[++cur_addr]; // Add to base sprite data the vzoom value
-
-                        // draw four pixels
-                        pix = (pixels >> 28) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 24) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 20) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 16) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 12) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >>  8) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >>  4) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >>  0) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-
-                        // stop if the second-to-last pixel in the group was 0xf
-                        if ((pixels & 0x000000f0) == 0x000000f0)
-                            break;
-                    }
-                    ramBuff[data+7] = cur_addr;
-                }
-                // flipped case
-                else
-                {
-                    // start at the word after because we predecrement below.
-                    // See non-flip path for why cur_addr is hoisted.
-                    uint32_t cur_addr = addr + 1;
-
-                    for (x = xpos; (xdelta > 0 && x < config.s16_width) || (xdelta < 0 && x >= 0); )
-                    {
-                        uint32_t pixels = spritedata[--cur_addr];
-
-                        // draw four pixels
-                        pix = (pixels >>  0) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >>  4) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >>  8) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 12) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 16) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 20) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 24) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-                        pix = (pixels >> 28) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
-
-                        // stop if the second-to-last pixel in the group was 0xf
-                        if ((pixels & 0x0f000000) == 0x0f000000)
-                            break;
-                    }
-                    ramBuff[data+7] = cur_addr;
-                }
-            }
-            // accumulate zoom factors; if we carry into the high bit, skip an extra row
-            yacc += vzoom;
-            addr += pitch * (yacc >> 9);
-            yacc &= 0x1ff;
-        }
-    }
-}
-
 // ============================================================================
 // Sprite atlas cache (N64 RDP path)
 //
-// CPU render() rasterises sprites a row at a time using a per-row decoder that
-// walks the bank's 4-bit pixel stream, terminating each row when the second-
-// to-last nibble of a 32-bit word is 0xf (EOR). Going to the RDP means
-// pre-extracting each unique (bank, addr, height, pitch) sprite frame into a
-// rectangular CI4 surface — short EOR-terminated rows are padded with 0
-// (transparent in the TLUT). Once decoded, runtime is just TLUT upload +
-// rdpq_tex_blit with scale + flip.
+// All sprite rendering flows through render_rdp(): each unique (bank, addr,
+// height, pitch) sprite frame is pre-extracted once into a rectangular CI4
+// surface — short EOR-terminated rows are padded with 0 (transparent in the
+// TLUT). Runtime is just TLUT upload + rdpq_tex_blit with scale + flip.
+// Shadow-flagged sprites draw in two passes (darken + body) so the cast
+// shadow correctly darkens whatever is on the framebuffer underneath
+// (road_fg from the engine scratch composite, plus road_bg / tile layers
+// from the prior RDP passes).
 //
 // Lookup is open-addressed (linear probing) into ATLAS_CAPACITY slots; values
 // allocate from a single ATLAS_POOL_BYTES bump pool. On pool overflow the
