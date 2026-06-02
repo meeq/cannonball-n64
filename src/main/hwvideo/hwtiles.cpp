@@ -257,6 +257,13 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     // text strips). Skipping redundant 3-cmd uploads is the main win here.
     int last_colour = -1;
 
+    // Tile-data cache: long horizontal runs of the same graphic (sky fills,
+    // repeated ground rows) are common in the bg page. set_texture_image_raw
+    // and load_tile both target TILE0/TILE1 TMEM; TLUT uploads only touch
+    // TILE7, so the cached pixel data stays valid even when last_colour
+    // changes. Saves 2 of the 3 per-tile RDP commands on consecutive matches.
+    int last_code = -1;
+
     for (int my = 0; my < 64; my++)
     {
         int y = 8 * my - oy;
@@ -304,9 +311,15 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
             // Raw 3-command tile blit. 8x8 CI4 = 32 bytes contiguous in
             // tiles[Code*8]; we view it as 4x8 I8 to satisfy RDP's 4bpp
             // load constraint, then draw via the CI4 tile descriptor.
-            rdpq_set_texture_image_raw(
-                0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
-            rdpq_load_tile(TILE1, 0, 0, 4, 8);
+            // set+load go to TILE0/TILE1 TMEM; skip when Code is unchanged
+            // (TLUT uploads target TILE7 only, so the pixel data stays good).
+            if ((int)Code != last_code)
+            {
+                rdpq_set_texture_image_raw(
+                    0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
+                rdpq_load_tile(TILE1, 0, 0, 4, 8);
+                last_code = (int)Code;
+            }
             rdpq_texture_rectangle(TILE0,
                 x + x_offset,     y + y_offset,
                 x + x_offset + 8, y + y_offset + 8,
@@ -334,6 +347,9 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     // TLUT-upload cache: text rows often share a palette across long runs
     // (HUD strings are typically one or two colors).
     int last_colour = -1;
+
+    // Tile-data cache: see render_rdp_tile_layer for the rationale.
+    int last_code = -1;
 
     uint32_t TileIndex = 0;
     for (int my = 0; my < 32; my++)
@@ -370,9 +386,13 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
 
             const int dx = x + x_offset + config.s16_x_off;
             const int dy = y + y_offset;
-            rdpq_set_texture_image_raw(
-                0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
-            rdpq_load_tile(TILE1, 0, 0, 4, 8);
+            if ((int)Code != last_code)
+            {
+                rdpq_set_texture_image_raw(
+                    0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
+                rdpq_load_tile(TILE1, 0, 0, 4, 8);
+                last_code = (int)Code;
+            }
             rdpq_texture_rectangle(TILE0, dx, dy, dx + 8, dy + 8, 0, 0);
         }
     }

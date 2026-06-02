@@ -20,6 +20,13 @@
 #include <cstring>
 #include <malloc.h>
 
+// Diagnostic: bracket each RDP pass with rspq_wait() so we can split per-pass
+// time into CPU-emit (command queue construction) vs RDP-drain (rasterizer/
+// TMEM-load work the RDP still had to do after CPU returned). When 1, every
+// 60th frame prints a debugf line. Serializing CPU and RDP kills frame-rate
+// while enabled, so flip this back to 0 once the bottleneck is identified.
+#define N64_PROFILE_RDP_DRAIN 0
+
 namespace n64_profile
 {
     uint32_t prepare_us = 0;
@@ -237,11 +244,25 @@ bool Render::finalize_frame()
     // data leaking past the visible area).
     rdpq_set_scissor(x, y_offset, x + src_width, y_offset + src_height);
 
+#if N64_PROFILE_RDP_DRAIN
+    uint32_t rbg_emit = 0, rbg_drain = 0;
+    uint32_t tbg_emit = 0, tbg_drain = 0;
+    uint32_t tfg_emit = 0, tfg_drain = 0;
+    uint32_t spr_emit = 0, spr_drain = 0;
+    uint32_t txt_emit = 0, txt_drain = 0;
+#endif
+
     // Road background: emit one rdpq_fill_rectangle per same-color band.
     // Configures fill mode internally; safe to call before the composite blit.
     uint64_t rbg_t0 = get_ticks_us();
     hwroad.render_rdp_background(rgb, x, y_offset, src_width);
     uint64_t rbg_t1 = get_ticks_us();
+#if N64_PROFILE_RDP_DRAIN
+    rspq_wait();
+    uint64_t rbg_t2 = get_ticks_us();
+    rbg_emit  = (uint32_t)(rbg_t1 - rbg_t0);
+    rbg_drain = (uint32_t)(rbg_t2 - rbg_t1);
+#endif
     n64_profile::sub_us[n64_profile::SUB_ROAD_BG] =
         (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
          + (uint32_t)(rbg_t1 - rbg_t0)) >> 3;
@@ -258,6 +279,12 @@ bool Render::finalize_frame()
     uint64_t tbg_t0 = get_ticks_us();
     video.tile_layer->render_rdp_tile_layer(tile_tlut, 1, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
+#if N64_PROFILE_RDP_DRAIN
+    rspq_wait();
+    uint64_t tbg_t2 = get_ticks_us();
+    tbg_emit  = (uint32_t)(tbg_t1 - tbg_t0);
+    tbg_drain = (uint32_t)(tbg_t2 - tbg_t1);
+#endif
     n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
@@ -265,6 +292,12 @@ bool Render::finalize_frame()
     uint64_t tfg_t0 = get_ticks_us();
     video.tile_layer->render_rdp_tile_layer(tile_tlut, 0, 0, x, y_offset);
     uint64_t tfg_t1 = get_ticks_us();
+#if N64_PROFILE_RDP_DRAIN
+    rspq_wait();
+    uint64_t tfg_t2 = get_ticks_us();
+    tfg_emit  = (uint32_t)(tfg_t1 - tfg_t0);
+    tfg_drain = (uint32_t)(tfg_t2 - tfg_t1);
+#endif
     n64_profile::sub_us[n64_profile::SUB_TILE_FG] =
         (n64_profile::sub_us[n64_profile::SUB_TILE_FG] * 7
          + (uint32_t)(tfg_t1 - tfg_t0)) >> 3;
@@ -285,6 +318,12 @@ bool Render::finalize_frame()
     uint64_t spr_t0 = get_ticks_us();
     video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
     uint64_t spr_t1 = get_ticks_us();
+#if N64_PROFILE_RDP_DRAIN
+    rspq_wait();
+    uint64_t spr_t2 = get_ticks_us();
+    spr_emit  = (uint32_t)(spr_t1 - spr_t0);
+    spr_drain = (uint32_t)(spr_t2 - spr_t1);
+#endif
     n64_profile::sub_us[n64_profile::SUB_SPRITE] =
         (n64_profile::sub_us[n64_profile::SUB_SPRITE] * 7
          + (uint32_t)(spr_t1 - spr_t0)) >> 3;
@@ -294,9 +333,32 @@ bool Render::finalize_frame()
     uint64_t txt_t0 = get_ticks_us();
     video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
     uint64_t txt_t1 = get_ticks_us();
+#if N64_PROFILE_RDP_DRAIN
+    rspq_wait();
+    uint64_t txt_t2 = get_ticks_us();
+    txt_emit  = (uint32_t)(txt_t1 - txt_t0);
+    txt_drain = (uint32_t)(txt_t2 - txt_t1);
+#endif
     n64_profile::sub_us[n64_profile::SUB_TEXT] =
         (n64_profile::sub_us[n64_profile::SUB_TEXT] * 7
          + (uint32_t)(txt_t1 - txt_t0)) >> 3;
+
+#if N64_PROFILE_RDP_DRAIN
+    // Print one line per second so the USB log stays scannable. Pass widths
+    // are aligned with the on-screen overlay for easy cross-reference.
+    static uint32_t drain_log_frame = 0;
+    if ((drain_log_frame++ % 60) == 0)
+    {
+        debugf("rdp[%5lu] rbg e=%4lu d=%4lu  tbg e=%4lu d=%4lu  "
+               "tfg e=%4lu d=%4lu  spr e=%4lu d=%4lu  txt e=%4lu d=%4lu\n",
+               (unsigned long)drain_log_frame,
+               (unsigned long)rbg_emit, (unsigned long)rbg_drain,
+               (unsigned long)tbg_emit, (unsigned long)tbg_drain,
+               (unsigned long)tfg_emit, (unsigned long)tfg_drain,
+               (unsigned long)spr_emit, (unsigned long)spr_drain,
+               (unsigned long)txt_emit, (unsigned long)txt_drain);
+    }
+#endif
 
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
     // own mode setup, so the preceding copy-mode blit is fine to leave as-is.

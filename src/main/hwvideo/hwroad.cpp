@@ -312,6 +312,14 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
     int x, y;
     uint16_t* roadram = ramBuff;
 
+#define HWROAD_PROFILE_LORES 0
+#if HWROAD_PROFILE_LORES
+    uint64_t prof_t0 = get_ticks_us();
+    uint32_t prof_scanlines = 0;
+    uint32_t prof_skipped   = 0;
+    uint32_t prof_pairskip  = 0;  // both-roads-low-priority early continue
+#endif
+
     for (y = 0; y < S16_HEIGHT; y++)
     {
         uint16_t color_table[32];
@@ -327,7 +335,12 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
 
         // if both roads are low priority, skip
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
+        {
+#if HWROAD_PROFILE_LORES
+            prof_pairskip++;
+#endif
             continue;
+        }
 
         uint16_t* pPixel = dst_rgba + (y * config.s16_width);
         int32_t hpos0, hpos1, color0, color1;
@@ -370,37 +383,82 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
         {
             case 0:
                 if (data0 & 0x800)
+                {
+#if HWROAD_PROFILE_LORES
+                    prof_skipped++;
+#endif
                     continue;
+                }
                 hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++) 
+                for (x = 0; x < config.s16_width; x++)
                 {
                     int pix0 = (hpos0 < 0x200) ? src0[hpos0] : 3;
                     pPixel[x] = color_table[0x00 + pix0];
                     hpos0 = (hpos0 + 1) & 0xfff;
                 }
+#if HWROAD_PROFILE_LORES
+                prof_scanlines++;
+#endif
                 break;
 
             case 1:
+            {
                 hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
                 hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++) 
-                {
-                    int pix0 = (hpos0 < 0x200) ? src0[hpos0] : 3;
-                    int pix1 = (hpos1 < 0x200) ? src1[hpos1] : 3;
-                    if (((priority_map[0][pix0] >> pix1) & 1) != 0)
-                        pPixel[x] = color_table[0x10 + pix1];
-                    else
-                        pPixel[x] = color_table[0x00 + pix0];
 
+                // Per-scanline merged color LUT. Folds priority_map[0] +
+                // the road0/road1 ternary into a single 16-bit indexed
+                // lookup keyed by (pix0*8 + pix1). Slots for pix in {4,5,6}
+                // hold whatever color_table did — the road data only ever
+                // produces {0,1,2,3,7}, matching the SDL build. 64 cells *
+                // ~5 cycles == ~3.5 us per scanline, negligible vs the
+                // 320-pixel hot loop.
+                uint16_t merged[64];
+                for (int p0 = 0; p0 < 8; p0++)
+                {
+                    const uint8_t  mask = priority_map[0][p0];
+                    const uint16_t c0   = color_table[0x00 + p0];
+                    uint16_t* row = &merged[p0 << 3];
+                    for (int p1 = 0; p1 < 8; p1++)
+                        row[p1] = ((mask >> p1) & 1)
+                                  ? color_table[0x10 + p1]
+                                  : c0;
+                }
+
+                // 2-pixel u32 packed stores. pPixel is KSEG1 — sequential
+                // 32-bit stores coalesce in the R4300 store buffer just as
+                // 16-bit ones do, but halve loop overhead (one branch +
+                // one store per pixel pair). Big-endian: high 16 bits of
+                // the u32 land at the lower memory offset, so packing
+                // (ca<<16)|cb yields pPixel[2x]=ca, pPixel[2x+1]=cb.
+                // s16_width is 320 (even), so no tail.
+                uint32_t* pPixel32 = (uint32_t*)pPixel;
+                const int pairs = config.s16_width >> 1;
+                for (x = 0; x < pairs; x++)
+                {
+                    int pix0a = (hpos0 < 0x200) ? src0[hpos0] : 3;
+                    int pix1a = (hpos1 < 0x200) ? src1[hpos1] : 3;
                     hpos0 = (hpos0 + 1) & 0xfff;
                     hpos1 = (hpos1 + 1) & 0xfff;
+                    int pix0b = (hpos0 < 0x200) ? src0[hpos0] : 3;
+                    int pix1b = (hpos1 < 0x200) ? src1[hpos1] : 3;
+                    hpos0 = (hpos0 + 1) & 0xfff;
+                    hpos1 = (hpos1 + 1) & 0xfff;
+
+                    uint32_t ca = merged[(pix0a << 3) | pix1a];
+                    uint32_t cb = merged[(pix0b << 3) | pix1b];
+                    pPixel32[x] = (ca << 16) | cb;
                 }
+#if HWROAD_PROFILE_LORES
+                prof_scanlines++;
+#endif
                 break;
+            }
 
             case 2:
                 hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
                 hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++) 
+                for (x = 0; x < config.s16_width; x++)
                 {
                     int pix0 = (hpos0 < 0x200) ? src0[hpos0] : 3;
                     int pix1 = (hpos1 < 0x200) ? src1[hpos1] : 3;
@@ -412,21 +470,47 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
                     hpos0 = (hpos0 + 1) & 0xfff;
                     hpos1 = (hpos1 + 1) & 0xfff;
                 }
+#if HWROAD_PROFILE_LORES
+                prof_scanlines++;
+#endif
                 break;
 
             case 3:
                 if (data1 & 0x800)
+                {
+#if HWROAD_PROFILE_LORES
+                    prof_skipped++;
+#endif
                     continue;
+                }
                 hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++) 
+                for (x = 0; x < config.s16_width; x++)
                 {
                     int pix1 = (hpos1 < 0x200) ? src1[hpos1] : 3;
                     pPixel[x] = color_table[0x10 + pix1];
                     hpos1 = (hpos1 + 1) & 0xfff;
                 }
+#if HWROAD_PROFILE_LORES
+                prof_scanlines++;
+#endif
                 break;
             } // end switch
     } // end for
+
+#if HWROAD_PROFILE_LORES
+    static uint32_t prof_frame = 0;
+    uint64_t prof_t1 = get_ticks_us();
+    if ((prof_frame++ % 60) == 0)
+    {
+        debugf("rfg[%5lu] ctrl=%ld total=%5lu lines=%3lu pairskip=%3lu skip=%3lu\n",
+               (unsigned long)prof_frame,
+               (long)(road_control & 3),
+               (unsigned long)(prof_t1 - prof_t0),
+               (unsigned long)prof_scanlines,
+               (unsigned long)prof_pairskip,
+               (unsigned long)prof_skipped);
+    }
+#endif
 }
 
 // ------------------------------------------------------------------------------------------------
