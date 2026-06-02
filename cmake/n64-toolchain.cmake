@@ -2,11 +2,10 @@
 # CannonBall N64 cross-compile toolchain (libdragon)
 #
 # Modeled on /Users/cdb/Projects/n64/AnotherWorld/cmake/N64LibDragon.cmake.
-# Invoke via:
-#   cmake -B build-n64 \
-#         -DCMAKE_TOOLCHAIN_FILE=cmake/n64-toolchain.cmake \
-#         -DTARGET=n64.cmake \
-#         cmake
+# Invoke from cmake/:
+#   cmake -B ../build-n64 \
+#         -DCMAKE_TOOLCHAIN_FILE=$(pwd)/n64-toolchain.cmake \
+#         .
 # -----------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.13)
@@ -59,12 +58,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "Shared libs not available")
 
-# Tells our CMakeLists.txt to take the N64 code path. WITH_LIBDRAGON marks the
-# platform; WITH_BOOST/WITH_SDL/WITH_XML_CONFIG/WITH_DIRENT are intentionally
-# left undefined so feature-gated code in src/main falls through to the
-# minimal/portable branches.
-set(N64 1 CACHE INTERNAL "Building for N64")
-add_definitions(-DN64 -DWITH_LIBDRAGON)
+add_definitions(-DN64)
 
 set(ARCH "-march=vr4300 -mtune=vr4300 -mabi=o64")
 
@@ -75,9 +69,8 @@ set(COMMON_FLAGS_LIST
     "-fdata-sections"
     "-g"
     "-ffast-math"
-    "-ftrapping-math"
-    "-fno-associative-math"
-    "-O2"
+    "-Os"
+    "-flto"
     "-Wall"
     "-Wno-deprecated-declarations"
     "-Wno-unused-variable"
@@ -88,14 +81,17 @@ set(COMMON_FLAGS_LIST
     "-Wno-unused-label"
     "-Wno-unused-local-typedefs"
     "-Wno-unused-const-variable"
-    "-ftrivial-auto-var-init=pattern"
     "-fdiagnostics-color=always"
     "-MMD"
 )
 string(JOIN " " COMMON_FLAGS ${COMMON_FLAGS_LIST})
 
-set(CMAKE_C_FLAGS   "${COMMON_FLAGS} -std=gnu17 -include ktls.h" CACHE STRING "C flags")
-set(CMAKE_CXX_FLAGS "${COMMON_FLAGS} -std=gnu++17 -include ktls.h" CACHE STRING "C++ flags")
+# Drop exceptions + RTTI for C++ only. Cannonball doesn't use them; libstdc++
+# still links fine. Saves both code size and per-call overhead.
+set(CMAKE_C_FLAGS   "${COMMON_FLAGS} -std=gnu17 -include ktls.h"
+    CACHE STRING "C flags")
+set(CMAKE_CXX_FLAGS "${COMMON_FLAGS} -fno-exceptions -fno-rtti -std=gnu++17 -include ktls.h"
+    CACHE STRING "C++ flags")
 
 # newlib_overrides first, matches n64.mk include order.
 include_directories("${N64_INCLUDE}/newlib_overrides")
@@ -114,6 +110,8 @@ function(n64_setup_linking target_name)
         LINK_LIBRARIES "-lc;-lstdc++;-ldragon;-lm;-ldragonsys"
     )
     target_link_options(${target_name} PRIVATE
+        "-flto"
+        "-Os"
         "-Wl,-g"
         "-Wl,-L${N64_LIB}"
         "-Wl,-Tn64.ld"

@@ -9,22 +9,23 @@
     See license.txt for more details.
 ***************************************************************************/
 
-#include <iostream>
-
 #include "video.hpp"
 #include "globals.hpp"
 #include "frontend/config.hpp"
 #include "engine/oroad.hpp"
-
-#ifdef WITH_OPENGL
-#include "sdl2/rendergl.hpp"
-#elif WITH_OPENGLES
-#include "sdl2/rendergles.hpp"
-#elif WITH_LIBDRAGON
 #include "n64/rendersurface.hpp"
-#else
-#include "sdl2/rendersurface.hpp"
-#endif
+#include <libdragon.h>
+
+// Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
+// EMA-smooths the result into n64_profile::sub_us[SLOT] for the overlay.
+#define N64_PROFILE_PHASE_BEGIN() uint64_t _phase_t0 = get_ticks_us()
+#define N64_PROFILE_PHASE_END(SLOT) do {                                  \
+        uint64_t _phase_t1 = get_ticks_us();                              \
+        uint32_t _us = (uint32_t)(_phase_t1 - _phase_t0);                 \
+        n64_profile::sub_us[SLOT] =                                       \
+            (n64_profile::sub_us[SLOT] * 7 + _us) >> 3;                   \
+        _phase_t0 = _phase_t1;                                            \
+    } while (0)
 
 Video video;
 
@@ -172,14 +173,25 @@ void Video::prepare_frame()
         // OutRun Hardware Video Emulation
         tile_layer->update_tile_values();
 
+        N64_PROFILE_PHASE_BEGIN();
         (hwroad.*hwroad.render_background)(pixels);
+        N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_BG);
+
         tile_layer->render_tile_layer(pixels, 1, 0);      // background layer
+        N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_BG);
+
         tile_layer->render_tile_layer(pixels, 0, 0);      // foreground layer
+        N64_PROFILE_PHASE_END(n64_profile::SUB_TILE_FG);
 
         if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
             (hwroad.*hwroad.render_foreground)(pixels);
+        N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
+
         sprite_layer->render(8);
+        N64_PROFILE_PHASE_END(n64_profile::SUB_SPRITE);
+
         tile_layer->render_text_layer(pixels, 1);
+        N64_PROFILE_PHASE_END(n64_profile::SUB_TEXT);
      }
 }
 
@@ -187,16 +199,6 @@ void Video::render_frame()
 {
     renderer->draw_frame(pixels);
     renderer->finalize_frame();
-}
-
-bool Video::supports_window()
-{
-    return renderer->supports_window();
-}
-
-bool Video::supports_vsync()
-{
-    return renderer->supports_vsync();
 }
 
 // ---------------------------------------------------------------------------

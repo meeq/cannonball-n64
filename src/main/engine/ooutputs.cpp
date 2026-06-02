@@ -28,7 +28,6 @@
 #include "engine/ohud.hpp"
 #include "engine/oinputs.hpp"
 #include "engine/ooutputs.hpp"
-#include "directx/ffeedback.hpp"
 
 OOutputs::OOutputs(void)
 {
@@ -832,7 +831,7 @@ void OOutputs::motor_output(uint8_t cmd)
     else if (cmd > MOTOR_CENTRE) // right
         force = 15 - cmd;
 
-    forcefeedback::set(cmd, force);
+    (void)force;  // N64 has no haptic motor; rumble routed via input::set_rumble
 }
 
 // ------------------------------------------------------------------------------------------------

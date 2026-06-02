@@ -28,9 +28,7 @@ public:
     ~RomLoader();
     void init(uint32_t);
 
-    int (RomLoader::*load)(const char*, const int, const int, const int, const uint8_t, const bool);
     int load_rom(const char* filename, const int offset, const int length, const int expected_crc, const uint8_t mode = NORMAL, const bool verbose = true);
-    int load_crc32(const char* debug, const int offset, const int length, const int expected_crc, const uint8_t mode = NORMAL, const bool verbose = true);
     int load_binary(const char* filename);
     void unload(void);
 
@@ -100,6 +98,5 @@ public:
     }
 
 private:
-    int create_map();
     int filesize(const char* filename);
 };

@@ -23,9 +23,7 @@ Roms::~Roms(void)
 {
 }
 
-// Tidier way to address pointer to member function
-// Expanded example: (rom0.*(rom0.load))("epr-10380b.133", 0x00000, 0x10000, 0x1f6cadad, RomLoader::INTERLEAVE2);
-#define LOAD(rom, args) (rom.*(rom.load)) args
+#define LOAD(rom, args) rom.load_rom args
 
 bool Roms::load_revb_roms(bool fixed_rom)
 {

@@ -25,7 +25,7 @@ namespace shadow
 };
 
 class hwsprites;
-class RenderBase;
+class Render;
 struct video_settings_t;
 
 class Video
@@ -46,8 +46,6 @@ public:
     void set_shadow_intensity(float);
     void prepare_frame();
     void render_frame();
-    bool supports_window();
-    bool supports_vsync();
 
     void clear_text_ram();
     void write_text8(uint32_t, const uint8_t);
@@ -77,8 +75,7 @@ public:
     uint32_t read_pal32(uint32_t*);
 
 private:
-    // SDL Renderer
-    RenderBase* renderer;
+    Render* renderer;
     
 	uint8_t palette[S16_PALETTE_ENTRIES * 2]; // 2 Bytes Per Palette Entry
     void refresh_palette(uint32_t);

@@ -1,3 +1,8 @@
+/***************************************************************************
+    Shared engine-state declarations.
+    Definitions live in src/main/n64/n64main.cpp.
+***************************************************************************/
+
 #pragma once
 
 #include "globals.hpp"
@@ -7,21 +12,12 @@ namespace cannonball
 {
     extern Audio audio;
 
-    // Frame counter
-	extern int frame;
-
-    // Tick Logic. Used when running at non-standard > 30 fps
-    extern bool tick_frame;
-
-    // Millisecond Time Per Frame
+    extern int    frame;
+    extern bool   tick_frame;
     extern double frame_ms;
+    extern int    fps_counter;
+    extern int    state;
 
-    // FPS Counter
-    extern int fps_counter;
-
-    // Engine Master State
-    extern int state;
-    
     enum
     {
         STATE_BOOT,
@@ -32,5 +28,3 @@ namespace cannonball
         STATE_QUIT
     };
 }
-
-int main(int argc, char* argv[]);

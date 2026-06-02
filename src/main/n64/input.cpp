@@ -6,10 +6,12 @@
       B      → BRAKE
       L      → GEAR1 (low gear)
       R      → GEAR2 (high gear)
-      START  → START / MENU (long-press handled by frontend)
+      START  → START (also credits up in freeplay mode)
       D-pad  → directional UP/DOWN/LEFT/RIGHT
       Stick  → analog steering / accelerator when analog enabled
       Z      → VIEWPOINT
+      C-Up   → COIN (insert credit — relevant when freeplay is off)
+      C-Down → MENU
 ***************************************************************************/
 
 #include "input.hpp"
@@ -66,7 +68,7 @@ void Input::poll()
     keys[GEAR1]     = held.l;
     keys[GEAR2]     = held.r;
     keys[START]     = held.start;
-    keys[COIN]      = false;
+    keys[COIN]      = held.c_up;
     keys[VIEWPOINT] = held.z;
     keys[PAUSE]     = false;
     keys[STEP]      = false;

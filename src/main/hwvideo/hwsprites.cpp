@@ -161,7 +161,7 @@ void hwsprites::swap()
             pPixel[x] &= 0xfff;                                                                       \
             pPixel[x] += S16_PALETTE_ENTRIES;                                                         \
         }                                                                                             \
-        else if (pix != 0 && pix != 15)                                                               \
+        else if ((uint32_t)(pix - 1u) < 14u)  /* drops transparent (0) + EOR (15) */                  \
         {                                                                                             \
             if (x > x1) pPixel[x-1] &= 0xfff;                                                         \
             pPixel[x] = (pix | color);                                                                \
@@ -173,7 +173,7 @@ void hwsprites::swap()
 
 #define draw_pixel()                                                                                  \
 {                                                                                                     \
-    if (x >= x1 && x < x2 && pix != 0 && pix != 15)                                                   \
+    if (x >= x1 && x < x2 && (uint32_t)(pix - 1u) < 14u) /* drops transparent (0) + EOR (15) */       \
     {                                                                                                 \
         if (shadow && pix == 0xa)                                                                     \
         {                                                                                             \
@@ -267,12 +267,16 @@ void hwsprites::render(const uint8_t priority)
                 // non-flipped case
                 if (flip == 0)
                 {
-                    // start at the word before because we preincrement below
-                    ramBuff[data+7] = (addr - 1);
+                    // start at the word before because we preincrement below.
+                    // ramBuff[data+7] is a class-member array slot — the
+                    // compiler can't keep it in a register across the inner
+                    // loop because of aliasing, so we'd pay a load+store per
+                    // 32-bit chunk. Hoist into a local and flush on exit.
+                    uint32_t cur_addr = addr - 1;
 
                     for (x = xpos; (xdelta > 0 && x < config.s16_width) || (xdelta < 0 && x >= 0); )
                     {
-                        uint32_t pixels = spritedata[++ramBuff[data+7]]; // Add to base sprite data the vzoom value
+                        uint32_t pixels = spritedata[++cur_addr]; // Add to base sprite data the vzoom value
 
                         // draw four pixels
                         pix = (pixels >> 28) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
@@ -288,16 +292,18 @@ void hwsprites::render(const uint8_t priority)
                         if ((pixels & 0x000000f0) == 0x000000f0)
                             break;
                     }
+                    ramBuff[data+7] = cur_addr;
                 }
                 // flipped case
                 else
                 {
-                    // start at the word after because we predecrement below
-                    ramBuff[data+7] = (addr + 1);
+                    // start at the word after because we predecrement below.
+                    // See non-flip path for why cur_addr is hoisted.
+                    uint32_t cur_addr = addr + 1;
 
                     for (x = xpos; (xdelta > 0 && x < config.s16_width) || (xdelta < 0 && x >= 0); )
                     {
-                        uint32_t pixels = spritedata[--ramBuff[data+7]];
+                        uint32_t pixels = spritedata[--cur_addr];
 
                         // draw four pixels
                         pix = (pixels >>  0) & 0xf; while (xacc < 0x200) { draw_pixel(); x += xdelta; xacc += hzoom; } xacc -= 0x200;
@@ -313,6 +319,7 @@ void hwsprites::render(const uint8_t priority)
                         if ((pixels & 0x0f000000) == 0x0f000000)
                             break;
                     }
+                    ramBuff[data+7] = cur_addr;
                 }
             }
             // accumulate zoom factors; if we carry into the high bit, skip an extra row

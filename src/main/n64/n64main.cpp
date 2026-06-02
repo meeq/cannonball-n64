@@ -11,6 +11,7 @@
 
 #include "platform.hpp"
 #include "save.hpp"
+#include "rendersurface.hpp"
 
 #include "../main.hpp"
 #include "../video.hpp"
@@ -62,6 +63,18 @@ namespace
         config.data.res_path  = "rom:/res/";
         config.data.save_path = "/";   // EEPROM-backed, no filesystem write
         config.data.crc32     = 0;     // filename mode (no DFS dirent)
+
+        // Cartridge / console port: skip the coin-up cycle. Outrun's
+        // check_freeplay_start() credits up on START press when freeplay is on,
+        // so the player goes straight from attract → game without a coin button.
+        config.engine.freeplay = true;
+
+        // Engine timing: the main loop is vsync-capped to ~60 Hz by
+        // display_get(). tick_engine() only frame-skips when config.fps == 60
+        // or 120 — leaving video.fps == 0 (30 Hz path) makes the engine tick
+        // every iteration and run at 2x speed. video.fps = 1 selects
+        // "60 Hz display, 30 Hz engine tick" which matches the arcade cadence.
+        config.video.fps = 1;
     }
 
     void tick_engine()
@@ -151,12 +164,36 @@ int main(int /*argc*/, char* /*argv*/[])
 
     state = STATE_INIT_GAME;
 
+    // EMA smoothing for on-screen profile counters so they don't strobe.
+    auto smooth = [](uint32_t& acc, uint64_t sample)
+    {
+        acc = (uint32_t)((acc * 7 + sample) >> 3);
+    };
+
     while (state != STATE_QUIT)
     {
+        uint64_t t0 = get_ticks_us();
         tick_engine();
-        video.prepare_frame();
+        uint64_t t1 = get_ticks_us();
+
+        // The rasterizers (hwroad/hwtiles/hwsprites) are by far the most
+        // expensive CPU work each frame. With config.video.fps = 1 tick_frame
+        // alternates 1/0, and engine state only advances on tick frames — so
+        // pixels[] is bit-identical on the off-frames. Skip re-rasterizing in
+        // that case; render_frame() still runs every loop so display_get()
+        // continues to pace us.
+        if (tick_frame)
+            video.prepare_frame();
+        uint64_t t2 = get_ticks_us();
+
         video.render_frame();
+        uint64_t t3 = get_ticks_us();
+
         audio.tick();
+
+        smooth(n64_profile::tick_us,    t1 - t0);
+        if (tick_frame) smooth(n64_profile::prepare_us, t2 - t1);
+        smooth(n64_profile::render_us,  t3 - t2);
     }
 
     // N64 can't actually quit — loop forever.

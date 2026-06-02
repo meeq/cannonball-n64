@@ -11,37 +11,16 @@
 #include <iostream>
 #include <fstream>
 #include <cstddef>       // for std::size_t
-#include <unordered_map>
 
 #include "stdint.hpp"
 #include "romloader.hpp"
 #include "frontend/config.hpp"
 #include "utils_crc32.hpp"
 
-// In order to get a cross-platform directory listing I'm using a Visual Studio
-// version of Linux's Dirent from here: https://github.com/tronkko/dirent
-//
-// This appears to be the most lightweight solution available without resorting
-// to enormous boost libraries or switching to C++17. Builds that lack POSIX
-// dirent (e.g. libdragon DFS) leave WITH_DIRENT undefined and fall back to
-// load_rom() — CRC-based matching requires a directory listing.
-#if defined(WITH_DIRENT)
-    #if defined(_MSC_VER)
-        #include "windirent.h"
-    #else
-        #include <dirent.h>
-    #endif
-#endif
-
-// Unordered Map to store contents of directory by CRC 32 value. Similar to Hashmap.
-static std::unordered_map<int, std::string> map;
-static bool map_created;
-
 
 RomLoader::RomLoader()
 {
     rom = NULL;
-    map_created = false;
     loaded = false;
 }
 
@@ -53,9 +32,6 @@ RomLoader::~RomLoader()
 
 void RomLoader::init(const uint32_t length)
 {
-    // Setup pointer to function we want to use (either load_crc32 or load_rom)
-    load = config.data.crc32 ? &RomLoader::load_crc32 : &RomLoader::load_rom;
-
     this->length = length;
     rom = new uint8_t[length];
 }
@@ -107,111 +83,6 @@ int RomLoader::load_rom(const char* filename, const int offset, const int length
     {
         rom[(i * interleave) + offset] = buffer[i];
     }
-
-    // Clean Up
-    delete[] buffer;
-    src.close();
-    loaded = true;
-    return 0; // success
-}
-
-// --------------------------------------------------------------------------------------------
-// Create Unordered Map of files in ROM directory by CRC32 value
-// This should be faster than brute force searching every file in the directory every time.
-// --------------------------------------------------------------------------------------------
-
-int RomLoader::create_map()
-{
-    map_created = true;
-
-#if !defined(WITH_DIRENT)
-    // No directory listing available — caller must set config.data.crc32 = 0
-    // so load_rom() (filename-based) is used instead.
-    std::cout << "Warning: CRC-based ROM lookup not available without dirent." << std::endl;
-    return 1;
-#else
-    std::string path = config.data.rom_path;
-    DIR* dir;
-    struct dirent* ent;
-
-    if ((dir = opendir(path.c_str())) == NULL)
-    {
-        std::cout << "Warning: Could not open ROM directory - " << path << std::endl;
-        return 1; // Failure (Could not open directory)
-    }
-
-    // Iterate all files in directory
-    while ((ent = readdir(dir)) != NULL)
-    {
-        std::string file = path + ent->d_name;
-        std::ifstream src(file, std::ios::in | std::ios::binary);
-
-        if (!src) continue;
-
-        // Read file
-        char* buffer = new char[length];
-        src.read(buffer, length);
-
-        // Check CRC on file
-        Crc32 result;
-        result.process_bytes(buffer, (size_t)src.gcount());
-
-        // Insert file into MAP between CRC and filename
-        map.insert({ result.checksum(), file });
-        delete[] buffer;
-        src.close();
-    }
-
-    if (map.empty())
-        std::cout << "Warning: Could not create CRC32 Map. Did you copy the ROM files into the directory? " << std::endl;
-
-    closedir(dir);
-    return 0; //success
-#endif
-}
-
-
-// ------------------------------------------------------------------------------------------------
-// Search and load ROM by CRC32 value as opposed to filename.
-// Advantage: More resilient to renamed romsets.
-// ------------------------------------------------------------------------------------------------
-
-int RomLoader::load_crc32(const char* debug, const int offset, const int length, const int expected_crc, const uint8_t interleave, const bool verbose)
-{
-    if (!map_created)
-        create_map();
-
-    if (map.empty())
-        return 1;
-
-    auto search = map.find(expected_crc);
-
-    // Cannot find file by CRC value in map
-    if (search == map.end())
-    {
-        if (verbose) std::cout << "Unable to locate rom in path: " << config.data.rom_path << " possible name: " << debug << " crc32: 0x" << std::hex << expected_crc << std::endl;
-        loaded = false;
-        return 1;
-    }
-
-    // Correct ROM found
-    std::string file = search->second;
-
-    std::ifstream src(file, std::ios::in | std::ios::binary);
-    if (!src)
-    {
-        if (verbose) std::cout << "cannot open rom: " << file << std::endl;
-        loaded = false;
-        return 1; // fail
-    }
-
-    // Read file
-    char* buffer = new char[length];
-    src.read(buffer, length);
-
-    // Interleave file as necessary
-    for (int i = 0; i < length; i++)
-        rom[(i * interleave) + offset] = buffer[i];
 
     // Clean Up
     delete[] buffer;
