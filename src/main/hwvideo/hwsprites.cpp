@@ -280,7 +280,13 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         }
     }
 
-    const uint16_t w = (uint16_t)(max_words * 8);
+    // Pad max_words to even so the CI4 row pitch (w/2 bytes) is always a
+    // multiple of 8. That's the LOAD_BLOCK alignment constraint and the
+    // texture-image alignment the RDP needs, which lets render_rdp() take the
+    // fast bypass path unconditionally. Cost: at most 4 bytes of zero (=
+    // transparent) padding per row.
+    const int padded_words = (max_words + 1) & ~1;
+    const uint16_t w = (uint16_t)(padded_words * 8);
     const uint16_t h = source_h;
     const uint32_t ci4_stride = (uint32_t)w / 2;
     const uint32_t bytes = (ci4_stride * (uint32_t)h + 7u) & ~7u;
@@ -360,6 +366,18 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     if (!atlas_pool) atlas_init();
     if (!atlas_pool) return;
 
+#define HWSPR_PROFILE 0
+#if HWSPR_PROFILE
+    uint64_t prof_t0 = get_ticks_us();
+    uint32_t prof_total = 0;
+    uint32_t prof_opaque = 0;
+    uint32_t prof_shadow = 0;
+    uint32_t prof_tlut_skipped = 0;   // last_tlut hit (upload elided)
+    uint32_t prof_tlut_uploaded = 0;  // last_tlut miss (upload emitted)
+    uint32_t prof_pix_total = 0;      // sum of e->w * e->h (pre-zoom)
+    uint32_t prof_size_le2k = 0;      // sprites whose CI4 fits one TMEM strip
+#endif
+
     // Shadow-mask TLUT: only slot 0xa carries alpha=1 (RGBA5551 LSB), all
     // other entries are alpha=0 and get culled by rdpq_mode_alphacompare.
     // RGB doesn't matter because the shadow combiner outputs constant black.
@@ -386,6 +404,16 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // address. Scratch slots come from a ring, so identity-comparison is
     // safe — pass-2 shadow uploads never alias prior slots within a frame.
     const uint16_t* last_tlut = NULL;
+
+    // Pixel-load cache. The bypass path below configures TILE0 (CI4 draw
+    // view) + TILE1 (RGBA16 LOAD_BLOCK view) and runs LOAD_BLOCK once per
+    // unique atlas surface. Identity-comparison on (ci4 ptr, w, h) is enough:
+    // atlas entries live in a bump pool, so a new entry always has a new ptr.
+    // Crucially, for shadow sprites this lets the mask+body pair share a
+    // single pixel load — the two passes only differ by TLUT.
+    const uint8_t* last_atlas_ci4 = NULL;
+    uint16_t       last_atlas_w   = 0;
+    uint16_t       last_atlas_h   = 0;
 
     const uint32_t numbanks = SPRITES_LENGTH / 0x10000;
 
@@ -440,6 +468,14 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             (uint16_t)height, (int16_t)pitch, flip != 0,
             (uint16_t)vzoom);
         if (!e) continue;
+#if HWSPR_PROFILE
+        prof_total++;
+        prof_pix_total += (uint32_t)e->w * (uint32_t)e->h;
+        // CI4 bytes = (w/2) * h. One-strip threshold: TMEM has 4 KB total
+        // but with TLUT taking 2 KB we have 2 KB for pixels => 2048 bytes
+        // for CI4 fits as one strip.
+        if (((uint32_t)e->w * (uint32_t)e->h) <= 4096) prof_size_le2k++;
+#endif
 
         const float scale_x  = 512.0f / (float)hzoom;
         const float scale_y  = 512.0f / (float)vzoom;
@@ -463,12 +499,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         if (screen_y + zoomed_h <= 0.0f) continue;
         if (screen_y >= (float)config.s16_height) continue;
 
-        surface_t spr_surf = surface_make_linear(e->ci4, FMT_CI4, e->w, e->h);
-        rdpq_blitparms_t parms = {};
-        parms.scale_x = scale_x;
-        parms.scale_y = scale_y;
-        parms.flip_x  = mirror_x;
-        parms.flip_y  = mirror_y;
         const float dst_x = screen_x + (float)x_offset;
         const float dst_y = screen_y + (float)y_offset;
 
@@ -476,11 +506,120 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         // is 0x800 + color*16 + pix).
         const uint16_t* color_tlut = &sprite_tlut[(uint32_t)color * 16];
 
+        // ---- Bypass rdpq_tex_blit ----------------------------------------
+        // Atlas widths are padded so the CI4 row pitch (w/2) is always a
+        // multiple of 8, so we can always run LOAD_BLOCK without the
+        // strip-walker dispatch. The 4 KB TMEM holds 2 KB of TLUT + 2 KB of
+        // pixels (LSB), so any sprite whose CI4 fits 2048 bytes (= w*h ≤
+        // 4096 source pixels) loads in a single shot. Anything bigger is
+        // routed back to rdpq_tex_blit; per profile, this fallback fires on
+        // ~5% of sprite draws.
+        const uint32_t ci4_stride = (uint32_t)e->w / 2;
+        const uint32_t ci4_bytes  = ci4_stride * (uint32_t)e->h;
+
+        if (ci4_bytes <= 2048u)
+        {
+            // (Re)configure the load/draw tile pair when the atlas changes.
+            // TILE1 is the LOAD_BLOCK alias (FMT_RGBA16 view of the CI4 data,
+            // pitch=0 per LOAD_BLOCK conventions); TILE0 is the draw view
+            // (FMT_CI4, tmem_pitch = row stride in bytes).
+            if (e->ci4 != last_atlas_ci4 || e->w != last_atlas_w || e->h != last_atlas_h)
+            {
+                rdpq_set_texture_image_raw(0, PhysicalAddr(e->ci4),
+                                           FMT_RGBA16, (e->w + 1) / 4, e->h);
+                rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0, NULL);
+                rdpq_set_tile(TILE0, FMT_CI4, 0, (uint16_t)ci4_stride, NULL);
+                rdpq_load_block(TILE1, 0, 0,
+                                (uint16_t)(ci4_bytes / 2),  // RGBA16 texels = w*h/4
+                                (uint16_t)ci4_stride);
+                rdpq_set_tile_size(TILE0, 0, 0, e->w, e->h);
+                last_atlas_ci4 = e->ci4;
+                last_atlas_w   = e->w;
+                last_atlas_h   = e->h;
+            }
+
+            // Flip via swapped dst extents (matches the convention rdpq_tex_blit
+            // uses internally — see tex_xblit_norotate in rdpq_tex.c).
+            float x0 = dst_x;
+            float x1 = dst_x + zoomed_w;
+            float y0 = dst_y;
+            float y1 = dst_y + zoomed_h;
+            if (mirror_x) { float t = x0; x0 = x1; x1 = t; }
+            if (mirror_y) { float t = y0; y0 = y1; y1 = t; }
+
+            if (shadow)
+            {
+                // Pass 1 — shadow darken. Constant-50% multiply pipeline.
+                if (pipeline != 1)
+                {
+                    rdpq_set_fog_color(RGBA32(0, 0, 0, 128));
+                    rdpq_mode_combiner(
+                        RDPQ_COMBINER1((0, 0, 0, 0), (0, 0, 0, TEX0)));
+                    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY_CONST);
+                    pipeline = 1;
+                }
+                if (last_tlut != shadow_mask_tlut)
+                {
+                    rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
+                    last_tlut = shadow_mask_tlut;
+                }
+                rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
+                                              0, 0, e->w, e->h);
+
+                // Pass 2 — opaque body. Pixel data already in TMEM from the
+                // mask pass, so only the TLUT and combiner/blender need to
+                // change. This is the central PF11 win: shadow sprites went
+                // from 2 × LOAD_BLOCK to 1 × LOAD_BLOCK.
+                if (pipeline != 0)
+                {
+                    rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+                    rdpq_mode_blender(0);
+                    pipeline = 0;
+                }
+                uint16_t* scratch =
+                    &shadow_body_tluts[shadow_body_ring_idx * 16];
+                if (++shadow_body_ring_idx >= SHADOW_TLUT_RING)
+                    shadow_body_ring_idx = 0;
+                uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
+                for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
+                scratch_uc[10] = 0;
+                rdpq_tex_upload_tlut(scratch, 0, 16);
+                last_tlut = scratch;
+                rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
+                                              0, 0, e->w, e->h);
+            }
+            else
+            {
+                if (pipeline != 0)
+                {
+                    rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+                    rdpq_mode_blender(0);
+                    pipeline = 0;
+                }
+                if (last_tlut != color_tlut)
+                {
+                    rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
+                    last_tlut = color_tlut;
+                }
+                rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
+                                              0, 0, e->w, e->h);
+            }
+            continue;
+        }
+
+        // ---- Fallback: rdpq_tex_blit (sprite too big to fit one strip) --
+        // ~5% of sprites per profile. Strip walker re-loads pixels per
+        // strip; shadow sprites pay it twice. tex_blit also writes TILE0/
+        // TILE1 internally, so invalidate the bypass cache afterwards.
+        surface_t spr_surf = surface_make_linear(e->ci4, FMT_CI4, e->w, e->h);
+        rdpq_blitparms_t parms = {};
+        parms.scale_x = scale_x;
+        parms.scale_y = scale_y;
+        parms.flip_x  = mirror_x;
+        parms.flip_y  = mirror_y;
+
         if (shadow)
         {
-            // Pass 1 — shadow darken. Switch into the constant-50%-multiply
-            // pipeline, upload the mask TLUT (only slot 0xa carries alpha),
-            // blit. Darkens whatever is underneath at the slot-0xa pixels.
             if (pipeline != 1)
             {
                 rdpq_set_fog_color(RGBA32(0, 0, 0, 128));
@@ -496,10 +635,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             }
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
 
-            // Pass 2 — opaque body. Switch back, allocate a scratch TLUT in
-            // the ring with slot 0xa zeroed (the shadow texel renders as a
-            // transparent pixel here, so we never overdraw the darkened
-            // background with palette colour 10). Then blit normally.
             if (pipeline != 0)
             {
                 rdpq_mode_combiner(RDPQ_COMBINER_TEX);
@@ -510,9 +645,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 &shadow_body_tluts[shadow_body_ring_idx * 16];
             if (++shadow_body_ring_idx >= SHADOW_TLUT_RING)
                 shadow_body_ring_idx = 0;
-            // Write through an uncached view so the 16 halfword stores go
-            // straight to RDRAM via the store buffer and the RDP TLUT-load
-            // DMA below sees fresh data without a data_cache writeback.
             uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
             for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
             scratch_uc[10] = 0;
@@ -535,5 +667,25 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             }
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
         }
+        last_atlas_ci4 = NULL;  // tex_blit clobbered TILE0/TILE1
     }
+
+#if HWSPR_PROFILE
+    static uint32_t prof_frame = 0;
+    uint64_t prof_t1 = get_ticks_us();
+    if ((prof_frame++ % 60) == 0)
+    {
+        debugf("spr[%5lu] total=%3lu (op=%3lu sh=%3lu) tlut up=%3lu skip=%3lu "
+               "pix=%6lu fitstrip=%3lu us=%5lu\n",
+               (unsigned long)prof_frame,
+               (unsigned long)prof_total,
+               (unsigned long)prof_opaque,
+               (unsigned long)prof_shadow,
+               (unsigned long)prof_tlut_uploaded,
+               (unsigned long)prof_tlut_skipped,
+               (unsigned long)prof_pix_total,
+               (unsigned long)prof_size_le2k,
+               (unsigned long)(prof_t1 - prof_t0));
+    }
+#endif
 }
