@@ -33,11 +33,17 @@ public:
     // [+1] Engine pitch high
     // [+2] Engine pitch low
     // [+3] Engine pitch vol
-    // [+4] Traffic data #1 
-    // [+5] Traffic data #2 
-    // [+6] Traffic data #3 
+    // [+4] Traffic data #1
+    // [+5] Traffic data #2
+    // [+6] Traffic data #3
     // [+7] Traffic data #4
     uint8_t engine_data[8];
+
+    // SegaPCM register RAM. Exposed publicly on N64 so the libdragon mixer
+    // backend (Audio::tick) can scan voice state directly without going
+    // through SegaPCM::stream_update — SegaPCM's per-sample mix loop is
+    // bypassed on N64 in favor of RSP-side mixing.
+    uint8_t* pcm_ram;
 
     OSoundInt();
     ~OSoundInt();
@@ -45,6 +51,13 @@ public:
     void init();
     void reset();
     void tick();
+
+    // Advance the Z80 audio code by an explicit number of 125 Hz ticks.
+    // tick() above advances by (125/config.fps) ticks per call, which assumes
+    // it's invoked from a frame-rate-paced loop. On N64 the main loop's
+    // frame rate is content-dependent, so audio drives this directly from
+    // wall clock instead.
+    void advance(int ticks);
 
     void play_queued_sound();
     void queue_sound_service(uint8_t snd);
@@ -58,9 +71,6 @@ private:
     // Fractionally counts number of times audio code must be called
     // We call the audio code 125 times per frame from a timing perspective.
     double audio_ticks;
-
-    // Reference to 0xFF bytes of PCM Chip RAM
-    uint8_t* pcm_ram;
 
     // Controls what type of sound we're going to process in the interrupt routine
     uint8_t sound_counter;

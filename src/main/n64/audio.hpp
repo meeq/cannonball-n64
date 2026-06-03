@@ -2,8 +2,9 @@
     N64 / libdragon Audio.
 
     Same public class shape as src/main/sdl2/audio.hpp so engine and frontend
-    code is platform-agnostic. Phase 1 ships as a no-op (sound disabled);
-    Phase 4 wires the libdragon mixer / PCM+YM streams.
+    code is platform-agnostic. Phase 4b routes SegaPCM through libdragon's
+    RSP mixer (one channel per voice) and CPU-adds the YM2151 stream on top
+    of the mixer's PCM output before handing the buffer to the AI.
 ***************************************************************************/
 
 #pragma once
@@ -22,8 +23,7 @@ struct wav_t
 class Audio
 {
 public:
-    // Enable/Disable Sound — public so config and main code can read it,
-    // matching the SDL Audio's member.
+    // Public so config and main code can read it (matches SDL Audio).
     bool sound_enabled = false;
 
     Audio();
@@ -39,4 +39,5 @@ public:
 
 private:
     wav_t wavfile{};
+    bool  dac_initialised = false;
 };

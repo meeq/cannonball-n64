@@ -82,6 +82,12 @@ namespace
         // every iteration and run at 2x speed. video.fps = 1 selects
         // "60 Hz display, 30 Hz engine tick" which matches the arcade cadence.
         config.video.fps = 1;
+
+        // Phase 4a audio: CPU-mixed YM2151 + SegaPCM → libdragon audio_push.
+        // 22050 Hz keeps the chip emulators' per-frame cost manageable at the
+        // 30 fps engine target; raise once budget permits.
+        config.sound.enabled = 1;
+        config.sound.rate    = 22050;
     }
 
     void tick_engine()
@@ -112,7 +118,11 @@ namespace
                 {
                     outrun.tick(tick_frame);
                     if (tick_frame) input.frame_done();
-                    osoundint.tick();
+                    // Z80 audio code is advanced from audio.tick() on a wall-
+                    // clock schedule; ticking it here would over-clock it when
+                    // the main loop is faster than the audio cadence and
+                    // under-clock it when the renderer falls behind, both of
+                    // which warp music tempo.
                 }
                 else if (tick_frame) input.frame_done();
                 break;
@@ -154,6 +164,12 @@ int main(int /*argc*/, char* /*argv*/[])
     if (!omusic.load_widescreen_map(config.data.res_path))
         debugf("Widescreen tilemaps not loaded\n");
 
+    // Bring the DAC up before set_fps() — config.set_fps() calls
+    // osoundint.init() (which sets the chip emulators' output rate) and then
+    // cycles audio.stop_audio()/start_audio() around it. With the DAC
+    // already initialised, those bounces are just flag toggles.
+    audio.init();
+
     config.set_fps(config.video.fps);
 
     if (!video.init(&roms, &config.video))
@@ -161,8 +177,6 @@ int main(int /*argc*/, char* /*argv*/[])
         debugf("video.init failed\n");
         while (1) { /* halt */ }
     }
-
-    audio.init();
 
     input.init(config.controls.pad_id,
                config.controls.keyconfig, config.controls.padconfig,

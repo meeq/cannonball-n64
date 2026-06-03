@@ -67,16 +67,21 @@ void OSoundInt::tick()
     // The audio code is updated 125 times per second
     audio_ticks += (125.0 / config.fps);
 
-    // Ticks per frame will vary between 2 and 3 at 60fps. 
+    // Ticks per frame will vary between 2 and 3 at 60fps.
     const int max_ticks = (int) audio_ticks;
 
-    for (int i = 0; i < max_ticks; i++)
+    advance(max_ticks);
+
+    audio_ticks -= max_ticks;
+}
+
+void OSoundInt::advance(int ticks)
+{
+    for (int i = 0; i < ticks; i++)
     {
         play_queued_sound(); // Process audio commands from main program code
         osound.tick();       // Tick Ported Z80 Audio Code
     }
-
-    audio_ticks -= max_ticks;
 }
 
 // ----------------------------------------------------------------------------
