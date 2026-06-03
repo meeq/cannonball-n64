@@ -33,6 +33,7 @@ namespace n64_profile
     uint32_t render_us  = 0;
     uint32_t tick_us    = 0;
     uint32_t wait_us    = 0;
+    uint32_t audio_us   = 0;
     uint32_t sub_us[SUB_COUNT] = {0};
 }
 
@@ -363,10 +364,11 @@ bool Render::finalize_frame()
     // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
     // own mode setup, so the preceding copy-mode blit is fine to leave as-is.
     rdpq_text_printf(NULL, FPS_FONT_ID, 4, 20,
-                     "FPS %4.1f ras %5lu wait %5lu",
+                     "FPS %4.1f ras %5lu wait %5lu aud %5lu",
                      display_get_fps(),
                      (unsigned long)n64_profile::prepare_us,
-                     (unsigned long)n64_profile::wait_us);
+                     (unsigned long)n64_profile::wait_us,
+                     (unsigned long)n64_profile::audio_us);
     rdpq_text_printf(NULL, FPS_FONT_ID, 4, 30,
                      "rbg%5lu tbg%5lu tfg%5lu rfg%5lu spr%5lu txt%5lu",
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],

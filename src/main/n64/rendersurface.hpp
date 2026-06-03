@@ -21,6 +21,7 @@ namespace n64_profile
     extern uint32_t render_us;    // RDP blit + present
     extern uint32_t tick_us;      // engine tick (excludes rasterize)
     extern uint32_t wait_us;      // display_get() vsync block
+    extern uint32_t audio_us;     // audio.tick (Z80 catchup + mixer_poll)
 
     enum {
         SUB_ROAD_BG,

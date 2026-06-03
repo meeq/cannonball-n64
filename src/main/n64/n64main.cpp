@@ -211,10 +211,12 @@ int main(int /*argc*/, char* /*argv*/[])
         uint64_t t3 = get_ticks_us();
 
         audio.tick();
+        uint64_t t4 = get_ticks_us();
 
         smooth(n64_profile::tick_us,    t1 - t0);
         if (tick_frame) smooth(n64_profile::prepare_us, t2 - t1);
         smooth(n64_profile::render_us,  t3 - t2);
+        smooth(n64_profile::audio_us,   t4 - t3);
     }
 
     // N64 can't actually quit — loop forever.

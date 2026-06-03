@@ -1,19 +1,24 @@
 /***************************************************************************
     N64 Audio — Phase 4b (RSP mixer).
 
-    SegaPCM is mapped onto libdragon's RSP audio mixer: each of the 16 PCM
-    voices becomes one mixer channel backed by a custom waveform_t that
-    reads bytes directly out of the (in-place-converted-to-signed) PCM ROM.
-    Per-frame, Audio::tick() scans the SegaPCM register file via
-    osoundint.pcm_ram and reconciles mixer channel state (play/stop, freq,
-    volume) with what the Z80 audio code has written.
+    Everything audible runs through libdragon's RSP audio mixer.
 
-    The YM2151 emulator still runs on the main CPU (no RSP FM ucode
-    available in libdragon). Its samples are buffered into a small ring
-    and CPU-summed into the mixer's PCM output buffer just before the
-    audio_write_end() handoff. SegaPCM::stream_update() is no longer
-    called on N64 — its 16-voice C++ mix loop was the dominant chip-side
-    CPU cost and is replaced wholesale by the RSP path.
+    SegaPCM voices map 1:1 onto mixer channels 0..15: each is a custom 8-bit
+    mono waveform_t that streams bytes out of the (in-place-converted-to-
+    signed) PCM ROM. Per-frame, reconcile_pcm() scans the SegaPCM register
+    file via osoundint.pcm_ram and translates Z80 writes into mixer state
+    (play/stop, freq, volume, loop).
+
+    The YM2151 emulator still runs on the main CPU (no RSP FM ucode exists
+    in libdragon), but its output rides the mixer too: channel 16+17 hold a
+    16-bit stereo streaming waveform whose WaveformRead callback drains an
+    intermediate ring topped up from ym->stream_update(). This lets the RSP
+    do the final stereo sum + clip with the PCM voices and means Audio::tick
+    is just mixer_try_play() — no CPU pass over the output buffer.
+
+    SegaPCM::stream_update() is no longer called on N64; its 16-voice C++
+    mix loop was the dominant chip-side CPU cost and the RSP path replaces
+    it wholesale.
 ***************************************************************************/
 
 #include "audio.hpp"
@@ -28,16 +33,11 @@
 
 namespace
 {
-    inline int16_t clip16(int32_t v)
-    {
-        if (v >  INT16_MAX) return INT16_MAX;
-        if (v <  INT16_MIN) return INT16_MIN;
-        return (int16_t)v;
-    }
-
     // ---- SegaPCM voice → mixer channel mapping --------------------------
 
-    constexpr int N_PCM_CH = 16;
+    constexpr int N_PCM_CH   = 16;
+    constexpr int YM_CH      = N_PCM_CH;        // channel 16
+    constexpr int N_MIXER_CH = N_PCM_CH + 2;    // YM is stereo → uses 16+17
 
     // OutRun's SegaPCM is constructed with BANK_512 against the 512 KiB
     // PCM ROM. SegaPCM's constructor resolves these to fixed values that
@@ -174,19 +174,79 @@ namespace
         }
     }
 
-    // ---- YM2151 ring -----------------------------------------------------
+    // ---- YM2151 → mixer channel 16 (stereo) -----------------------------
     //
     // The YM2151 emulator produces frame_size = rate/fps stereo samples per
-    // stream_update() call (e.g. 22050/60 = 367). libdragon's audio buffer
-    // is rate/25 stereo samples (~880 at 22 kHz). Ring decouples the two
-    // cadences so we can call mixer_poll for whole audio buffers regardless
-    // of where the chip is in its own frame.
+    // stream_update() call (e.g. 22050/60 = 367). The mixer's audio buffer
+    // is rate/25 stereo samples (~880 at 22 kHz). A small ring decouples
+    // the two cadences so the WaveformRead callback can satisfy whatever
+    // wlen the mixer asks for without partial-frame bookkeeping.
 
     constexpr int YM_RING_CAP = 4096;       // stereo samples, must be pow2
     int16_t ym_ring[YM_RING_CAP * 2];       // interleaved L,R
     int     ym_ring_wpos  = 0;
     int     ym_ring_rpos  = 0;
     int     ym_ring_count = 0;
+
+    waveform_t ym_wave;
+
+    inline void ym_ring_push(int16_t l, int16_t r)
+    {
+        ym_ring[ym_ring_wpos*2 + 0] = l;
+        ym_ring[ym_ring_wpos*2 + 1] = r;
+        ym_ring_wpos = (ym_ring_wpos + 1) & (YM_RING_CAP - 1);
+        ym_ring_count++;
+    }
+
+    inline void ym_ring_pop(int16_t& l, int16_t& r)
+    {
+        l = ym_ring[ym_ring_rpos*2 + 0];
+        r = ym_ring[ym_ring_rpos*2 + 1];
+        ym_ring_rpos = (ym_ring_rpos + 1) & (YM_RING_CAP - 1);
+        ym_ring_count--;
+    }
+
+    void ym_voice_read(void* /*ctx*/, samplebuffer_t* sbuf, int /*wpos*/, int wlen, bool /*seeking*/)
+    {
+        // Top up the ring until we can satisfy this request, bounded so a
+        // slow YM chip can't stall the mixer arbitrarily. Each stream_update
+        // produces frame_size samples (rate/fps); at 22 kHz / 60 fps that's
+        // 367 per call, so 3 calls (1101) covers a full ~880-frame audio
+        // buffer plus carry-over for the next callback.
+        constexpr int YM_BUDGET = 3;
+        int pushed = 0;
+        while (ym_ring_count < wlen && pushed < YM_BUDGET)
+        {
+            osoundint.ym->stream_update();
+            const int entries = (int)osoundint.ym->buffer_size;
+            const int samples = entries / 2;
+            if (samples == 0) break;
+            int16_t* src = osoundint.ym->get_buffer();
+            for (int i = 0; i < samples; i++)
+            {
+                if (ym_ring_count == YM_RING_CAP) break;
+                ym_ring_push(src[2*i + 0], src[2*i + 1]);
+            }
+            pushed++;
+        }
+
+        // samplebuffer is 16-bit stereo: each "sample" is one L/R frame,
+        // 4 bytes wide. wlen is frames; we write wlen * 2 int16s.
+        int16_t* dst = (int16_t*)samplebuffer_append(sbuf, wlen);
+        const int copy = (ym_ring_count < wlen) ? ym_ring_count : wlen;
+        for (int i = 0; i < copy; i++)
+        {
+            int16_t l, r;
+            ym_ring_pop(l, r);
+            dst[2*i + 0] = l;
+            dst[2*i + 1] = r;
+        }
+        for (int i = copy; i < wlen; i++)
+        {
+            dst[2*i + 0] = 0;
+            dst[2*i + 1] = 0;
+        }
+    }
 
     // ---- Z80 audio code wall-clock driver -------------------------------
     //
@@ -227,22 +287,6 @@ namespace
             z80_us_pending -= n * US_PER_Z80_TICK;
         }
     }
-
-    inline void ym_ring_push(int16_t l, int16_t r)
-    {
-        ym_ring[ym_ring_wpos*2 + 0] = l;
-        ym_ring[ym_ring_wpos*2 + 1] = r;
-        ym_ring_wpos = (ym_ring_wpos + 1) & (YM_RING_CAP - 1);
-        ym_ring_count++;
-    }
-
-    inline void ym_ring_pop(int16_t& l, int16_t& r)
-    {
-        l = ym_ring[ym_ring_rpos*2 + 0];
-        r = ym_ring[ym_ring_rpos*2 + 1];
-        ym_ring_rpos = (ym_ring_rpos + 1) & (YM_RING_CAP - 1);
-        ym_ring_count--;
-    }
 }
 
 Audio::Audio() = default;
@@ -265,7 +309,7 @@ void Audio::init()
     audio_init(config.sound.rate, 4);
     dac_initialised = true;
 
-    mixer_init(N_PCM_CH);
+    mixer_init(N_MIXER_CH);
 
     // SegaPCM samples ship unsigned-biased; the mixer needs signed PCM. We
     // convert the ROM in place since SegaPCM::stream_update() is never
@@ -308,12 +352,30 @@ void Audio::init()
     ym_ring_rpos  = 0;
     ym_ring_count = 0;
 
+    ym_wave.name       = "ym2151";
+    ym_wave.bits       = 16;
+    ym_wave.channels   = 2;
+    ym_wave.frequency  = (float)config.sound.rate;
+    ym_wave.len        = WAVEFORM_UNKNOWN_LEN;
+    ym_wave.loop_len   = 0;
+    ym_wave.start      = nullptr;
+    ym_wave.read       = ym_voice_read;
+    ym_wave.ctx        = nullptr;
+    ym_wave.state_size = 0;
+    ym_wave.__uuid     = 0;
+
+    // Pin the YM pair to its actual playback shape so the mixer doesn't
+    // size sample buffers for a higher cap than we need.
+    mixer_ch_set_limits(YM_CH, 16, (float)config.sound.rate, 0);
+    mixer_ch_play(YM_CH, &ym_wave);
+    mixer_ch_set_vol(YM_CH, 1.0f, 1.0f);
+
     z80_us_pending = 0.0;
     z80_last_us    = 0;
 
     sound_enabled = true;
 
-    debugf("audio: init rate=%d, mixer up with %d PCM channels (+YM CPU-mix)\n",
+    debugf("audio: init rate=%d, mixer up with %d PCM channels + YM stereo\n",
            audio_get_frequency(), N_PCM_CH);
 }
 
@@ -329,9 +391,9 @@ void Audio::clear_wav() {}
 
 void Audio::tick()
 {
-    // Always advance Z80 audio code on wall-clock, even before sound_enabled
-    // flips on, so the chip register stream is consistent. Cheap when there
-    // are no pending ticks.
+    // Always advance the Z80 audio code on wall-clock, even before
+    // sound_enabled flips on, so the chip register stream stays consistent
+    // with the engine. Cheap when there are no pending ticks.
     advance_z80_audio();
 
     if (!sound_enabled) return;
@@ -341,51 +403,22 @@ void Audio::tick()
     const int blen = audio_get_buffer_length();
     if (blen <= 0) return;
 
-    // Cap per-tick CPU bursts so a single audio.tick can't drag the renderer
-    // into a vicious cycle (slow tick → more catchup → slower tick).
-    //
-    // YM stream_update is the dominant per-sample CPU cost; each call covers
-    // rate/config.fps stereo samples (~367 at 22050/60). Two calls per tick
-    // is enough to keep up at a steady 60-fps main loop with margin; if the
-    // renderer falls below ~30 fps the YM ring will underrun into silence
-    // rather than dragging the rest of the loop with it.
-    //
-    // mixer_poll is capped to one per tick because it spin-waits on RSP
-    // (rspq_highpri_sync) — serializing repeatedly with the renderer's RSP
-    // work is what made Phase 4b slower than 4a's plain audio_push path.
-    const int YM_BUDGET = 2;
-
-    int ym_pushed = 0;
-    while (ym_ring_count < blen && ym_pushed < YM_BUDGET)
+    // Cap mixer_poll iterations per tick. mixer_try_play loops while
+    // audio_can_write(), which fills every free buffer in one shot — and
+    // when the queue is fully drained (e.g. after a track-load burst on the
+    // music-select screen), each iteration runs the YM callback with up to
+    // YM_BUDGET stream_updates: worst case 2*3=6 chip calls, capped.
+    // Without the cap a single tick can run 16+ chip calls and block for
+    // seconds. 2 polls × ~40 ms of audio per buffer = 80 ms of audio per
+    // tick, enough to sustain the 25 buffers/sec consumption rate down to
+    // ~12 fps tick rate before the queue underruns.
+    constexpr int MAX_POLLS_PER_TICK = 2;
+    int polls = 0;
+    while (audio_can_write() && polls < MAX_POLLS_PER_TICK)
     {
-        osoundint.ym->stream_update();
-        const int entries = (int)osoundint.ym->buffer_size;
-        const int samples = entries / 2;
-        if (samples == 0) break;
-        int16_t* src = osoundint.ym->get_buffer();
-        for (int i = 0; i < samples; i++)
-        {
-            if (ym_ring_count == YM_RING_CAP) break;
-            ym_ring_push(src[2*i + 0], src[2*i + 1]);
-        }
-        ym_pushed++;
+        int16_t* buf = audio_write_begin();
+        mixer_poll(buf, blen);
+        audio_write_end();
+        polls++;
     }
-
-    if (!audio_can_write()) return;
-
-    int16_t* out = audio_write_begin();
-    mixer_poll(out, blen);
-
-    const int copy = (ym_ring_count < blen) ? ym_ring_count : blen;
-    for (int i = 0; i < copy; i++)
-    {
-        int16_t l, r;
-        ym_ring_pop(l, r);
-        int32_t sl = (int32_t)out[2*i + 0] + (int32_t)l;
-        int32_t sr = (int32_t)out[2*i + 1] + (int32_t)r;
-        out[2*i + 0] = clip16(sl);
-        out[2*i + 1] = clip16(sr);
-    }
-
-    audio_write_end();
 }
