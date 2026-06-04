@@ -185,6 +185,15 @@ int main(int /*argc*/, char* /*argv*/[])
 
     state = STATE_INIT_GAME;
 
+    // Warm up the engine before the first render. The OutRun attract sequence
+    // fades the sky palette in via opalette.cycle_sky_palette over several
+    // vints and populates the tilemap incrementally. SDL hides this behind
+    // ~60 fps frames so it's imperceptible; on N64 the first second runs at
+    // ~5 fps (atlas extraction + heavy startup work), which stretches the
+    // warm-up into a visible brown-sky / partial-tilemap flash.
+    for (int i = 0; i < 8; i++)
+        tick_engine();
+
     // EMA smoothing for on-screen profile counters so they don't strobe.
     auto smooth = [](uint32_t& acc, uint64_t sample)
     {
