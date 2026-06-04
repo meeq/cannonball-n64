@@ -121,7 +121,7 @@ function(n64_setup_linking target_name)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# n64_create_rom(target_name [TITLE ...] [DFS_ROOT ...])
+# n64_create_rom(target_name [TITLE ...] [DFS_ROOT ...] [EXTRA_DFS_DEPS ...])
 #
 # Produces a .z64 from an ELF target, optionally including a DFS filesystem.
 # Mirrors the %.z64 rule in n64.mk:
@@ -129,9 +129,13 @@ endfunction()
 #   2. Strip the ELF
 #   3. Compress the stripped ELF (n64elfcompress)
 #   4. Assemble ROM with n64tool
+#
+# EXTRA_DFS_DEPS lets the caller name additional files (generated at build
+# time, outside DFS_ROOT's configure-time glob) that mkdfs should be re-run
+# for when they change.
 # ---------------------------------------------------------------------------
 function(n64_create_rom target_name)
-    cmake_parse_arguments(ARG "" "TITLE;DFS_ROOT" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "TITLE;DFS_ROOT" "EXTRA_DFS_DEPS" ${ARGN})
 
     if(NOT ARG_TITLE)
         set(ARG_TITLE "Made with libdragon")
@@ -178,7 +182,7 @@ function(n64_create_rom target_name)
         add_custom_command(
             OUTPUT "${dfs_out}"
             COMMAND ${N64_MKDFS} "${dfs_out}" "${ARG_DFS_ROOT}"
-            DEPENDS ${DFS_INPUTS}
+            DEPENDS ${DFS_INPUTS} ${ARG_EXTRA_DFS_DEPS}
             COMMENT "[DFS] ${target_name}.dfs"
         )
         list(APPEND n64tool_deps "${dfs_out}")

@@ -573,6 +573,11 @@ void Outrun::main_switch()
                 oferrari.car_ctrl_active = true; // 0 : Allow road updates
                 init_jump_table();
                 oinitengine.init(cannonball_mode == MODE_TTRIAL ? ttrial.level : 0);
+                // Stop hi-score music (LASTWAVE) before falling back to attract.
+                // Mirrors the GS_BEST1 → GS_INIT_LOGO transition. On SDL2 the
+                // YM2151's natural end-of-track reaches silence on its own;
+                // wav64 playback on N64 doesn't, so the cue is required.
+                osoundint.queue_sound(sound::FM_RESET);
                 //ROM:0000B716                 bclr    #0,(byte_260550).l
                 game_state = GS_REINIT;          // Reinit game to attract mode
             }

@@ -193,18 +193,14 @@ endif()
 configure_file(../res/tilemap.bin   "${N64_DFS_ROOT}/res/tilemap.bin"   COPYONLY)
 configure_file(../res/tilepatch.bin "${N64_DFS_ROOT}/res/tilepatch.bin" COPYONLY)
 
-# wav64-compressed audio (music + SFX). Generated host-side by
-# tools/audio-render/render-all.sh + tools/audio-render/wav2wav64.sh from
-# the Z80 sound program; we don't bundle the raw WAVs in the DFS.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../audio/wav64")
-    file(GLOB CANNONBALL_WAV64 "${CMAKE_CURRENT_SOURCE_DIR}/../audio/wav64/*.wav64")
-    foreach(w ${CANNONBALL_WAV64})
-        get_filename_component(w_name ${w} NAME)
-        configure_file(${w} "${N64_DFS_ROOT}/audio/${w_name}" COPYONLY)
-    endforeach()
-endif()
+# wav64-compressed audio (music + SFX). Generated from the OutRun Z80 sound
+# program at build time and staged into ${N64_DFS_ROOT}/audio — see
+# cmake/audio-payload.cmake.
+include(audio-payload.cmake)
+add_dependencies(cannonball audio-payload)
 
 n64_create_rom(cannonball
     TITLE "CannonBall"
     DFS_ROOT "${N64_DFS_ROOT}"
+    EXTRA_DFS_DEPS ${AUDIO_PAYLOAD_STAGED_FILES}
 )
