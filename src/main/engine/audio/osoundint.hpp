@@ -64,7 +64,16 @@ public:
     void queue_sound(uint8_t snd);
     void queue_clear();
 
+    // Optional platform-installed intercept. Called from add_to_queue before
+    // the command lands in the Z80 queue; returning true consumes the
+    // command (Z80 audio code never sees it). The N64 backend installs this
+    // to route YM2151-rendered sounds to pre-decoded wav64 playback while
+    // leaving SegaPCM SFX to flow through the original Z80 dispatch.
+    typedef bool (*intercept_fn_t)(uint8_t snd);
+    void set_intercept(intercept_fn_t fn) { intercept = fn; }
+
 private:
+    intercept_fn_t intercept = nullptr;
     // 4 MHz
     static const uint32_t SOUND_CLOCK = 4000000;
 

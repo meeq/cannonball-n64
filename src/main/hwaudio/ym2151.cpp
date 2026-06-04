@@ -140,7 +140,10 @@ uint32_t       noise_tab[32];       /* 17bit Noise Generator periods */
 *   TL_RES_LEN - sinus resolution (X axis)
 */
 #define TL_TAB_LEN (13*2*TL_RES_LEN)
-static signed int tl_tab[TL_TAB_LEN];
+// N64: collapsed from full 13-octave table (26.6 KB, blows the 8 KB D-cache)
+// to the base octave only (512 B, resident permanently). op_calc / op_calc1
+// reconstruct tl_tab[p] = (sign ? -1 : 1) * (tl_base[p>>1 & 255] >> octave).
+static int16_t tl_base[TL_RES_LEN];
 
 #define ENV_QUIET        (TL_TAB_LEN>>3)
 
@@ -440,20 +443,7 @@ void YM2151::init_tables()
             n = n>>1;
                         /* 11 bits here (rounded) */
         n <<= 2;        /* 13 bits here (as in real chip) */
-        tl_tab[ x*2 + 0 ] = n;
-        tl_tab[ x*2 + 1 ] = -tl_tab[ x*2 + 0 ];
-
-        for (i=1; i<13; i++)
-        {
-            tl_tab[ x*2+0 + i*2*TL_RES_LEN ] =  tl_tab[ x*2+0 ]>>i;
-            tl_tab[ x*2+1 + i*2*TL_RES_LEN ] = -tl_tab[ x*2+0 + i*2*TL_RES_LEN ];
-        }
-    #if 0
-        logerror("tl %04i", x*2);
-        for (i=0; i<13; i++)
-            logerror(", [%02i] %4i", i*2, tl_tab[ x*2 /*+1*/ + i*2*TL_RES_LEN ]);
-        logerror("\n");
-    #endif
+        tl_base[x] = (int16_t)n;
     }
     /*logerror("TL_TAB_LEN = %i (%i bytes)\n",TL_TAB_LEN, (int)sizeof(tl_tab));*/
     /*logerror("ENV_QUIET= %i\n",ENV_QUIET );*/
@@ -1398,7 +1388,8 @@ signed int YM2151::op_calc(YM2151Operator * OP, unsigned int env, signed int pm)
     if (p >= TL_TAB_LEN)
         return 0;
 
-    return tl_tab[p];
+    int amp = tl_base[(p >> 1) & 255] >> (p >> 9);
+    return (p & 1) ? -amp : amp;
 }
 
 signed int YM2151::op_calc1(YM2151Operator * OP, unsigned int env, signed int pm)
@@ -1407,16 +1398,13 @@ signed int YM2151::op_calc1(YM2151Operator * OP, unsigned int env, signed int pm
     int32_t  i;
     i = (OP->phase & ~FREQ_MASK) + pm;
 
-/*logerror("i=%08x (i>>16)&511=%8i phase=%i [pm=%08x] ",i, (i>>16)&511, OP->phase>>FREQ_SH, pm);*/
-
     p = (env<<3) + sin_tab[ (i>>FREQ_SH) & SIN_MASK];
-
-/*logerror("(p&255=%i p>>8=%i) out= %i\n", p&255,p>>8, tl_tab[p&255]>>(p>>8) );*/
 
     if (p >= TL_TAB_LEN)
         return 0;
 
-    return tl_tab[p];
+    int amp = tl_base[(p >> 1) & 255] >> (p >> 9);
+    return (p & 1) ? -amp : amp;
 }
 
 #define volume_calc(OP) ((OP)->tl + ((uint32_t)(OP)->volume) + (AM & (OP)->AMmask))
@@ -2107,4 +2095,61 @@ void YM2151::stream_update()
 #endif
         advance();
     }
+}
+
+// ---------------------------------------------------------------------------
+// State fingerprinting for find-song-loop (host-side tool).
+//
+// The chip's forward-evolving state lives in this translation unit as file-
+// scope globals (MAME convention). state_view() copies them into a flat
+// buffer in a fixed order; state_bytes() reports the buffer size.
+//
+// Configuration tables (freq, dt1_freq, noise_tab, tim_A_tab, tim_B_tab) are
+// derived once from clock/rate and never mutate; excluding them keeps the
+// snapshot small. The per-frame output buffer (from SoundChip::write_buffer)
+// is cleared at the top of every stream_update() and isn't part of forward
+// state either.
+// ---------------------------------------------------------------------------
+size_t YM2151::state_bytes()
+{
+    return sizeof(oper) + sizeof(chanout) +
+           sizeof(m2) + sizeof(c1) + sizeof(c2) + sizeof(mem) +
+           sizeof(pan) +
+           sizeof(eg_cnt) + sizeof(eg_timer) +
+           sizeof(lfo_phase) + sizeof(lfo_timer) + sizeof(lfo_counter) +
+           sizeof(lfo_wsel) + sizeof(amd) + sizeof(pmd) +
+           sizeof(lfa) + sizeof(lfp) +
+           sizeof(test) + sizeof(ct) +
+           sizeof(noise) + sizeof(noise_rng) + sizeof(noise_p) + sizeof(noise_f) +
+           sizeof(csm_req) + sizeof(irq_enable) + sizeof(status) +
+           sizeof(connects) +
+#ifndef USE_MAME_TIMERS
+           sizeof(tim_A) + sizeof(tim_B) + sizeof(tim_A_val) + sizeof(tim_B_val) +
+#endif
+           sizeof(timer_A_index) + sizeof(timer_B_index) +
+           sizeof(timer_A_index_old) + sizeof(timer_B_index_old);
+}
+
+void YM2151::state_view(uint8_t* dst) const
+{
+    uint8_t* p = dst;
+    #define COPY(x) do { std::memcpy(p, &(x), sizeof(x)); p += sizeof(x); } while (0)
+    COPY(oper);
+    COPY(chanout);
+    COPY(m2); COPY(c1); COPY(c2); COPY(mem);
+    COPY(pan);
+    COPY(eg_cnt); COPY(eg_timer);
+    COPY(lfo_phase); COPY(lfo_timer); COPY(lfo_counter);
+    COPY(lfo_wsel); COPY(amd); COPY(pmd);
+    COPY(lfa); COPY(lfp);
+    COPY(test); COPY(ct);
+    COPY(noise); COPY(noise_rng); COPY(noise_p); COPY(noise_f);
+    COPY(csm_req); COPY(irq_enable); COPY(status);
+    COPY(connects);
+#ifndef USE_MAME_TIMERS
+    COPY(tim_A); COPY(tim_B); COPY(tim_A_val); COPY(tim_B_val);
+#endif
+    COPY(timer_A_index); COPY(timer_B_index);
+    COPY(timer_A_index_old); COPY(timer_B_index_old);
+    #undef COPY
 }

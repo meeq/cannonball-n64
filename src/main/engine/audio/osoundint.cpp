@@ -161,6 +161,9 @@ void OSoundInt::queue_sound(uint8_t snd)
 
 void OSoundInt::add_to_queue(uint8_t snd)
 {
+    if (intercept && intercept(snd))
+        return;
+
     // Add sound to the tail end of the queue
     queue[sound_tail] = snd;
     sound_tail = (sound_tail + 1) & QUEUE_LENGTH;

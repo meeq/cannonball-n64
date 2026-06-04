@@ -2,9 +2,10 @@
     N64 / libdragon Audio.
 
     Same public class shape as src/main/sdl2/audio.hpp so engine and frontend
-    code is platform-agnostic. Phase 4b routes SegaPCM through libdragon's
-    RSP mixer (one channel per voice) and CPU-adds the YM2151 stream on top
-    of the mixer's PCM output before handing the buffer to the AI.
+    code is platform-agnostic. Phase 4c routes SegaPCM through libdragon's
+    RSP mixer (one channel per voice) and dispatches pre-rendered VADPCM
+    wav64 files for the eleven YM2151-driven music + FM SFX commands; the
+    YM2151 emulator is retained for its cheap register interface only.
 ***************************************************************************/
 
 #pragma once

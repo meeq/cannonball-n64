@@ -34,6 +34,9 @@ namespace n64_profile
     uint32_t tick_us    = 0;
     uint32_t wait_us    = 0;
     uint32_t audio_us   = 0;
+    uint32_t aud_z80_us = 0;
+    uint32_t aud_pcm_us = 0;
+    uint32_t aud_mix_us = 0;
     uint32_t sub_us[SUB_COUNT] = {0};
 }
 
@@ -377,6 +380,15 @@ bool Render::finalize_frame()
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_FG],
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_SPRITE],
                      (unsigned long)n64_profile::sub_us[n64_profile::SUB_TEXT]);
+
+    // Audio cost breakdown: z80 catchup, segapcm reconcile, mixer_poll.
+    // YM2151 sample generation has been retired (wav64 dispatch covers
+    // all music + FM SFX) so there's no separate ym counter to track.
+    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 40,
+                     "z80%5lu pcm%5lu mix%5lu",
+                     (unsigned long)n64_profile::aud_z80_us,
+                     (unsigned long)n64_profile::aud_pcm_us,
+                     (unsigned long)n64_profile::aud_mix_us);
 
     rdpq_detach_show();
     return true;

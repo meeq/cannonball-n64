@@ -81,6 +81,20 @@ public:
     void write_reg(int r, int v);
     int read_status();
 
+    // Forward-evolving chip state — everything mutated by stream_update +
+    // write_reg that influences future audio output. Used by host-side
+    // tools (e.g. find-song-loop) to detect when the chip has returned to
+    // a previously-seen state, so the rendered output from that point on
+    // is sample-identical.
+    //
+    // Excludes configuration tables (freq, dt1_freq, noise_tab, tim_*_tab)
+    // and the per-frame output buffer (cleared at the top of every
+    // stream_update). Includes the file-scope pointer fields inside
+    // YM2151Operator; those don't move within a single process, so they
+    // contribute fixed-byte padding to every snapshot.
+    static size_t state_bytes();
+    void state_view(uint8_t* dst) const;
+
 private:
     int clock;        /*chip clock in Hz (passed from 2151intf.c)*/
     int sampfreq;     /*sampling frequency in Hz (passed from 2151intf.c)*/

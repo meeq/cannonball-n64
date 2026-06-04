@@ -597,8 +597,18 @@ void OSound::next_mml_cmd(uint8_t* chan, uint8_t cmd)
             break;
 
         case mml::LOOP_FOREVER:
+        {
+            // Diagnostic counter for tools/audio-render/detect_loop. See
+            // loop_fires[] in osound.hpp.
+            long off = (long)(chan - chan_ram) - 0x20;
+            if (off >= 0 && off < (long)(sizeof(loop_fires)/sizeof(loop_fires[0])) * 0x20
+                && (off % 0x20) == 0)
+            {
+                loop_fires[off / 0x20]++;
+            }
             set_loop_adr();
             break;
+        }
 
         // YM: Set Note/Octave Offset
         case mml::TRANSPOSE:
@@ -607,8 +617,24 @@ void OSound::next_mml_cmd(uint8_t* chan, uint8_t cmd)
 
         // LOOP	loopNumber, loopCount, loopAddress
         case mml::LOOP:
+        {
+            // Diagnostic counter: see loop_fires[] in osound.hpp. We bump
+            // here only when do_loop actually re-enters the loop (i.e. the
+            // counter is non-zero and it calls set_loop_adr). We can't tell
+            // from inside do_loop's scope, so peek at pos before/after.
+            uint16_t before = pos;
             do_loop(chan);
+            if (pos < before)
+            {
+                long off = (long)(chan - chan_ram) - 0x20;
+                if (off >= 0 && off < (long)(sizeof(loop_fires)/sizeof(loop_fires[0])) * 0x20
+                    && (off % 0x20) == 0)
+                {
+                    loop_fires[off / 0x20]++;
+                }
+            }
             break;
+        }
 
         // Only used by Step On Beat (Switch)
         case mml::PITCH_BEND_END:

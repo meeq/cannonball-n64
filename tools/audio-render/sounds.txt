@@ -1,0 +1,46 @@
+# Sound IDs to render for the N64 wav64 audio path.
+# Columns: id  duration_s  flags  filename
+#   flags: m = music (capture YM+PCM mix); fx = YM-only FM SFX
+# IDs come from src/main/engine/audio/commands.hpp.
+
+# --- Music tracks (long, looping; mix includes PCM drum channels) -----------
+#
+# Render durations here only need to be long enough to contain >= 2 full
+# cycles of the suspected song loop (so autocorrelation can resolve it).
+# The actual loop boundaries used by wav2wav64.sh are not derived from
+# detect-loop — they come from find-loop.py, which autocorrelates the
+# rendered waveform itself. detect-loop reports per-channel LOOP_FOREVER
+# fires but the song's perceived loop is a property of the mixed audio
+# and may not align with any single channel's MML loop. See find-loop.py
+# header for the algorithm.
+#
+# Tempo: render.cpp pins config.fps = 25 so 125/fps = 5 ticks (exact); the
+# old fps=60 silently truncated 125/60=2.083 to 2 and played all music 4.17%
+# slow — which is why earlier loop-fitting attempts found periods that
+# disagreed with detect-loop by exactly that ratio.
+#
+# Render durations below are intentionally generous; refresh by running
+# tools/audio-render/render-all.sh and then find-loop.py.
+#
+# Loop values come from tools/audio-render/measure-splice.py, which
+# measures the actual splice click on the rendered audio. Picks the
+# (period, intro) with bit-exact point_step and lowest 50 ms window RMS.
+# Render durations must be > 2 × period + intro for the search.
+#   BREEZE   intro=  6.5497s  period= 61.440s   ->  -62 dB
+#   SPLASH   intro= 46.7897s  period=122.880s   ->  -87 dB
+#   MAGICAL  intro=157.2499s  period= 30.720s   ->  -65 dB
+0x81  240  m   music_breeze.wav      # MUSIC_BREEZE  — Passing Breeze       (intro   6.550s, loop  61.440s)
+0x82  500  m   music_splash.wav      # MUSIC_SPLASH  — Splash Wave          (intro  46.790s, loop 122.880s)
+0x85  260  m   music_magical.wav     # MUSIC_MAGICAL — Magical Sound Shower (intro 157.250s, loop  30.720s)
+0xA5   95  m   music_lastwave.wav    # MUSIC_LASTWAVE — Last Wave (one-shot, ends ~93s)
+
+# --- Music-channel jingles (short; on YM1, both call fm_reset) --------------
+0x9A   2  m   ym_ufo.wav            # UFO
+0x9B   1  m   ym_beep2.wav          # BEEP2 — double beep
+
+# --- FM SFX (short; YM-only on YM_FX1) --------------------------------------
+0x84   1  fx  ym_coin_in.wav        # COIN_IN
+0x86   1  fx  ym_checkpoint.wav     # YM_CHECKPOINT — checkpoint ding
+0x94   1  fx  ym_signal1.wav        # SIGNAL1
+0x95   1  fx  ym_signal2.wav        # SIGNAL2
+0x99   1  fx  ym_beep1.wav          # BEEP1

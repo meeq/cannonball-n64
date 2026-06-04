@@ -54,6 +54,8 @@
  * 
  */
 
+#include <cstring>
+
 #include "hwaudio/segapcm.hpp"
 
 SegaPCM::SegaPCM(uint32_t clock, RomLoader* rom, uint8_t* ram, int32_t bank)
@@ -149,4 +151,9 @@ void SegaPCM::stream_update()
             low[ch] = regs[0x86] & 1 ? 0 : addr;
         }
     }
+}
+
+void SegaPCM::state_view(uint8_t* dst) const
+{
+    std::memcpy(dst, low, STATE_BYTES);
 }

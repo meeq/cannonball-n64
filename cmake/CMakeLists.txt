@@ -181,6 +181,7 @@ set(N64_DFS_ROOT "${CMAKE_CURRENT_BINARY_DIR}/dfs")
 add_custom_command(TARGET cannonball PRE_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${N64_DFS_ROOT}/roms"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${N64_DFS_ROOT}/res"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${N64_DFS_ROOT}/audio"
 )
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../roms")
     file(GLOB CANNONBALL_ROMS "${CMAKE_CURRENT_SOURCE_DIR}/../roms/*")
@@ -191,6 +192,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../roms")
 endif()
 configure_file(../res/tilemap.bin   "${N64_DFS_ROOT}/res/tilemap.bin"   COPYONLY)
 configure_file(../res/tilepatch.bin "${N64_DFS_ROOT}/res/tilepatch.bin" COPYONLY)
+
+# wav64-compressed audio (music + SFX). Generated host-side by
+# tools/audio-render/render-all.sh + tools/audio-render/wav2wav64.sh from
+# the Z80 sound program; we don't bundle the raw WAVs in the DFS.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../audio/wav64")
+    file(GLOB CANNONBALL_WAV64 "${CMAKE_CURRENT_SOURCE_DIR}/../audio/wav64/*.wav64")
+    foreach(w ${CANNONBALL_WAV64})
+        get_filename_component(w_name ${w} NAME)
+        configure_file(${w} "${N64_DFS_ROOT}/audio/${w_name}" COPYONLY)
+    endforeach()
+endif()
 
 n64_create_rom(cannonball
     TITLE "CannonBall"

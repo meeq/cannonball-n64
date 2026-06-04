@@ -165,6 +165,7 @@ local.properties
 .builds
 *.dotCover
 *.d
+build-host/
 build-n64/
 
 ## TODO: If you have NuGet Package Restore enabled, uncomment this

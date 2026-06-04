@@ -22,6 +22,9 @@ namespace n64_profile
     extern uint32_t tick_us;      // engine tick (excludes rasterize)
     extern uint32_t wait_us;      // display_get() vsync block
     extern uint32_t audio_us;     // audio.tick (Z80 catchup + mixer_poll)
+    extern uint32_t aud_z80_us;   // advance_z80_audio
+    extern uint32_t aud_pcm_us;   // reconcile_pcm
+    extern uint32_t aud_mix_us;   // mixer_poll loop
 
     enum {
         SUB_ROAD_BG,
