@@ -14,6 +14,7 @@
 #include "frontend/config.hpp"
 #include "engine/oroad.hpp"
 #include "n64/rendersurface.hpp"
+#include "n64/hwroad_rsp.hpp"
 #include <libdragon.h>
 
 // Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
@@ -172,8 +173,14 @@ void Video::prepare_frame()
 
     N64_PROFILE_PHASE_BEGIN();
     if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
-        (hwroad.*hwroad.render_foreground)(renderer->scratch_uc(),
-                                           renderer->rgb_lut());
+    {
+        if (n64::hwroad_rsp::enabled)
+            hwroad.render_foreground_lores_rsp(renderer->scratch_uc(),
+                                               renderer->rgb_lut());
+        else
+            (hwroad.*hwroad.render_foreground)(renderer->scratch_uc(),
+                                               renderer->rgb_lut());
+    }
     N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
 }
 

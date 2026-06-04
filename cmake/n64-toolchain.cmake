@@ -121,6 +121,78 @@ function(n64_setup_linking target_name)
 endfunction()
 
 # ---------------------------------------------------------------------------
+# n64_add_rsp_ucode(target_name source_path)
+#
+# Mirrors n64.mk's "rsp*.S" rule: assemble the file as an RSP overlay (mips1
+# ABI, linked with rsp.ld), then split the resulting ELF into raw .text /
+# .data / .meta blobs, wrap each blob back into an elf32-bigmips relocatable
+# with renamed symbols (`<ucode>_text_start/end/size`, etc.), `ld -relocatable`
+# the three pieces together, and link the result into the host target as an
+# external object so DEFINE_RSP_UCODE on the CPU side can resolve it.
+#
+# Empty .meta sections get a single \0 byte so objcopy doesn't refuse the
+# section — same hack as the upstream Makefile.
+# ---------------------------------------------------------------------------
+function(n64_add_rsp_ucode target_name source_path)
+    get_filename_component(ucode_name "${source_path}" NAME_WE)
+    get_filename_component(source_abs  "${source_path}" ABSOLUTE)
+
+    set(ucode_dir "${CMAKE_CURRENT_BINARY_DIR}/rsp")
+    set(ucode_obj "${ucode_dir}/${ucode_name}.o")
+    file(MAKE_DIRECTORY "${ucode_dir}")
+
+    set(rspas_flags
+        "-march=mips1" "-mabi=32" "-Wa,--fatal-warnings"
+        "-I${N64_INCLUDE}" "-g")
+
+    add_custom_command(
+        OUTPUT "${ucode_obj}"
+        DEPENDS "${source_abs}"
+        WORKING_DIRECTORY "${ucode_dir}"
+        COMMAND ${CMAKE_C_COMPILER} ${rspas_flags}
+                -L${N64_LIB} -nostartfiles
+                -Wl,-Trsp.ld -Wl,--gc-sections
+                -Wl,-Map=${ucode_name}.map,--cref
+                -o "${ucode_name}.elf" "${source_abs}"
+        COMMAND ${N64_OBJCOPY} -O binary -j .text "${ucode_name}.elf" "${ucode_name}.text.bin"
+        COMMAND ${N64_OBJCOPY} -O binary -j .data "${ucode_name}.elf" "${ucode_name}.data.bin"
+        COMMAND bash -c
+                "${N64_OBJCOPY} -O binary -j .meta '${ucode_name}.elf' '${ucode_name}.meta.bin' --set-section-flags .meta=alloc,load 2>/dev/null || true; [ -s '${ucode_name}.meta.bin' ] || printf '\\0' > '${ucode_name}.meta.bin'"
+        COMMAND ${N64_OBJCOPY} -I binary -O elf32-bigmips -B mips4300
+                --redefine-sym "_binary_${ucode_name}_text_bin_start=${ucode_name}_text_start"
+                --redefine-sym "_binary_${ucode_name}_text_bin_end=${ucode_name}_text_end"
+                --redefine-sym "_binary_${ucode_name}_text_bin_size=${ucode_name}_text_size"
+                --set-section-alignment .data=16
+                --rename-section .text=.data
+                "${ucode_name}.text.bin" "${ucode_name}.text.o"
+        COMMAND ${N64_OBJCOPY} -I binary -O elf32-bigmips -B mips4300
+                --redefine-sym "_binary_${ucode_name}_data_bin_start=${ucode_name}_data_start"
+                --redefine-sym "_binary_${ucode_name}_data_bin_end=${ucode_name}_data_end"
+                --redefine-sym "_binary_${ucode_name}_data_bin_size=${ucode_name}_data_size"
+                --set-section-alignment .data=16
+                --rename-section .text=.data
+                "${ucode_name}.data.bin" "${ucode_name}.data.o"
+        COMMAND ${N64_OBJCOPY} -I binary -O elf32-bigmips -B mips4300
+                --redefine-sym "_binary_${ucode_name}_meta_bin_start=${ucode_name}_meta_start"
+                --redefine-sym "_binary_${ucode_name}_meta_bin_end=${ucode_name}_meta_end"
+                --redefine-sym "_binary_${ucode_name}_meta_bin_size=${ucode_name}_meta_size"
+                --set-section-alignment .data=16
+                --rename-section .text=.data
+                "${ucode_name}.meta.bin" "${ucode_name}.meta.o"
+        COMMAND ${CMAKE_LINKER} -relocatable
+                "${ucode_name}.text.o" "${ucode_name}.data.o" "${ucode_name}.meta.o"
+                -o "${ucode_obj}"
+        COMMENT "[RSP] ${ucode_name}.S"
+        VERBATIM
+    )
+
+    set_source_files_properties("${ucode_obj}" PROPERTIES
+        EXTERNAL_OBJECT TRUE
+        GENERATED TRUE)
+    target_sources(${target_name} PRIVATE "${ucode_obj}")
+endfunction()
+
+# ---------------------------------------------------------------------------
 # n64_create_rom(target_name [TITLE ...] [DFS_ROOT ...] [EXTRA_DFS_DEPS ...])
 #
 # Produces a .z64 from an ELF target, optionally including a DFS filesystem.

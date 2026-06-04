@@ -143,6 +143,7 @@ set(src_n64
     "${main_cpp_base}/n64/timer.hpp"
     "${main_cpp_base}/n64/rendersurface.hpp"
     "${main_cpp_base}/n64/save.hpp"
+    "${main_cpp_base}/n64/hwroad_rsp.hpp"
 
     "${main_cpp_base}/n64/n64main.cpp"
     "${main_cpp_base}/n64/audio.cpp"
@@ -150,6 +151,7 @@ set(src_n64
     "${main_cpp_base}/n64/timer.cpp"
     "${main_cpp_base}/n64/rendersurface.cpp"
     "${main_cpp_base}/n64/save.cpp"
+    "${main_cpp_base}/n64/hwroad_rsp.cpp"
 )
 
 set(SRCS
@@ -172,6 +174,11 @@ set_target_properties(cannonball PROPERTIES SUFFIX ".elf")
 
 include_directories(${main_cpp_base})
 n64_setup_linking(cannonball)
+
+# RSP overlay: per-scanline hwroad foreground rasterizer. Source basename
+# matches the rsp_ucode_t symbol used by DEFINE_RSP_UCODE in hwroad_rsp.cpp.
+n64_add_rsp_ucode(cannonball
+    "${main_cpp_base}/n64/rsp_hwroad.S")
 
 # -----------------------------------------------------------------------------
 # DFS payload — ROMs + binary tile data baked into cannonball.z64
