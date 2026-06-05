@@ -16,6 +16,7 @@
 #include "hwvideo/hwtiles.hpp"
 #include "hwvideo/hwsprites.hpp"
 #include "frontend/config.hpp"
+#include "n64/hwroad_rdp.hpp"
 #include <cmath>
 #include <cstring>
 #include <malloc.h>
@@ -314,6 +315,14 @@ bool Render::finalize_frame()
     rdpq_set_mode_standard();
     rdpq_mode_alphacompare(1);
     rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
+
+    // RDP road_fg overlay. When the runtime flag is on, prepare_frame ran
+    // build_foreground_lores_rdp instead of the CPU scratch pass — the
+    // scratch is all alpha=0 in the road area, so the blit above contributed
+    // nothing here and we paint into a clean framebuffer. This just emits
+    // the prebuilt CI4 mask + per-line TLUTs into rdpq.
+    if (n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control()))
+        hwroad.emit_foreground_lores_rdp(x, y_offset);
 
     // Sprite layer via RDP: opaque sprites are one blit each, shadow-flagged
     // sprites get a darken pass + body pass. Lives above the composite (so it

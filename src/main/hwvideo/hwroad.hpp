@@ -14,6 +14,7 @@ public:
     void write32(uint32_t* adr, const uint32_t data);
     uint16_t read_road_control();
     void write_road_control(const uint8_t);
+    uint8_t  get_road_control() const { return road_control; }
     // Per-pixel foreground rasteriser. Writes RGBA5551 directly into the
     // engine scratch surface (320x224, uint16_t per pixel) using the supplied
     // engine→RGBA5551 palette LUT. Pixels left untouched stay at whatever the
@@ -53,6 +54,20 @@ private:
     // once at startup before this is safe to use.
 public:
     void render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb_lut);
+
+    // RDP foreground rasteriser — handles all 4 (road_control & 3) values.
+    // Split into two phases so the CPU mask-build doesn't fight RDP DMA
+    // traffic for the RDRAM bus:
+    //   build_…  runs before finalize_frame queues road_bg / tiles / etc.
+    //            Fills per-line state + CI4 mask + per-line TLUT in RAM
+    //            (writes hit uncached aliases, so RDP DMA sees fresh bytes
+    //            with no writeback).
+    //   emit_…   runs after the scratch composite, with rdpq_attach'd target.
+    //            Reads the prebuilt state and emits per-line fill + CI4
+    //            textured rectangles.
+    // n64::hwroad_rdp::init() must run once at startup before either call.
+    void build_foreground_lores_rdp(const uint16_t* rgb_lut);
+    void emit_foreground_lores_rdp(int x_off, int y_off);
 };
 
 extern HWRoad hwroad;

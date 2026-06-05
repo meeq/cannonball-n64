@@ -78,9 +78,18 @@ DESC:        .space 64
 .align 4
 SCRATCH:     .space 640      # 320 px × 2 bytes (RGBA5551)
 .align 4
-SRC0:        .space 512
+# SP DMA ignores the low 3 bits of the RDRAM source address (rsp_dma.inc:43).
+# The roads[] member of HWRoad sits at offset +12 inside the C++ object so
+# every per-scanline src*_phys is 4-mod-8 aligned. To keep the bytes we
+# actually want fully covered we pad SRC0/SRC1 to 520+ bytes and DMA 520:
+# the DMA fetches from (src_phys & ~7) onward, and the s4 return points at
+# the originally-requested byte (stashed below in SRC0_BASE/SRC1_BASE).
+SRC0:        .space 528
 .align 4
-SRC1:        .space 512
+SRC1:        .space 528
+.align 4
+SRC0_BASE:   .space 4        # %lo(SRC0) + (src0_phys & 7), set after each DMA
+SRC1_BASE:   .space 4        # %lo(SRC1) + (src1_phys & 7)
 .align 4
 MERGED_LUT:  .space 128      # 64 × u16
 
@@ -151,15 +160,20 @@ scanline_loop:
     nop
 
     # --- 3/4. DMA src0, src1 rows in.
+    # Request 520 bytes (512 wanted + up to 7 of leading misalignment, rounded
+    # to a multiple of 8). DMAIn returns s4 pointing at the first requested
+    # byte regardless of (src_phys & 7), which we stash for the render cases.
     lw      s0, %lo(DESC) + DESC_SRC0_ADDR
     li      s4, %lo(SRC0)
     jal     DMAIn
-    li      t0, DMA_SIZE(512, 1)
+    li      t0, DMA_SIZE(520, 1)
+    sw      s4, %lo(SRC0_BASE)
 
     lw      s0, %lo(DESC) + DESC_SRC1_ADDR
     li      s4, %lo(SRC1)
     jal     DMAIn
-    li      t0, DMA_SIZE(512, 1)
+    li      t0, DMA_SIZE(520, 1)
+    sw      s4, %lo(SRC1_BASE)
 
     # --- 5. Dispatch.
     # case 0 → render_case0  (single road 0)
@@ -217,7 +231,7 @@ frame_done:
 render_case0:
     lhu     t0, %lo(DESC) + DESC_HPOS0      # hpos0
     li      t1, %lo(SCRATCH)                # dst
-    li      t2, %lo(SRC0)                   # src base
+    lw      t2, %lo(SRC0_BASE)              # src base (DMA-aligned, see SRC0 note)
     li      t3, %lo(DESC) + DESC_COLOR      # color_table base (road 0 slots 0..7)
     li      t4, PIXELS_PER_LINE             # pixel count
     li      t5, 0x200                       # bounds
@@ -254,7 +268,7 @@ render_case0:
 render_case3:
     lhu     t0, %lo(DESC) + DESC_HPOS1
     li      t1, %lo(SCRATCH)
-    li      t2, %lo(SRC1)
+    lw      t2, %lo(SRC1_BASE)                # src1 base (DMA-aligned)
     li      t3, %lo(DESC) + DESC_COLOR + 16   # color_table base (road 1)
     li      t4, PIXELS_PER_LINE
     li      t5, 0x200
@@ -341,8 +355,8 @@ render_case1:
     lhu     t0, %lo(DESC) + DESC_HPOS0           # hpos0
     lhu     t1, %lo(DESC) + DESC_HPOS1           # hpos1
     li      t2, %lo(SCRATCH)                     # dst
-    li      t3, %lo(SRC0)                        # src0 base
-    li      t4, %lo(SRC1)                        # src1 base
+    lw      t3, %lo(SRC0_BASE)                   # src0 base (DMA-aligned)
+    lw      t4, %lo(SRC1_BASE)                   # src1 base (DMA-aligned)
     li      t5, %lo(MERGED_LUT)                  # lut base
     li      t6, PIXELS_PER_LINE                  # pixel count
     li      t7, 0x200                            # bounds
@@ -438,8 +452,8 @@ render_case2:
     lhu     t0, %lo(DESC) + DESC_HPOS0
     lhu     t1, %lo(DESC) + DESC_HPOS1
     li      t2, %lo(SCRATCH)
-    li      t3, %lo(SRC0)
-    li      t4, %lo(SRC1)
+    lw      t3, %lo(SRC0_BASE)
+    lw      t4, %lo(SRC1_BASE)
     li      t5, %lo(MERGED_LUT)
     li      t6, PIXELS_PER_LINE
     li      t7, 0x200

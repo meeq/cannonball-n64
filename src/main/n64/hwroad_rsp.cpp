@@ -33,7 +33,16 @@ namespace hwroad_rsp
 {
 
 uint32_t last_us = 0;
-bool     enabled = true;   // TEMP: default to RSP path for first-light test
+bool     enabled = false;  // CPU rasteriser wins by ~45% — see PR notes
+uint8_t  rsp_case_mask = 0x0F;  // all four cases on RSP by default
+bool     validate = false; // diff against CPU reference each frame (dev aid)
+uint32_t v_mismatches = 0;
+int      v_first_y    = -1;
+int      v_first_x    = -1;
+
+uint32_t case_scanlines[4] = { 0, 0, 0, 0 };
+uint32_t case_skipped  [4] = { 0, 0, 0, 0 };
+uint32_t case_total    [4] = { 0, 0, 0, 0 };
 
 namespace
 {
@@ -69,6 +78,13 @@ namespace
     Descriptor* desc_uc    = nullptr;   // KSEG1 alias used for writes
     bool       initialised = false;
     bool       roads_flushed = false;
+
+    // Validation shadow buffer — same dimensions as the engine scratch
+    // surface (320×224 RGBA5551 = 143360 bytes). Allocated lazily the first
+    // time validate is true.
+    constexpr int SHADOW_BYTES = S16_WIDTH * S16_HEIGHT * 2;
+    void*     shadow_cached = nullptr;
+    uint16_t* shadow_uc     = nullptr;
 
     constexpr uint8_t CTRL_SKIP = 0x80;
 }
@@ -121,6 +137,24 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
     using namespace n64::hwroad_rsp;
     assertf(initialised, "hwroad_rsp::init() not called");
 
+    const int32_t control = road_control & 3;
+
+    // Per-case selector: fall back to the CPU rasteriser when this case's
+    // bit is clear in rsp_case_mask. Lets the user A/B individual cases at
+    // runtime without rebuilding. Counts below stay zero for fall-through
+    // frames so RSP-side stats reflect actual RSP usage.
+    if (!((rsp_case_mask >> control) & 1))
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            n64::hwroad_rsp::case_scanlines[i] = 0;
+            n64::hwroad_rsp::case_skipped  [i] = 0;
+            n64::hwroad_rsp::case_total    [i] = 0;
+        }
+        render_foreground_lores(dst_rgba, rgb_lut);
+        return;
+    }
+
     // The roads[] texture data is essentially read-only after decode_road().
     // The RSP DMAs from RDRAM, so we need to make sure no dirty CPU cache
     // lines are hiding a fresh value. Do it once.
@@ -131,7 +165,6 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
     }
 
     const uint16_t* roadram = ramBuff;
-    const int32_t   control = road_control & 3;
     const uint16_t  s16_x   = 0x5f8 + config.s16_x_off;
     const int32_t   xoff_total = s16_x + x_offset;
 
@@ -145,7 +178,8 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
     };
     (void)priority_map; // RSP applies the priority maps internally
 
-    int active_lines = 0;
+    uint32_t local_active  = 0;
+    uint32_t local_skipped = 0;
     for (int y = 0; y < S16_HEIGHT; y++)
     {
         Descriptor* d = &desc_uc[y];
@@ -159,6 +193,7 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
         {
             d->ctrl |= CTRL_SKIP;
+            local_skipped++;
             continue;
         }
 
@@ -167,11 +202,13 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
         if (control == 0 && (data0 & 0x800))
         {
             d->ctrl |= CTRL_SKIP;
+            local_skipped++;
             continue;
         }
         if (control == 3 && (data1 & 0x800))
         {
             d->ctrl |= CTRL_SKIP;
+            local_skipped++;
             continue;
         }
 
@@ -220,10 +257,21 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
                                           : rgb_lut[color_offset2 ^ 0x10 ^ bgcolor];
         ct[0x0f] = rgb_lut[color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1)];
 
-        active_lines++;
+        local_active++;
     }
 
-    (void)active_lines;
+    // Publish per-case stats. Only one of the four slots is non-zero per
+    // frame (control is a per-frame value), but the array shape makes it
+    // easy to accumulate over sessions outside this function.
+    for (int i = 0; i < 4; i++)
+    {
+        n64::hwroad_rsp::case_scanlines[i] = 0;
+        n64::hwroad_rsp::case_skipped  [i] = 0;
+        n64::hwroad_rsp::case_total    [i] = 0;
+    }
+    n64::hwroad_rsp::case_scanlines[control] = local_active;
+    n64::hwroad_rsp::case_skipped  [control] = local_skipped;
+    n64::hwroad_rsp::case_total    [control] = local_active + local_skipped;
 
     // dst_rgba lives in KSEG1 (scratch_uc_ptr). PhysicalAddr handles that.
     uint32_t desc_phys    = PhysicalAddr(desc_cached);
@@ -255,4 +303,89 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
 
     // EMA over 8 frames so the on-screen counter is readable.
     n64::hwroad_rsp::last_us = (n64::hwroad_rsp::last_us * 7 + dt_us) >> 3;
+
+    // ---- Validation: re-run the CPU reference into a shadow buffer and diff
+    // both surfaces. Stride is S16_WIDTH; both paths assume 320 here (we
+    // assert that elsewhere via the non-widescreen default).
+    if (n64::hwroad_rsp::validate)
+    {
+        if (!n64::hwroad_rsp::shadow_cached)
+        {
+            n64::hwroad_rsp::shadow_cached = memalign(16, n64::hwroad_rsp::SHADOW_BYTES);
+            assertf(n64::hwroad_rsp::shadow_cached != nullptr,
+                    "hwroad_rsp: shadow alloc failed");
+            n64::hwroad_rsp::shadow_uc = (uint16_t*)UncachedAddr(
+                n64::hwroad_rsp::shadow_cached);
+        }
+
+        // Zero the shadow surface — render_foreground_lores only writes
+        // pixels for non-skipped scanlines, and the engine's start_frame()
+        // contract clears the real scratch each frame. Match that here.
+        std::memset(n64::hwroad_rsp::shadow_uc, 0, n64::hwroad_rsp::SHADOW_BYTES);
+        render_foreground_lores(n64::hwroad_rsp::shadow_uc, rgb_lut);
+
+        uint32_t mismatches = 0;
+        uint32_t per_case[4] = { 0, 0, 0, 0 };
+        int first_y = -1, first_x = -1;
+        int first_case = -1;
+        for (int y = 0; y < S16_HEIGHT; y++)
+        {
+            const uint16_t* cpu = n64::hwroad_rsp::shadow_uc + y * S16_WIDTH;
+            const uint16_t* rsp = dst_rgba + y * S16_WIDTH;
+            const uint8_t   ctrl_byte = n64::hwroad_rsp::desc_uc[y].ctrl;
+            const int       cs        = ctrl_byte & 0x03;
+            for (int x = 0; x < S16_WIDTH; x++)
+            {
+                if (cpu[x] != rsp[x])
+                {
+                    if (first_y < 0) { first_y = y; first_x = x; first_case = cs; }
+                    mismatches++;
+                    per_case[cs]++;
+                }
+            }
+        }
+
+        n64::hwroad_rsp::v_mismatches = mismatches;
+        n64::hwroad_rsp::v_first_y    = first_y;
+        n64::hwroad_rsp::v_first_x    = first_x;
+
+        static int v_log_throttle = 0;
+        if (mismatches > 0)
+        {
+            if ((v_log_throttle++ % 60) == 0)
+            {
+                const uint16_t* cpu = n64::hwroad_rsp::shadow_uc + first_y * S16_WIDTH;
+                const uint16_t* rsp = dst_rgba + first_y * S16_WIDTH;
+                debugf("hwroad_rsp: VALIDATE FAIL %lu mismatches | case0=%lu case1=%lu case2=%lu case3=%lu | first(%d,%d) case=%d cpu=0x%04x rsp=0x%04x\n",
+                       (unsigned long)mismatches,
+                       (unsigned long)per_case[0], (unsigned long)per_case[1],
+                       (unsigned long)per_case[2], (unsigned long)per_case[3],
+                       first_x, first_y, first_case,
+                       (unsigned)cpu[first_x], (unsigned)rsp[first_x]);
+
+                // Dump descriptor + a window of the first mismatching scanline.
+                const Descriptor& d = n64::hwroad_rsp::desc_uc[first_y];
+                debugf("  desc y=%u ctrl=0x%02x hpos0=0x%04x hpos1=0x%04x src0=0x%08lx src1=0x%08lx\n",
+                       d.y, d.ctrl, d.hpos0, d.hpos1,
+                       (unsigned long)d.src0_phys, (unsigned long)d.src1_phys);
+                debugf("  ct r0: %04x %04x %04x %04x %04x %04x %04x %04x\n",
+                       d.color_table[0x0], d.color_table[0x1], d.color_table[0x2], d.color_table[0x3],
+                       d.color_table[0x4], d.color_table[0x5], d.color_table[0x6], d.color_table[0x7]);
+                debugf("  ct r1: %04x %04x %04x %04x %04x %04x %04x %04x\n",
+                       d.color_table[0x8], d.color_table[0x9], d.color_table[0xa], d.color_table[0xb],
+                       d.color_table[0xc], d.color_table[0xd], d.color_table[0xe], d.color_table[0xf]);
+                int xs = first_x > 4 ? first_x - 4 : 0;
+                int xe = first_x + 8;
+                if (xe > S16_WIDTH) xe = S16_WIDTH;
+                for (int x = xs; x < xe; x++)
+                    debugf("    x=%-3d cpu=0x%04x rsp=0x%04x %s\n",
+                           x, (unsigned)cpu[x], (unsigned)rsp[x],
+                           cpu[x] == rsp[x] ? "" : "  <--");
+            }
+        }
+        else if ((v_log_throttle++ % 120) == 0)
+        {
+            debugf("hwroad_rsp: VALIDATE OK\n");
+        }
+    }
 }

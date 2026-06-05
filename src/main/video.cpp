@@ -15,6 +15,7 @@
 #include "engine/oroad.hpp"
 #include "n64/rendersurface.hpp"
 #include "n64/hwroad_rsp.hpp"
+#include "n64/hwroad_rdp.hpp"
 #include <libdragon.h>
 
 // Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
@@ -174,7 +175,16 @@ void Video::prepare_frame()
     N64_PROFILE_PHASE_BEGIN();
     if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
     {
-        if (n64::hwroad_rsp::enabled)
+        // RDP road_fg overlay: build the CI4 mask + per-line TLUTs here, in
+        // prepare_frame, so the writes happen with no RDP DMA traffic on the
+        // RDRAM bus (the previous frame has long since finished; this frame
+        // hasn't queued anything yet). build_ also rspq_waits at entry as
+        // a safety net against overwriting buffers the RDP still references.
+        // emit_foreground_lores_rdp in finalize_frame replays the prebuilt
+        // state into the framebuffer.
+        if (n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control()))
+            hwroad.build_foreground_lores_rdp(renderer->rgb_lut());
+        else if (n64::hwroad_rsp::enabled)
             hwroad.render_foreground_lores_rsp(renderer->scratch_uc(),
                                                renderer->rgb_lut());
         else

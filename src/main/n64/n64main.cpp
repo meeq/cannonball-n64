@@ -13,6 +13,7 @@
 #include "save.hpp"
 #include "rendersurface.hpp"
 #include "hwroad_rsp.hpp"
+#include "hwroad_rdp.hpp"
 
 #include "../main.hpp"
 #include "../video.hpp"
@@ -183,6 +184,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // a 14 KB malloc) — leave the runtime switch off so the CPU path stays
     // the default. Toggle n64::hwroad_rsp::enabled to A/B test.
     n64::hwroad_rsp::init();
+    n64::hwroad_rdp::init();
 
     input.init(config.controls.pad_id,
                config.controls.keyconfig, config.controls.padconfig,
@@ -197,7 +199,15 @@ int main(int /*argc*/, char* /*argv*/[])
     // ~60 fps frames so it's imperceptible; on N64 the first second runs at
     // ~5 fps (atlas extraction + heavy startup work), which stretches the
     // warm-up into a visible brown-sky / partial-tilemap flash.
-    for (int i = 0; i < 8; i++)
+    //
+    // Override via -DCANNONBALL_WARMUP_TICKS=N to skip ahead in attract — e.g.
+    // ~1800 lands the AI near the stage-1 road split (case 0) for testing
+    // the hwroad_rdp prototype without watching a minute of demo.
+#ifndef CANNONBALL_WARMUP_TICKS
+#define CANNONBALL_WARMUP_TICKS 1800  // TEMP — land at road split
+#endif
+#define CANNONBALL_LOG_PROFILE 1     // TEMP — dump profile to debugf
+    for (int i = 0; i < CANNONBALL_WARMUP_TICKS; i++)
         tick_engine();
 
     // EMA smoothing for on-screen profile counters so they don't strobe.
@@ -232,6 +242,24 @@ int main(int /*argc*/, char* /*argv*/[])
         if (tick_frame) smooth(n64_profile::prepare_us, t2 - t1);
         smooth(n64_profile::render_us,  t3 - t2);
         smooth(n64_profile::audio_us,   t4 - t3);
+
+#ifdef CANNONBALL_LOG_PROFILE
+        {
+            static int log_n = 0;
+            if ((++log_n % 60) == 0)
+                debugf("prof fps=%4.1f ras=%5lu wait=%5lu "
+                       "rbg=%4lu tbg=%5lu tfg=%5lu rfg=%5lu spr=%5lu txt=%5lu\n",
+                       display_get_fps(),
+                       (unsigned long)n64_profile::prepare_us,
+                       (unsigned long)n64_profile::wait_us,
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_BG],
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_FG],
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_FG],
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_SPRITE],
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TEXT]);
+        }
+#endif
     }
 
     // N64 can't actually quit — loop forever.

@@ -144,6 +144,7 @@ set(src_n64
     "${main_cpp_base}/n64/rendersurface.hpp"
     "${main_cpp_base}/n64/save.hpp"
     "${main_cpp_base}/n64/hwroad_rsp.hpp"
+    "${main_cpp_base}/n64/hwroad_rdp.hpp"
 
     "${main_cpp_base}/n64/n64main.cpp"
     "${main_cpp_base}/n64/audio.cpp"
@@ -152,6 +153,7 @@ set(src_n64
     "${main_cpp_base}/n64/rendersurface.cpp"
     "${main_cpp_base}/n64/save.cpp"
     "${main_cpp_base}/n64/hwroad_rsp.cpp"
+    "${main_cpp_base}/n64/hwroad_rdp.cpp"
 )
 
 set(SRCS

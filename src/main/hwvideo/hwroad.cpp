@@ -299,6 +299,90 @@ void HWRoad::render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_
     }
 }
 
+namespace
+{
+    // Bounds-elimination helpers for render_foreground_lores. hpos increments
+    // by 1 per pixel, wrapping mod 0x1000. "In-bounds" iff hpos < 0x200; over
+    // a 320-pixel scanline the trajectory crosses at most one wrap, so each
+    // road has at most one [s_start, s_end) in-bounds span and a constant
+    // texture base offset at that span's start. Outside the span the texel is
+    // sentinel 3.
+    struct LoresSpan { int s_start, s_end, t_base; };
+
+    inline LoresSpan compute_road_span(int32_t H, int W)
+    {
+        LoresSpan s;
+        if (H < 0x200) {
+            s.s_start = 0;
+            s.s_end   = (0x200 - H < W) ? (0x200 - H) : W;
+            s.t_base  = H;
+        } else {
+            const int wrap = 0x1000 - H;
+            if (wrap >= W) { s.s_start = W; s.s_end = W; }
+            else           { s.s_start = wrap;
+                             s.s_end   = (wrap + 0x200 < W) ? (wrap + 0x200) : W; }
+            s.t_base = 0;
+        }
+        return s;
+    }
+
+    // Segment painters. p is 16-byte aligned (engine scratch surface), so
+    // p+a is 32-bit aligned iff a is even — odd-a starts with a single-
+    // pixel lead store before u32 packed pairs take over. Big-endian:
+    // (ca<<16)|cb stores ca at the lower address.
+
+    inline void paint_oob_span(uint16_t* p, int a, int n,
+                               uint16_t c, uint32_t c32)
+    {
+        if (n <= 0) return;
+        int i = 0;
+        if ((a & 1) != 0) { p[a] = c; i = 1; }
+        uint32_t* p32 = (uint32_t*)(p + a + i);
+        const int pairs = (n - i) >> 1;
+        for (int k = 0; k < pairs; k++) p32[k] = c32;
+        i += pairs * 2;
+        if (i < n) p[a + i] = c;
+    }
+
+    inline void paint_single_in_span(uint16_t* p, int a, int n,
+                                     const uint8_t* src, const uint16_t* clut)
+    {
+        if (n <= 0) return;
+        int i = 0;
+        if ((a & 1) != 0) { p[a] = clut[src[0]]; i = 1; }
+        uint32_t* p32 = (uint32_t*)(p + a + i);
+        const int pairs = (n - i) >> 1;
+        for (int k = 0; k < pairs; k++) {
+            uint32_t ca = clut[src[i  ]];
+            uint32_t cb = clut[src[i+1]];
+            p32[k] = (ca << 16) | cb;
+            i += 2;
+        }
+        if (i < n) p[a + i] = clut[src[i]];
+    }
+
+    inline void paint_two_in_span(uint16_t* p, int a, int n,
+                                  const uint8_t* s0, const uint8_t* s1,
+                                  const uint16_t* merged)
+    {
+        if (n <= 0) return;
+        int i = 0;
+        if ((a & 1) != 0) {
+            p[a] = merged[(s0[0] << 3) | s1[0]];
+            i = 1;
+        }
+        uint32_t* p32 = (uint32_t*)(p + a + i);
+        const int pairs = (n - i) >> 1;
+        for (int k = 0; k < pairs; k++) {
+            uint32_t ca = merged[(s0[i  ] << 3) | s1[i  ]];
+            uint32_t cb = merged[(s0[i+1] << 3) | s1[i+1]];
+            p32[k] = (ca << 16) | cb;
+            i += 2;
+        }
+        if (i < n) p[a + i] = merged[(s0[i] << 3) | s1[i]];
+    }
+} // anonymous namespace
+
 // Foreground: Render From ROM
 //
 // Writes RGBA5551 straight into the engine scratch surface. The original
@@ -307,6 +391,12 @@ void HWRoad::render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_
 // R4300 and the streaming src→dst writes thrashed the 8 KB D-cache. Resolving
 // the 12 used color_table slots into RGBA5551 once per scanline lets the
 // inner loop do a single uncached store per pixel with no follow-up pass.
+//
+// Bounds elimination: hpos at pixel x is monotonic (H+x mod 0x1000) so each
+// road's in-bounds span is one contiguous range. compute_road_span resolves
+// it once, then the scanline is split into segments at the union of road
+// boundaries (≤5 segments) and each segment dispatches to a straight-line
+// painter — no per-pixel `hpos < 0x200` branch and no `(hpos+1) & 0xfff`.
 void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut)
 {
     int x, y;
@@ -379,9 +469,11 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
         uint16_t s16_x = 0x5f8 + config.s16_x_off;
 
         // draw the road
-        switch (control) 
+        const int W = config.s16_width;
+        switch (control)
         {
             case 0:
+            {
                 if (data0 & 0x800)
                 {
 #if HWROAD_PROFILE_LORES
@@ -390,33 +482,36 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
                     continue;
                 }
                 hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++)
-                {
-                    int pix0 = (hpos0 < 0x200) ? src0[hpos0] : 3;
-                    pPixel[x] = color_table[0x00 + pix0];
-                    hpos0 = (hpos0 + 1) & 0xfff;
-                }
+                const LoresSpan s = compute_road_span(hpos0, W);
+                const uint16_t* clut    = &color_table[0x00];
+                const uint16_t  c_oob   = clut[3];
+                const uint32_t  c_oob32 = ((uint32_t)c_oob << 16) | c_oob;
+                paint_oob_span(pPixel, 0, s.s_start, c_oob, c_oob32);
+                paint_single_in_span(pPixel, s.s_start, s.s_end - s.s_start,
+                                     src0 + s.t_base, clut);
+                paint_oob_span(pPixel, s.s_end, W - s.s_end, c_oob, c_oob32);
 #if HWROAD_PROFILE_LORES
                 prof_scanlines++;
 #endif
                 break;
+            }
 
             case 1:
+            case 2:
             {
                 hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
                 hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
 
-                // Per-scanline merged color LUT. Folds priority_map[0] +
+                // Per-scanline merged color LUT. Folds priority_map[ctrl-1] +
                 // the road0/road1 ternary into a single 16-bit indexed
                 // lookup keyed by (pix0*8 + pix1). Slots for pix in {4,5,6}
                 // hold whatever color_table did — the road data only ever
-                // produces {0,1,2,3,7}, matching the SDL build. 64 cells *
-                // ~5 cycles == ~3.5 us per scanline, negligible vs the
-                // 320-pixel hot loop.
+                // produces {0,1,2,3,7}, matching the SDL build.
+                const uint8_t* pmap_row = priority_map[control - 1];
                 uint16_t merged[64];
                 for (int p0 = 0; p0 < 8; p0++)
                 {
-                    const uint8_t  mask = priority_map[0][p0];
+                    const uint8_t  mask = pmap_row[p0];
                     const uint16_t c0   = color_table[0x00 + p0];
                     uint16_t* row = &merged[p0 << 3];
                     for (int p1 = 0; p1 < 8; p1++)
@@ -425,29 +520,52 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
                                   : c0;
                 }
 
-                // 2-pixel u32 packed stores. pPixel is KSEG1 — sequential
-                // 32-bit stores coalesce in the R4300 store buffer just as
-                // 16-bit ones do, but halve loop overhead (one branch +
-                // one store per pixel pair). Big-endian: high 16 bits of
-                // the u32 land at the lower memory offset, so packing
-                // (ca<<16)|cb yields pPixel[2x]=ca, pPixel[2x+1]=cb.
-                // s16_width is 320 (even), so no tail.
-                uint32_t* pPixel32 = (uint32_t*)pPixel;
-                const int pairs = config.s16_width >> 1;
-                for (x = 0; x < pairs; x++)
-                {
-                    int pix0a = (hpos0 < 0x200) ? src0[hpos0] : 3;
-                    int pix1a = (hpos1 < 0x200) ? src1[hpos1] : 3;
-                    hpos0 = (hpos0 + 1) & 0xfff;
-                    hpos1 = (hpos1 + 1) & 0xfff;
-                    int pix0b = (hpos0 < 0x200) ? src0[hpos0] : 3;
-                    int pix1b = (hpos1 < 0x200) ? src1[hpos1] : 3;
-                    hpos0 = (hpos0 + 1) & 0xfff;
-                    hpos1 = (hpos1 + 1) & 0xfff;
+                const LoresSpan s0 = compute_road_span(hpos0, W);
+                const LoresSpan s1 = compute_road_span(hpos1, W);
 
-                    uint32_t ca = merged[(pix0a << 3) | pix1a];
-                    uint32_t cb = merged[(pix0b << 3) | pix1b];
-                    pPixel32[x] = (ca << 16) | cb;
+                const uint16_t c_oob   = merged[(3 << 3) | 3];
+                const uint32_t c_oob32 = ((uint32_t)c_oob << 16) | c_oob;
+
+                // Sub-LUTs for one-road-OOB segments.
+                uint16_t sub0[8], sub1[8];
+                for (int k = 0; k < 8; k++) {
+                    sub0[k] = merged[(k << 3) | 3];   // road1 OOB
+                    sub1[k] = merged[(3 << 3) | k];   // road0 OOB
+                }
+
+                // Cut points → sort → walk adjacent pairs as
+                // constant-(in0,in1) segments. ≤5 segments per scanline.
+                int cuts[6] = { 0, s0.s_start, s0.s_end, s1.s_start, s1.s_end, W };
+                for (int i = 1; i < 6; i++) {
+                    const int v = cuts[i]; int j = i;
+                    while (j > 0 && cuts[j-1] > v) { cuts[j] = cuts[j-1]; j--; }
+                    cuts[j] = v;
+                }
+
+                for (int seg = 0; seg < 5; seg++) {
+                    const int a = cuts[seg];
+                    const int b = cuts[seg+1];
+                    if (a >= b) continue;
+                    const bool in0 = (a >= s0.s_start && a < s0.s_end);
+                    const bool in1 = (a >= s1.s_start && a < s1.s_end);
+                    const int  n   = b - a;
+
+                    if (in0 && in1) {
+                        paint_two_in_span(pPixel, a, n,
+                                          src0 + s0.t_base + (a - s0.s_start),
+                                          src1 + s1.t_base + (a - s1.s_start),
+                                          merged);
+                    } else if (in0) {
+                        paint_single_in_span(pPixel, a, n,
+                                             src0 + s0.t_base + (a - s0.s_start),
+                                             sub0);
+                    } else if (in1) {
+                        paint_single_in_span(pPixel, a, n,
+                                             src1 + s1.t_base + (a - s1.s_start),
+                                             sub1);
+                    } else {
+                        paint_oob_span(pPixel, a, n, c_oob, c_oob32);
+                    }
                 }
 #if HWROAD_PROFILE_LORES
                 prof_scanlines++;
@@ -455,27 +573,8 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
                 break;
             }
 
-            case 2:
-                hpos0 = (hpos0 - (s16_x + x_offset)) & 0xfff;
-                hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++)
-                {
-                    int pix0 = (hpos0 < 0x200) ? src0[hpos0] : 3;
-                    int pix1 = (hpos1 < 0x200) ? src1[hpos1] : 3;
-                    if (((priority_map[1][pix0] >> pix1) & 1) != 0)
-                        pPixel[x] = color_table[0x10 + pix1];
-                    else
-                        pPixel[x] = color_table[0x00 + pix0];
-
-                    hpos0 = (hpos0 + 1) & 0xfff;
-                    hpos1 = (hpos1 + 1) & 0xfff;
-                }
-#if HWROAD_PROFILE_LORES
-                prof_scanlines++;
-#endif
-                break;
-
             case 3:
+            {
                 if (data1 & 0x800)
                 {
 #if HWROAD_PROFILE_LORES
@@ -484,17 +583,20 @@ void HWRoad::render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut
                     continue;
                 }
                 hpos1 = (hpos1 - (s16_x + x_offset)) & 0xfff;
-                for (x = 0; x < config.s16_width; x++)
-                {
-                    int pix1 = (hpos1 < 0x200) ? src1[hpos1] : 3;
-                    pPixel[x] = color_table[0x10 + pix1];
-                    hpos1 = (hpos1 + 1) & 0xfff;
-                }
+                const LoresSpan s = compute_road_span(hpos1, W);
+                const uint16_t* clut    = &color_table[0x10];
+                const uint16_t  c_oob   = clut[3];
+                const uint32_t  c_oob32 = ((uint32_t)c_oob << 16) | c_oob;
+                paint_oob_span(pPixel, 0, s.s_start, c_oob, c_oob32);
+                paint_single_in_span(pPixel, s.s_start, s.s_end - s.s_start,
+                                     src1 + s.t_base, clut);
+                paint_oob_span(pPixel, s.s_end, W - s.s_end, c_oob, c_oob32);
 #if HWROAD_PROFILE_LORES
                 prof_scanlines++;
 #endif
                 break;
-            } // end switch
+            }
+        } // end switch
     } // end for
 
 #if HWROAD_PROFILE_LORES
