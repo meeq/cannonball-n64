@@ -145,6 +145,8 @@ set(src_n64
     "${main_cpp_base}/n64/save.hpp"
     "${main_cpp_base}/n64/hwroad_rsp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp.hpp"
+    "${main_cpp_base}/n64/hwroad_rdp_internal.hpp"
+    "${main_cpp_base}/n64/hwroad_rdp_rsp.hpp"
 
     "${main_cpp_base}/n64/n64main.cpp"
     "${main_cpp_base}/n64/audio.cpp"
@@ -154,6 +156,7 @@ set(src_n64
     "${main_cpp_base}/n64/save.cpp"
     "${main_cpp_base}/n64/hwroad_rsp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp.cpp"
+    "${main_cpp_base}/n64/hwroad_rdp_rsp.cpp"
 )
 
 set(SRCS
@@ -181,6 +184,12 @@ n64_setup_linking(cannonball)
 # matches the rsp_ucode_t symbol used by DEFINE_RSP_UCODE in hwroad_rsp.cpp.
 n64_add_rsp_ucode(cannonball
     "${main_cpp_base}/n64/rsp_hwroad.S")
+
+# RSP overlay: per-scanline mask packer that backs the hwroad_rdp build
+# phase. Source basename matches DEFINE_RSP_UCODE(rsp_hwroad_rdp) in
+# hwroad_rdp_rsp.cpp.
+n64_add_rsp_ucode(cannonball
+    "${main_cpp_base}/n64/rsp_hwroad_rdp.S")
 
 # -----------------------------------------------------------------------------
 # DFS payload — ROMs + binary tile data baked into cannonball.z64

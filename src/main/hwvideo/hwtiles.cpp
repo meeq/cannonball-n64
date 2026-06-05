@@ -219,6 +219,19 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
                                     uint8_t page_index, uint8_t priority_draw,
                                     int x_offset, int y_offset)
 {
+    // TEMP diagnostic counters — bg-vs-fg tile cost discrepancy. Per-call
+    // totals dumped every 60 calls (so once per second per page at 30 Hz).
+    static uint32_t s_calls[2]   = {0, 0};
+    static uint32_t s_visit[2]   = {0, 0};
+    static uint32_t s_emit[2]    = {0, 0};
+    static uint32_t s_pri_skip[2]  = {0, 0};
+    static uint32_t s_code0[2]     = {0, 0};
+    static uint32_t s_offscr[2]    = {0, 0};
+    static uint32_t s_tlut_up[2]   = {0, 0};
+    static uint32_t s_code_load[2] = {0, 0};
+    uint32_t c_visit = 0, c_emit = 0, c_pri = 0, c_c0 = 0, c_off = 0;
+    uint32_t c_tlut = 0, c_load = 0;
+
     rdpq_set_mode_standard();
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
@@ -272,6 +285,7 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
 
         for (int mx = 0; mx < 128; mx++)
         {
+            c_visit++;
             uint16_t ActPage = 0;
             if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
             if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
@@ -284,17 +298,18 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
                 (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
 
             if (((Data >> 15) & 1) != priority_draw)
-                continue;
+            { c_pri++; continue; }
 
             uint32_t Code = Data & 0x1fff;
             Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
             Code &= (NUM_TILES - 1);
             if (Code == 0)
-                continue;
+            { c_c0++; continue; }
 
             int x = 8 * mx - ox;
             if (x < -x_clamp) x += 1024;
-            if (x <= -8 || x >= s16_width_noscale) continue;
+            if (x <= -8 || x >= s16_width_noscale)
+            { c_off++; continue; }
 
             const int Colour = (Data >> 6) & 0x7f;
 
@@ -306,6 +321,7 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
             {
                 rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
                 last_colour = Colour;
+                c_tlut++;
             }
 
             // Raw 3-command tile blit. 8x8 CI4 = 32 bytes contiguous in
@@ -319,12 +335,39 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
                     0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
                 rdpq_load_tile(TILE1, 0, 0, 4, 8);
                 last_code = (int)Code;
+                c_load++;
             }
             rdpq_texture_rectangle(TILE0,
                 x + x_offset,     y + y_offset,
                 x + x_offset + 8, y + y_offset + 8,
                 0, 0);
+            c_emit++;
         }
+    }
+
+    const int pi = (page_index < 2) ? page_index : 0;
+    s_calls[pi]++;
+    s_visit[pi]    += c_visit;
+    s_emit[pi]     += c_emit;
+    s_pri_skip[pi] += c_pri;
+    s_code0[pi]    += c_c0;
+    s_offscr[pi]   += c_off;
+    s_tlut_up[pi]  += c_tlut;
+    s_code_load[pi]+= c_load;
+    if ((s_calls[pi] % 60) == 0) {
+        const char* tag = (pi == 0) ? "fg" : "bg";
+        debugf("tile %s avg/call: visit=%lu emit=%lu pri=%lu code0=%lu off=%lu tlut=%lu load=%lu\n",
+               tag,
+               (unsigned long)(s_visit[pi]    / s_calls[pi]),
+               (unsigned long)(s_emit[pi]     / s_calls[pi]),
+               (unsigned long)(s_pri_skip[pi] / s_calls[pi]),
+               (unsigned long)(s_code0[pi]    / s_calls[pi]),
+               (unsigned long)(s_offscr[pi]   / s_calls[pi]),
+               (unsigned long)(s_tlut_up[pi]  / s_calls[pi]),
+               (unsigned long)(s_code_load[pi]/ s_calls[pi]));
+        s_calls[pi] = 0;
+        s_visit[pi] = s_emit[pi] = s_pri_skip[pi] = s_code0[pi] = 0;
+        s_offscr[pi] = s_tlut_up[pi] = s_code_load[pi] = 0;
     }
 }
 

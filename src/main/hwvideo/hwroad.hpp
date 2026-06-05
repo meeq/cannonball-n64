@@ -68,6 +68,15 @@ public:
     // n64::hwroad_rdp::init() must run once at startup before either call.
     void build_foreground_lores_rdp(const uint16_t* rgb_lut);
     void emit_foreground_lores_rdp(int x_off, int y_off);
+
+    // RSP-build variant of build_foreground_lores_rdp. Same on-frame
+    // contract — populates the shared mask/TLUT/line state in
+    // n64::hwroad_rdp::detail. CPU still does TLUT + spans + descriptor
+    // build + uncached pre-fill; RSP overlay does the per-pixel CI4 pack.
+    // Caller selects via n64::hwroad_rdp_rsp::enabled. emit_… consumes
+    // the same buffers either way. n64::hwroad_rdp_rsp::init() must run
+    // once at startup before this is safe to call.
+    void build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut);
 };
 
 extern HWRoad hwroad;

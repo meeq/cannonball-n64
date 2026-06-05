@@ -16,6 +16,7 @@
 #include "n64/rendersurface.hpp"
 #include "n64/hwroad_rsp.hpp"
 #include "n64/hwroad_rdp.hpp"
+#include "n64/hwroad_rdp_rsp.hpp"
 #include <libdragon.h>
 
 // Per-sub-phase profiler. Each macro pair brackets one rasterizer pass and
@@ -183,7 +184,15 @@ void Video::prepare_frame()
         // emit_foreground_lores_rdp in finalize_frame replays the prebuilt
         // state into the framebuffer.
         if (n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control()))
-            hwroad.build_foreground_lores_rdp(renderer->rgb_lut());
+        {
+            // RSP-build variant offloads the per-pixel CI4 pack to the RSP.
+            // CPU still builds TLUT + spans + descriptor + pre-fill. Default
+            // off — toggle n64::hwroad_rdp_rsp::enabled at runtime to A/B.
+            if (n64::hwroad_rdp_rsp::enabled)
+                hwroad.build_foreground_lores_rdp_rsp(renderer->rgb_lut());
+            else
+                hwroad.build_foreground_lores_rdp(renderer->rgb_lut());
+        }
         else if (n64::hwroad_rsp::enabled)
             hwroad.render_foreground_lores_rsp(renderer->scratch_uc(),
                                                renderer->rgb_lut());

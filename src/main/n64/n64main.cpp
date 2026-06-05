@@ -14,6 +14,7 @@
 #include "rendersurface.hpp"
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
+#include "hwroad_rdp_rsp.hpp"
 
 #include "../main.hpp"
 #include "../video.hpp"
@@ -185,6 +186,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // the default. Toggle n64::hwroad_rsp::enabled to A/B test.
     n64::hwroad_rsp::init();
     n64::hwroad_rdp::init();
+    n64::hwroad_rdp_rsp::init();
 
     input.init(config.controls.pad_id,
                config.controls.keyconfig, config.controls.padconfig,
@@ -204,7 +206,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // ~1800 lands the AI near the stage-1 road split (case 0) for testing
     // the hwroad_rdp prototype without watching a minute of demo.
 #ifndef CANNONBALL_WARMUP_TICKS
-#define CANNONBALL_WARMUP_TICKS 1800  // TEMP — land at road split
+#define CANNONBALL_WARMUP_TICKS 4400  // TEMP — land just before stage-1 road split
 #endif
 #define CANNONBALL_LOG_PROFILE 1     // TEMP — dump profile to debugf
     for (int i = 0; i < CANNONBALL_WARMUP_TICKS; i++)

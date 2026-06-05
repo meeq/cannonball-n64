@@ -37,6 +37,7 @@
 ***************************************************************************/
 
 #include "n64/hwroad_rdp.hpp"
+#include "n64/hwroad_rdp_internal.hpp"
 #include "n64/platform.hpp"
 #include "hwvideo/hwroad.hpp"
 #include "frontend/config.hpp"
@@ -57,23 +58,30 @@ bool     enabled = true;
 uint32_t last_us = 0;
 static uint32_t s_frame = 0;
 
+// Shared with hwroad_rdp_rsp.cpp via the internal header.
+namespace detail
+{
+    uint8_t*  mask_buf = nullptr;
+    uint16_t* tlut_buf = nullptr;
+    LineState line[MAX_LINES];
+}
+
+using detail::MAX_LINES;
+using detail::MAX_SPAN_PX;
+using detail::MASK_BYTES;
+using detail::TLUT_ENTRIES;
+using detail::LineState;
+using detail::SKIP;
+using detail::OOB_ONLY;
+using detail::DRAW;
+using detail::mask_buf;
+using detail::tlut_buf;
+using detail::line;
+using detail::mask_ptr;
+using detail::tlut_ptr;
+
 namespace
 {
-    constexpr int MAX_LINES   = S16_HEIGHT;    // 224
-    constexpr int MAX_SPAN_PX = 320;           // s16 active width
-    // CI4 packs 2 pixels per byte; 320/2 = 160, already a multiple of 8.
-    constexpr int MASK_BYTES  = (MAX_SPAN_PX + 1) / 2;
-    constexpr int TLUT_ENTRIES = 16;           // CI4 palette = 16 colours
-
-    enum LineKind : uint8_t { SKIP = 0, OOB_ONLY = 1, DRAW = 2 };
-
-    struct LineState
-    {
-        uint8_t  kind;
-        uint16_t s_start, s_end;  // active span (union for case 1/2)
-        uint16_t c_oob;           // OOB / both-bg colour
-    };
-
     // Per-line CI4 masks. 224 * 160 = ~35 KB.
     constexpr size_t MASK_BUF_BYTES = (size_t)MAX_LINES * MASK_BYTES;
     // Per-line RGBA16 TLUT. 224 * 16 * 2 = ~7 KB.
@@ -87,12 +95,6 @@ namespace
     // was paying for.
     void*      mask_buf_cached = nullptr;
     void*      tlut_buf_cached = nullptr;
-    uint8_t*   mask_buf = nullptr;
-    uint16_t*  tlut_buf = nullptr;
-    LineState  line[MAX_LINES];
-
-    inline uint8_t*  mask_ptr(int y) { return mask_buf + (size_t)y * MASK_BYTES; }
-    inline uint16_t* tlut_ptr(int y) { return tlut_buf + (size_t)y * TLUT_ENTRIES; }
 
     inline color_t rgba32_from_5551(uint16_t p)
     {
