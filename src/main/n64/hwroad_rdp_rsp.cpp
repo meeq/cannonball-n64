@@ -43,12 +43,17 @@ namespace n64
 namespace hwroad_rdp_rsp
 {
 
-bool     enabled    = false;     // TEMP off — testing CPU-path tight rect
+// Shipping default: RSP path on. Dispatcher transparently falls back to the
+// CPU build for ctrl=1/2 (dual-road) because do_case12 in the overlay is
+// still a single-c_oob stub.
+bool     enabled    = true;
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
 uint32_t rsp_us     = 0;
 
-bool     validate   = false;     // TEMP — step 2 correctness sweep (off; validated mism=0 across case 0+1)
+// Toggle on to re-run the CPU build into runs_buf and diff against the
+// RSP-produced runs[] / n_runs. Doubles prepare cost; off for perf.
+bool     validate   = false;
 uint32_t v_mismatches = 0;
 int      v_first_row  = -1;
 int      v_first_byte = -1;
@@ -58,7 +63,17 @@ namespace
     using namespace n64::hwroad_rdp::detail;
 
     // Per-row descriptor handed to the RSP overlay. Layout mirrors
-    // rsp_hwroad_rdp.S — keep in sync.
+    // rsp_hwroad_rdp.S DESC_* offsets — keep in sync. 32 bytes exact.
+    //
+    // The RSP overlay no longer packs a CI4 mask; it emits a Run list
+    // ({x_end, color5551}). Per row it needs:
+    //   * the 16-entry RGBA5551 TLUT (tlut_phys, 32B) so it can resolve
+    //     slot -> colour without a frame-wide TLUT cache;
+    //   * the src bytes (src0_phys / src1_phys, single-road may zero
+    //     the unused one);
+    //   * the runs_phys destination (writes up to 64 Run records = 256B);
+    //   * c_oob_color so RSP can short-circuit oob-only segments in
+    //     ctrl=1/2 without going through the scan loop.
     struct alignas(8) DescriptorRDP
     {
         uint8_t  kind;          // 0=SKIP, 1=OOB_ONLY, 2=DRAW
@@ -69,21 +84,24 @@ namespace
         uint16_t s0e;
         uint16_t s1s;
         uint16_t s1e;
-        uint16_t _pad0;
+        uint16_t c_oob_color;   // RGBA5551 = tlut[oob_slot]; for gap fill
+        uint32_t tlut_phys;     // RDRAM phys of 16-entry RGBA5551 TLUT
         uint32_t src0_phys;     // RDRAM phys of src0 + t0_offset
         uint32_t src1_phys;     // RDRAM phys of src1 + t1_offset
-        uint32_t mask_phys;     // RDRAM phys of mask[y][0]
-        uint32_t _pad1;
+        uint32_t runs_phys;     // RDRAM phys of runs[y][0]
     };
     static_assert(sizeof(DescriptorRDP) == 32, "DescriptorRDP must be 32 bytes");
 
-    // Frame-level state DMA'd into DMEM once per frame. Holds the slot
-    // LUTs and the 64-entry merged_idx table used by the RSP pack loop.
+    // Frame-level state DMA'd into DMEM once per frame. Holds slot LUTs,
+    // the 64-entry merged_idx table, and the writeback addr for n_runs
+    // (parallel u16[MAX_LINES] that the dispatcher copies into
+    // line[y].n_runs after rspq_wait).
     struct alignas(16) FrameStateRDP
     {
         uint8_t  ctrl;
-        uint8_t  oob_pair;      // (oob_slot << 4) | oob_slot
-        uint8_t  _pad0[6];
+        uint8_t  oob_pair;      // (oob_slot << 4) | oob_slot — legacy, unused by runs path
+        uint16_t _pad0;
+        uint32_t n_runs_phys;   // RDRAM phys of u16[MAX_LINES] write-back
         uint8_t  slot8r0[8];    // merged_idx[(p<<3) | 3] for p in 0..7
         uint8_t  slot8r1[8];    // merged_idx[(3<<3) | p] for p in 0..7
         uint8_t  merged_idx[64];
@@ -102,11 +120,19 @@ namespace
     bool initialised   = false;
     bool roads_flushed = false;
 
-    // Shadow mask used when validate==true. Cached; we hit-writeback after
-    // populating so the diff loop reads cache (cheaper than uncached).
-    constexpr size_t SHADOW_BYTES = (size_t)MAX_LINES * MASK_BYTES;
+    // Shadow buf for runs validation (compare RSP-produced runs[] vs CPU).
+    // sizeof(Run) == 4; MAX_RUNS_PER_ROW == 64. Cached.
+    constexpr size_t SHADOW_BYTES =
+        (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run);
     void*    shadow_cached = nullptr;
     uint8_t* shadow_buf    = nullptr;
+
+    // n_runs write-back array. RSP writes one u16 per DRAW row;
+    // dispatcher copies into line[y].n_runs after rspq_wait. Sized to
+    // 8-byte multiple so SP DMA's length encoding is clean.
+    constexpr size_t N_RUNS_BYTES = ((size_t)MAX_LINES * 2 + 7) & ~7;
+    void*     n_runs_cached = nullptr;
+    uint16_t* n_runs_uc     = nullptr;
 
     uint32_t s_frame = 0;
 }
@@ -127,12 +153,19 @@ void init()
     state_uc     = (FrameStateRDP*)UncachedAddr(state_cached);
     std::memset(state_uc, 0, sizeof(FrameStateRDP));
 
-    // Shadow buffer for validate path — holds the CPU baseline output while
-    // we diff against the RSP mask. Cached so the diff loop reads from cache.
+    // Shadow buffer for validate path — holds the CPU baseline runs[] while
+    // we diff against the RSP output. Cached so the diff loop reads cache.
     shadow_cached = memalign(16, SHADOW_BYTES);
     assertf(shadow_cached, "hwroad_rdp_rsp: shadow alloc failed");
     shadow_buf    = (uint8_t*)shadow_cached;
     std::memset(shadow_buf, 0, SHADOW_BYTES);
+
+    n_runs_cached = memalign(16, N_RUNS_BYTES);
+    assertf(n_runs_cached, "hwroad_rdp_rsp: n_runs alloc failed");
+    n_runs_uc     = (uint16_t*)UncachedAddr(n_runs_cached);
+    std::memset(n_runs_uc, 0, N_RUNS_BYTES);
+
+    state_uc->n_runs_phys = PhysicalAddr(n_runs_cached);
 
     initialised = true;
 }
@@ -145,6 +178,7 @@ void shutdown()
     free(desc_cached);   desc_cached  = nullptr; desc_uc  = nullptr;
     free(state_cached);  state_cached = nullptr; state_uc = nullptr;
     if (shadow_cached) { free(shadow_cached); shadow_cached = nullptr; shadow_buf = nullptr; }
+    if (n_runs_cached) { free(n_runs_cached); n_runs_cached = nullptr; n_runs_uc = nullptr; }
     initialised = false;
 }
 
@@ -177,17 +211,14 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     const uint8_t ctrl = road_control & 3;
     rsp::s_frame++;
 
-    // TEMP — log ctrl transitions so we can correlate validate samples to
-    // the actual cases exercised by the attract drive.
-    {
-        static uint8_t s_prev_ctrl = 0xFF;
-        if (ctrl != s_prev_ctrl) {
-            debugf("hwroad_rdp_rsp: ctrl %u -> %u at frame=%lu mism=%lu\n",
-                   (unsigned)s_prev_ctrl, (unsigned)ctrl,
-                   (unsigned long)rsp::s_frame,
-                   (unsigned long)rsp::v_mismatches);
-            s_prev_ctrl = ctrl;
-        }
+    // Dual-road sections (ctrl=1/2) aren't handled by the RSP overlay yet —
+    // do_case12 in rsp_hwroad_rdp.S still emits a single c_oob run that
+    // would paint the visible road area as a uniform OOB band. Fall back to
+    // the CPU build for those frames. Single-road frames (ctrl=0 or 3) take
+    // the full RSP path below.
+    if (ctrl == 1 || ctrl == 2) {
+        build_foreground_lores_rdp(rgb_lut);
+        return;
     }
 
     // roads[] is read-only after decode_road. Flush once so the RSP DMA
@@ -351,33 +382,26 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         }
 
         line[y].kind = DRAW;
-        const int span       = span_end - span_start;
-        const int byte_count = (span + 1) >> 1;
-
-        // Pre-fill mask row with oob_pair. RSP will overwrite the in-span
-        // nibble pairs; the gap region (case 1/2 where roads don't overlap)
-        // and any future bail-out region keep the OOB colour.
-        uint8_t* mask = mask_ptr(y);
-        const uint32_t v32 = (uint32_t)oob_pair * 0x01010101u;
-        uint32_t* m32 = (uint32_t*)mask;
-        const int n32 = byte_count >> 2;
-        for (int j = 0; j < n32; j++) m32[j] = v32;
-        for (int j = n32 << 2; j < byte_count; j++) mask[j] = oob_pair;
 
         // Per-row descriptor. src*_phys is the row base + t_offset so RSP
         // reads sequentially from [0, span_count) into its DMEM buffer.
+        // tlut_phys / runs_phys point to the same buffers the CPU build
+        // path uses (tlut_ptr(y) / runs_ptr(y)); both are uncached aliases
+        // so RDP/RSP DMAs see fresh data without explicit writebacks.
         rsp::DescriptorRDP* d = &rsp::desc_uc[y];
-        d->kind       = 2;
-        d->ctrl_case  = ctrl;
-        d->span_start = (uint16_t)span_start;
-        d->span_end   = (uint16_t)span_end;
-        d->s0s        = (uint16_t)s0s;
-        d->s0e        = (uint16_t)s0e;
-        d->s1s        = (uint16_t)s1s;
-        d->s1e        = (uint16_t)s1e;
-        d->src0_phys  = PhysicalAddr(src0 + t0b);
-        d->src1_phys  = PhysicalAddr(src1 + t1b);
-        d->mask_phys  = PhysicalAddr(mask);
+        d->kind        = 2;
+        d->ctrl_case   = ctrl;
+        d->span_start  = (uint16_t)span_start;
+        d->span_end    = (uint16_t)span_end;
+        d->s0s         = (uint16_t)s0s;
+        d->s0e         = (uint16_t)s0e;
+        d->s1s         = (uint16_t)s1s;
+        d->s1e         = (uint16_t)s1e;
+        d->c_oob_color = c_oob;
+        d->tlut_phys   = PhysicalAddr(tlut);
+        d->src0_phys   = PhysicalAddr(src0 + t0b);
+        d->src1_phys   = PhysicalAddr(src1 + t1b);
+        d->runs_phys   = PhysicalAddr(runs_ptr(y));
     }
 
     uint64_t t_cpu_end = get_ticks_us();
@@ -397,32 +421,43 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     rsp::last_us = (rsp::last_us * 7 + (uint32_t)(t_kick_end - t0)) >> 3;
 
     // ---- Validation path -------------------------------------------------
-    // Snapshot the RSP-produced mask, re-run the CPU build into mask_buf,
-    // and diff. The emit phase ends up reading the CPU's output, so visuals
-    // stay correct even when the RSP path has a bug. 2x prep cost — keep
-    // this off for perf testing.
+    // Snapshot the RSP-produced runs[] + n_runs, re-run the CPU build into
+    // the shared runs_buf / line[].n_runs, then diff. Emit ends up reading
+    // the CPU result, so visuals stay correct even when the RSP path has a
+    // bug. 2x prep cost — keep this off for perf testing.
     if (rsp::validate) {
         rspq_wait();
-        std::memcpy(rsp::shadow_buf, mask_buf,
-                    (size_t)MAX_LINES * MASK_BYTES);
+        // Snapshot RSP runs + n_runs.
+        std::memcpy(rsp::shadow_buf, runs_buf,
+                    (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run));
+        uint16_t shadow_n[MAX_LINES];
+        for (int y = 0; y < MAX_LINES; y++)
+            shadow_n[y] = (line[y].kind == DRAW) ? rsp::n_runs_uc[y] : 0;
 
-        // Re-run CPU build into mask_buf. The hwroad_rdp module reads its
-        // ramBuff snapshot, which is stable until the next osprites write.
+        // Re-run CPU build into runs_buf + line[].n_runs.
         build_foreground_lores_rdp(rgb_lut);
 
-        // Compare only the byte ranges that DRAW rows actually populate.
+        // Compare. Mismatch counted as: differing n_runs OR any Run byte
+        // mismatch within the CPU-reported n_runs window.
         uint32_t mism = 0;
-        int      first_row  = -1;
-        int      first_byte = -1;
+        int      first_row = -1;
+        int      first_run = -1;
         for (int y = 0; y < MAX_LINES; y++) {
             if (line[y].kind != DRAW) continue;
-            const int byte_count =
-                (line[y].s_end - line[y].s_start + 1) >> 1;
-            const uint8_t* cpu_row = mask_ptr(y);
-            const uint8_t* rsp_row = rsp::shadow_buf + (size_t)y * MASK_BYTES;
-            for (int b = 0; b < byte_count; b++) {
-                if (cpu_row[b] != rsp_row[b]) {
-                    if (first_row < 0) { first_row = y; first_byte = b; }
+            const uint16_t cpu_n = line[y].n_runs;
+            const uint16_t rsp_n = shadow_n[y];
+            if (cpu_n != rsp_n) {
+                if (first_row < 0) { first_row = y; first_run = -1; }
+                mism++;
+                continue;
+            }
+            const Run* cpu_runs = runs_ptr(y);
+            const Run* rsp_runs = (const Run*)
+                (rsp::shadow_buf + (size_t)y * MAX_RUNS_PER_ROW * sizeof(Run));
+            for (int r = 0; r < cpu_n; r++) {
+                if (cpu_runs[r].x_end     != rsp_runs[r].x_end ||
+                    cpu_runs[r].color5551 != rsp_runs[r].color5551) {
+                    if (first_row < 0) { first_row = y; first_run = r; }
                     mism++;
                 }
             }
@@ -431,11 +466,11 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
             rsp::v_mismatches += mism;
             if (rsp::v_first_row < 0) {
                 rsp::v_first_row  = first_row;
-                rsp::v_first_byte = first_byte;
+                rsp::v_first_byte = first_run;  // repurposed: first mismatching run index
             }
         }
         if ((rsp::s_frame % 60) == 0) {
-            debugf("hwroad_rdp_rsp: validate mism=%lu first=(row=%d,byte=%d)\n",
+            debugf("hwroad_rdp_rsp: validate mism=%lu first=(row=%d,run=%d)\n",
                    (unsigned long)rsp::v_mismatches,
                    rsp::v_first_row, rsp::v_first_byte);
         }
