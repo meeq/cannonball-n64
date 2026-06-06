@@ -43,7 +43,7 @@ namespace n64
 namespace hwroad_rdp_rsp
 {
 
-bool     enabled    = true;      // TEMP — step 2 smoke test
+bool     enabled    = false;     // TEMP off — testing CPU-path tight rect
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
 uint32_t rsp_us     = 0;
@@ -338,9 +338,11 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
             span_end   = (s0e > s1e) ? s0e : s1e;
         }
 
-        line[y].s_start = (uint16_t)span_start;
-        line[y].s_end   = (uint16_t)span_end;
-        line[y].c_oob   = c_oob;
+        line[y].s_start   = (uint16_t)span_start;
+        line[y].s_end     = (uint16_t)span_end;
+        line[y].tex_start = (uint16_t)span_start;
+        line[y].tex_end   = (uint16_t)span_end;
+        line[y].c_oob     = c_oob;
 
         if (span_end <= span_start) {
             line[y].kind = OOB_ONLY;

@@ -20,11 +20,23 @@ namespace detail
     constexpr int MASK_BYTES   = (MAX_SPAN_PX + 1) / 2;
     constexpr int TLUT_ENTRIES = 16;
 
-    // SKIP / OOB_ONLY behave as before. DRAW = CI4 mask in mask_buf (full
-    // merge path). DRAW_DIRECT_R0 = CI8 read straight from roads[row0]+t0b
-    // — used when slot8r0[p] is the identity transform, so the per-pixel
-    // CPU pack is unnecessary. TLUT slots 0..7 already hold road0 c[0..7],
-    // which matches what an identity-slot CI8 lookup needs.
+    // Per-row run list — replaces the CI4 mask + TLUT pair for the CPU
+    // build/emit path. Each Run describes a span of identical RGBA5551
+    // color that ends at x_end (exclusive). The implicit start is either
+    // line[y].s_start (for runs[0]) or the previous run's x_end. Runs are
+    // contiguous and cover [s_start, s_end). Emit skips any run whose
+    // color equals c_oob because Phase 2a already paints the row with
+    // c_oob via a single fill_rectangle.
+    struct Run
+    {
+        uint16_t x_end;
+        uint16_t color5551;
+    };
+    constexpr int MAX_RUNS_PER_ROW = 64;
+
+    // SKIP / OOB_ONLY behave as before. DRAW = run list in runs_buf row.
+    // DRAW_DIRECT_R0 was used by the CI4 path; retained as an enum value
+    // for ABI compatibility with hwroad_rdp_rsp.cpp but no longer emitted.
     enum LineKind : uint8_t
     {
         SKIP            = 0,
@@ -36,12 +48,14 @@ namespace detail
     struct LineState
     {
         uint8_t  kind;
+        // s_start/s_end is the union span. CPU path also uses s_start as
+        // the implicit start of runs[0]. tex_start/tex_end and src_phys/
+        // src_s_offset are vestigial from the CI4 path — kept for the RSP
+        // overlay file's LineState layout compatibility.
         uint16_t s_start, s_end;
+        uint16_t tex_start, tex_end;
         uint16_t c_oob;
-        // Direct-source variant: physical address of the CI8 row data
-        // (rounded down to 8-byte alignment) and the pixel offset within
-        // the loaded tile that corresponds to s_start. Only meaningful
-        // when kind == DRAW_DIRECT_*.
+        uint16_t n_runs;
         uint32_t src_phys;
         uint8_t  src_s_offset;
     };
@@ -49,12 +63,16 @@ namespace detail
     // Defined in hwroad_rdp.cpp. mask_buf / tlut_buf are uncached aliases
     // (KSEG1) — writes go through the R4300 store buffer with no cache
     // traffic; RDP DMAs read fresh data without an explicit writeback.
+    // mask_buf/tlut_buf are retained for RSP path compatibility; the CPU
+    // build/emit path now uses runs_buf instead.
     extern uint8_t*  mask_buf;
     extern uint16_t* tlut_buf;
+    extern Run*      runs_buf;
     extern LineState line[MAX_LINES];
 
     inline uint8_t*  mask_ptr(int y) { return mask_buf + (size_t)y * MASK_BYTES; }
     inline uint16_t* tlut_ptr(int y) { return tlut_buf + (size_t)y * TLUT_ENTRIES; }
+    inline Run*      runs_ptr(int y) { return runs_buf + (size_t)y * MAX_RUNS_PER_ROW; }
 }
 }
 }

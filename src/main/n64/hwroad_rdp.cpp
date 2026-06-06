@@ -1,39 +1,30 @@
 /***************************************************************************
     RDP path for HWRoad foreground rasteriser — all 4 road_control cases.
 
-    Two phases per frame:
+    Two phases per frame, both called under finalize_frame:
 
-      1. CPU pass (called from rendersurface::finalize_frame, owns rspq).
-         For each scanline:
+      1. CPU build pass. For each scanline:
            - Replay the same color_offset / data0 / hpos / color_table
              math as the CPU render_foreground_lores.
            - Compute the in-bounds spans s0 / s1.
-           - Build one CI4 mask for the active span — 1 byte per 2 pixels,
-             high nibble first. Each nibble is a 4-bit TLUT index encoding
-             which colour the merged road priority decision picked.
-           - Build one 16-entry RGBA16 TLUT (slots 0..7 = road0 c[0..7];
-             slots 8..15 = road1 c[0..7]).
-         Both arrays live in *cached* RAM. The merged-index decision uses
-         a per-frame 64-entry LUT keyed by (pix0, pix1) — replaces the
-         priority_map walk that the CPU rasteriser does per pixel.
+           - Walk the union span pixel-by-pixel, looking up the merged
+             slot via per-frame merged_idx[(p0, p1)] and resolving each
+             slot to an RGBA5551 colour via a per-row 16-entry TLUT built
+             on the stack.
+           - Emit a per-row list of solid-colour runs (Run{x_end, color})
+             into runs_buf. Adjacent same-colour pixels collapse into one
+             run; typical OutRun rows produce only a handful of runs.
 
-      2. RDP emit (still under the same finalize_frame call).
-         a) Fill mode: one rdpq_fill_rectangle per active line covering
-            the whole row with the merged "(pix0=3, pix1=3)" colour:
-              control 0:    c0[3]   (road0 bg)
-              control 1:    c0[3]   (priority_map[0][3] bit3 = 0)
-              control 2:    c1[3]   (priority_map[1][3] bit3 = 1)
-              control 3:    c1[3]   (road1 bg)
-            That sweeps both OOB regions (outside the active span) and
-            doubles as a backstop wherever the CI4 rect would resample
-            the same colour.
-         b) Standard mode + CI4 + TLUT_RGBA16 + alphacompare(1).
-            One textured rect per active line over [s_start, s_end). The
-            RDP samples the CI4 nibble → indexes the per-line TLUT →
-            writes the road colour into the framebuffer.
-
-    The CI4 4-bit-per-pixel load goes through an I8 view of the same TMEM
-    (same trick libdragon's hwtiles uses) — see TILE0 vs TILE1 below.
+      2. RDP emit pass.
+         a) Fill mode: one rdpq_fill_rectangle per active line painting the
+            full row with c_oob (the both-bg merged colour). Doubles as the
+            OOB fill outside the road extent and as the backstop wherever
+            the road samples bg.
+         b) Per active line, walk runs_buf and emit one rdpq_fill_rectangle
+            per visible run (colour != c_oob). No texturing, no TLUT load,
+            no alpha-compare — fill mode is pixel-fill-rate-limited and on
+            paraLLEl-RDP runs an order of magnitude faster than the CI4 +
+            TLUT + alpha-compare path it replaces.
 ***************************************************************************/
 
 #include "n64/hwroad_rdp.hpp"
@@ -58,40 +49,12 @@ bool     enabled = true;
 uint32_t last_us = 0;
 static uint32_t s_frame = 0;
 
-// Direct-source variant: skip the CPU CI4 pack for single-road rows whose
-// slot transform is the identity (ctrl=0, and ctrl=1 with road1 not visible
-// on this scanline). The RDP samples roads_ci4[row0] — a CI4-packed copy
-// of roads[] built once at boot — and looks up through the per-line TLUT
-// directly. Set to false to fall through to the mask-pack path for A/B.
-bool     direct_source_enabled = true;
-static bool s_roads_ci4_ready  = false;
-
-// CI4-packed copy of HWRoad::roads. roads[] stores one palette index per
-// byte (3 bits used). Each CI4 byte we build here packs two consecutive
-// roads bytes into (high nibble, low nibble) — the same nibble order the
-// CPU pack produced for the identity-slot case. Same row pitch (256 bytes
-// per row, 512 pixels) as the source roads[] array. ~64 KB total.
-constexpr int ROADS_CI4_ROWS  = 257;
-constexpr int ROADS_CI4_PITCH = 256;
-static uint8_t roads_ci4[ROADS_CI4_ROWS * ROADS_CI4_PITCH] __attribute__((aligned(16)));
-
-static void prepare_roads_ci4(const uint8_t* roads)
-{
-    for (int row = 0; row < ROADS_CI4_ROWS; row++) {
-        const uint8_t* src = roads + row * 512;
-        uint8_t*       dst = roads_ci4 + row * ROADS_CI4_PITCH;
-        for (int i = 0; i < ROADS_CI4_PITCH; i++)
-            dst[i] = (uint8_t)((src[2 * i] << 4) | (src[2 * i + 1] & 0x0F));
-    }
-    data_cache_hit_writeback_invalidate(roads_ci4, sizeof(roads_ci4));
-    s_roads_ci4_ready = true;
-}
-
 // Shared with hwroad_rdp_rsp.cpp via the internal header.
 namespace detail
 {
     uint8_t*  mask_buf = nullptr;
     uint16_t* tlut_buf = nullptr;
+    Run*      runs_buf = nullptr;
     LineState line[MAX_LINES];
 }
 
@@ -99,32 +62,39 @@ using detail::MAX_LINES;
 using detail::MAX_SPAN_PX;
 using detail::MASK_BYTES;
 using detail::TLUT_ENTRIES;
+using detail::MAX_RUNS_PER_ROW;
 using detail::LineState;
+using detail::Run;
 using detail::SKIP;
 using detail::OOB_ONLY;
 using detail::DRAW;
-using detail::DRAW_DIRECT_R0;
 using detail::mask_buf;
 using detail::tlut_buf;
+using detail::runs_buf;
 using detail::line;
 using detail::mask_ptr;
 using detail::tlut_ptr;
+using detail::runs_ptr;
 
 namespace
 {
-    // Per-line CI4 masks. 224 * 160 = ~35 KB.
+    // Per-line CI4 mask + TLUT — vestigial from the CI4 path, retained so
+    // the RSP overlay file (hwroad_rdp_rsp.cpp) continues to compile against
+    // the shared LineState layout. The CPU path no longer touches them.
     constexpr size_t MASK_BUF_BYTES = (size_t)MAX_LINES * MASK_BYTES;
-    // Per-line RGBA16 TLUT. 224 * 16 * 2 = ~7 KB.
     constexpr size_t TLUT_BUF_BYTES = (size_t)MAX_LINES * TLUT_ENTRIES * 2;
 
-    // Cached owner pointers (for free()). Hot path writes only via the
-    // uncached aliases; sequential byte/word stores go through the R4300
-    // store buffer and coalesce into 32-byte RDRAM bursts — same trick
-    // the CPU rasteriser uses for its KSEG1 scratch surface. Avoids the
-    // ~140 KB/frame of cache pollution the cached-write + writeback path
-    // was paying for.
+    // Per-line run lists. 224 * 64 * 4 = 56 KB.
+    constexpr size_t RUNS_BUF_BYTES =
+        (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run);
+
+    // Cached owner pointers (for free()). The CPU build writes runs_buf
+    // through its uncached alias; sequential 32-bit Run stores go through
+    // the R4300 store buffer and coalesce into 32-byte RDRAM bursts —
+    // same trick the CPU rasteriser uses for its KSEG1 scratch surface.
     void*      mask_buf_cached = nullptr;
     void*      tlut_buf_cached = nullptr;
+    void*      runs_buf_cached = nullptr;
 
     inline color_t rgba32_from_5551(uint16_t p)
     {
@@ -162,15 +132,24 @@ void init()
         tlut_buf_cached = memalign(16, TLUT_BUF_BYTES);
         tlut_buf        = (uint16_t*)UncachedAddr(tlut_buf_cached);
     }
+    if (!runs_buf_cached) {
+        runs_buf_cached = memalign(16, RUNS_BUF_BYTES);
+        runs_buf        = (Run*)UncachedAddr(runs_buf_cached);
+    }
     if (mask_buf) std::memset(mask_buf, 0, MASK_BUF_BYTES);
     if (tlut_buf) std::memset(tlut_buf, 0, TLUT_BUF_BYTES);
-    for (int y = 0; y < MAX_LINES; y++) line[y].kind = SKIP;
+    if (runs_buf) std::memset(runs_buf, 0, RUNS_BUF_BYTES);
+    for (int y = 0; y < MAX_LINES; y++) {
+        line[y].kind   = SKIP;
+        line[y].n_runs = 0;
+    }
 }
 
 void shutdown()
 {
     if (mask_buf_cached) { free(mask_buf_cached); mask_buf_cached = nullptr; mask_buf = nullptr; }
     if (tlut_buf_cached) { free(tlut_buf_cached); tlut_buf_cached = nullptr; tlut_buf = nullptr; }
+    if (runs_buf_cached) { free(runs_buf_cached); runs_buf_cached = nullptr; runs_buf = nullptr; }
 }
 
 bool should_skip_cpu(uint8_t /*road_control*/)
@@ -197,22 +176,17 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
 {
     using namespace n64::hwroad_rdp;
 
-    if (!mask_buf || !tlut_buf) return;
+    if (!runs_buf) return;
 
     const uint8_t ctrl = road_control & 3;
     s_frame++;
 
-    // Build the CI4-packed copy of roads[] the first time we need it.
-    // decode_road writes the source through the cache; prepare_roads_ci4
-    // writes back/invalidates its output so the RDP sees fresh bytes.
-    if (direct_source_enabled && !s_roads_ci4_ready)
-        prepare_roads_ci4(roads);
     if ((s_frame % 60) == 0)
         debugf("hwroad_rdp: ctrl=%u last_us=%lu\n",
                (unsigned)ctrl, (unsigned long)last_us);
 
     uint64_t t_wait0 = get_ticks_us();
-    // Block on the previous frame's RDP work so this frame's mask/TLUT writes
+    // Block on the previous frame's RDP work so this frame's run writes
     // don't race the RDP reading last frame's. Also keeps the RDRAM bus
     // empty for the upcoming uncached stores.
     rspq_wait();
@@ -220,12 +194,14 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
     const uint32_t sub_wait = (uint32_t)(t0 - t_wait0);
 
     // Sub-phase counters inside the per-row loop:
-    //   sub_tlut: TLUT entry writes (14 rgb_lut indexed loads per row)
+    //   sub_tlut: per-row 16-entry TLUT build (stack array)
     //   sub_spans: span computation, color_idx + hpos lookups
-    //   sub_fill : pre-fill + segment direct-pack into uncached mask
+    //   sub_fill : per-pixel walk + run emission
     //   sub_rows : count of DRAW rows
+    //   sub_runs : total runs emitted (for sizing diagnostics)
     uint32_t sub_tlut = 0, sub_spans = 0, sub_fill = 0;
-    uint32_t sub_rows = 0;
+    uint32_t sub_rows = 0, sub_runs = 0;
+    uint32_t sub_overflow = 0;
 
     uint16_t* roadram = ramBuff;
     const int W      = config.s16_width;
@@ -238,7 +214,7 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
     };
 
     // Per-frame merged index LUT. merged_idx[(p0 << 3) | p1] gives the
-    // 4-bit TLUT slot for the (pix0=p0, pix1=p1) decision:
+    // 4-bit slot for the (pix0=p0, pix1=p1) decision:
     //   0..7  -> road0 colour table entry p0
     //   8..15 -> road1 colour table entry p1
     // For single-road controls (0/3) the table is independent of the
@@ -262,10 +238,11 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
         }
     }
 
-    // Collapsed slot LUTs used by segment-based fills below. slot8r0[p]
-    // == merged_idx[(p,3)] (in-road0, road1 OOB); slot8r1[p] ==
-    // merged_idx[(3,p)] (in-road1, road0 OOB). oob_slot == merged_idx[(3,3)],
-    // the OOB / both-bg colour — matches the per-row fill rect.
+    // Collapsed slot LUTs used by single-road segments. slot8r0[p] ==
+    // merged_idx[(p,3)] (in-road0, road1 OOB); slot8r1[p] ==
+    // merged_idx[(3,p)] (in-road1, road0 OOB). oob_slot ==
+    // merged_idx[(3,3)] — the both-bg colour, matches Phase 2a's per-row
+    // fill rect.
     uint8_t slot8r0[8], slot8r1[8];
     for (int p = 0; p < 8; p++) {
         slot8r0[p] = merged_idx[(p << 3) | 3];
@@ -273,8 +250,7 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
     }
     const uint8_t oob_slot = merged_idx[(3 << 3) | 3];
 
-    // ---- Phase 1: CPU pass — replicate render_foreground_lores math
-    // and build CI4 masks + per-line TLUTs. -------------------------------
+    // ---- Phase 1: build per-row run lists -------------------------------
 
     for (int y = 0; y < MAX_LINES; y++)
     {
@@ -283,11 +259,11 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
 
         // Same skip conditions as the CPU path
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
-        { line[y].kind = SKIP; continue; }
+        { line[y].kind = SKIP; line[y].n_runs = 0; continue; }
         if (ctrl == 0 && ((data0 & 0x800) != 0))
-        { line[y].kind = SKIP; continue; }
+        { line[y].kind = SKIP; line[y].n_runs = 0; continue; }
         if (ctrl == 3 && ((data1 & 0x800) != 0))
-        { line[y].kind = SKIP; continue; }
+        { line[y].kind = SKIP; line[y].n_runs = 0; continue; }
 
         uint64_t r_t0 = get_ticks_us();
 
@@ -310,31 +286,34 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
         uint64_t r_t1 = get_ticks_us();
         sub_spans += (uint32_t)(r_t1 - r_t0);
 
-        // TLUT entries. Slots 0..7 = road0 c[0..7]; 8..15 = road1 c[0..7].
-        // Slots 4/5/6 in each half are unused but cheap to leave zeroed.
-        uint16_t* tlut = tlut_ptr(y);
-        tlut[0] = rgb_lut[color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1)];
-        tlut[1] = rgb_lut[color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1)];
-        tlut[2] = rgb_lut[color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1)];
-        tlut[7] = rgb_lut[color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1)];
+        // Per-row 16-entry TLUT on the stack. Slot layout matches the old
+        // CI4 path: 0..7 = road0 c[0..7], 8..15 = road1 c[0..7]. Slots
+        // 4/5/6 and 12/13/14 are "unused" and get 0 (RGBA5551 transparent)
+        // — runs that resolve to them are skipped by emit, same as the
+        // c_oob skip.
+        uint16_t tlut_l[16];
+        tlut_l[0] = rgb_lut[color_offset1 ^ 0x00 ^ ((color0 >> 0) & 1)];
+        tlut_l[1] = rgb_lut[color_offset1 ^ 0x02 ^ ((color0 >> 1) & 1)];
+        tlut_l[2] = rgb_lut[color_offset1 ^ 0x04 ^ ((color0 >> 2) & 1)];
+        tlut_l[7] = rgb_lut[color_offset1 ^ 0x06 ^ ((color0 >> 3) & 1)];
         {
             int32_t bg = (color0 >> 8) & 0xf;
-            tlut[3] = ((data0 & 0x200) != 0)
-                         ? tlut[0]
-                         : rgb_lut[color_offset2 ^ 0x00 ^ bg];
+            tlut_l[3] = ((data0 & 0x200) != 0)
+                           ? tlut_l[0]
+                           : rgb_lut[color_offset2 ^ 0x00 ^ bg];
         }
-        tlut[8]  = rgb_lut[color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1)];
-        tlut[9]  = rgb_lut[color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1)];
-        tlut[10] = rgb_lut[color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1)];
-        tlut[15] = rgb_lut[color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1)];
+        tlut_l[8]  = rgb_lut[color_offset1 ^ 0x08 ^ ((color1 >> 4) & 1)];
+        tlut_l[9]  = rgb_lut[color_offset1 ^ 0x0a ^ ((color1 >> 5) & 1)];
+        tlut_l[10] = rgb_lut[color_offset1 ^ 0x0c ^ ((color1 >> 6) & 1)];
+        tlut_l[15] = rgb_lut[color_offset1 ^ 0x0e ^ ((color1 >> 7) & 1)];
         {
             int32_t bg = (color1 >> 8) & 0xf;
-            tlut[11] = ((data1 & 0x200) != 0)
-                          ? tlut[8]
-                          : rgb_lut[color_offset2 ^ 0x10 ^ bg];
+            tlut_l[11] = ((data1 & 0x200) != 0)
+                            ? tlut_l[8]
+                            : rgb_lut[color_offset2 ^ 0x10 ^ bg];
         }
-        tlut[4] = 0; tlut[5] = 0; tlut[6] = 0;
-        tlut[12] = 0; tlut[13] = 0; tlut[14] = 0;
+        tlut_l[4] = 0; tlut_l[5] = 0; tlut_l[6] = 0;
+        tlut_l[12] = 0; tlut_l[13] = 0; tlut_l[14] = 0;
 
         uint64_t r_t2 = get_ticks_us();
         sub_tlut += (uint32_t)(r_t2 - r_t1);
@@ -346,12 +325,8 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
         compute_span(hpos0, W, s0s, s0e, t0b);
         compute_span(hpos1, W, s1s, s1e, t1b);
 
-        // c_oob = TLUT[merged_idx[(3,3)]]. Single-road controls collapse
-        // to that road's c[3].
-        const uint8_t oob_slot = merged_idx[(3 << 3) | 3];
-        const uint16_t c_oob   = tlut[oob_slot];
+        const uint16_t c_oob = tlut_l[oob_slot];
 
-        // Active span used to size the mask + textured rect.
         int span_start, span_end;
         if (ctrl == 0)      { span_start = s0s; span_end = s0e; }
         else if (ctrl == 3) { span_start = s1s; span_end = s1e; }
@@ -364,143 +339,159 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
         line[y].s_end   = (uint16_t)span_end;
         line[y].c_oob   = c_oob;
 
-        if (span_end <= span_start) { line[y].kind = OOB_ONLY; continue; }
-
-        // Direct-source fast path. For ctrl=0 (only road0) and for ctrl=1
-        // with road1's span empty, slot8r0 is the identity transform — so
-        // the merged CI4 nibble at output pixel x is just roads_row0[t0b+x].
-        // Skip the CPU pack and point the RDP at the pre-packed roads_ci4
-        // copy. The OOB src0 row isn't included in roads_ci4, so also
-        // require road0 in-bounds (data0 & 0x800 == 0).
-        const bool can_direct_r0 =
-            direct_source_enabled && s_roads_ci4_ready &&
-            ((data0 & 0x800) == 0) &&
-            ((ctrl == 0) || (ctrl == 1 && s1s >= s1e));
-        if (can_direct_r0) {
-            const int row0 = (int)((data0 >> 1) & 0xff);
-            const uint8_t* src_ci4 =
-                roads_ci4 + row0 * ROADS_CI4_PITCH + (t0b >> 1);
-            const uint32_t src_byte = PhysicalAddr((void*)src_ci4);
-            const uint32_t aligned  = src_byte & ~7u;
-            const int byte_misalign = (int)(src_byte - aligned);
-            const int s_off_ci4     = (byte_misalign << 1) | (t0b & 1);
-            line[y].kind         = DRAW_DIRECT_R0;
-            line[y].src_phys     = aligned;
-            line[y].src_s_offset = (uint8_t)s_off_ci4;
-            sub_rows++;
+        if (span_end <= span_start) {
+            line[y].kind   = OOB_ONLY;
+            line[y].n_runs = 0;
             continue;
         }
 
-        const int span       = span_end - span_start;
-        const int byte_count = (span + 1) >> 1;
-        uint8_t* mask        = mask_ptr(y);   // uncached alias
-
-        uint64_t r_t3 = get_ticks_us();
-        sub_spans += (uint32_t)(r_t3 - r_t2);
-
-        // Direct-pack into the uncached mask: each segment computes pairs
-        // of slots and stores one mask byte (high nibble = first pixel).
-        // Uncached, sequential — store buffer coalesces into RDRAM bursts.
-        // Segment boundaries that land on an odd nibble RMW just the
-        // affected nibble (~30 cycles each, a handful per row).
-        //
-        // The mask is pre-filled with (oob_slot:oob_slot) so gap regions
-        // (e.g. the in-between span when roads don't overlap in ctrl=1/2)
-        // pick up the right colour with no extra writes.
-
-        // --- Pre-fill mask with oob_pair via 4-byte uncached stores -----
-        const uint8_t oob_pair = (uint8_t)((oob_slot << 4) | oob_slot);
-        {
-            const uint32_t v32 = (uint32_t)oob_pair * 0x01010101u;
-            uint32_t* m32 = (uint32_t*)mask;
-            const int n32 = byte_count >> 2;
-            for (int j = 0; j < n32; j++) m32[j] = v32;
-            for (int j = n32 << 2; j < byte_count; j++) mask[j] = oob_pair;
+        // Fold the per-pixel slot lookup into the colour table. Each entry
+        // of color_r0/color_r1 is tlut_l[slot8rX[p]] for road-X pixel value
+        // p in 0..7 — collapses two chained loads per pixel into one. For
+        // ctrl=1/2 the merged decision uses color_merged[(p0<<3)|p1] over
+        // [overlap_lo, overlap_hi); the precompute is 64 loads so we skip
+        // it entirely when the roads don't overlap on this scanline.
+        uint16_t color_r0[8], color_r1[8];
+        for (int p = 0; p < 8; p++) {
+            color_r0[p] = tlut_l[slot8r0[p]];
+            color_r1[p] = tlut_l[slot8r1[p]];
         }
-
-        const uint8_t* p0 = src0 + (t0b - s0s);
-        const uint8_t* p1 = src1 + (t1b - s1s);
-
-        // Segment writer: walks [lo, hi) by 2 pixels, packs nibble pairs
-        // into mask starting at offset (lo - span_start). Boundaries that
-        // hit an odd nibble RMW only the affected nibble.
-        #define PACK_SEGMENT(LO, HI, GET_SLOT)                              \
-            do {                                                            \
-                int _lo = (LO);                                             \
-                const int _hi = (HI);                                       \
-                if (_lo < _hi) {                                            \
-                    int _n   = _lo - span_start;                            \
-                    int _idx = _n >> 1;                                     \
-                    if (_n & 1) {                                           \
-                        const uint8_t _s = (uint8_t)(GET_SLOT(_lo));        \
-                        mask[_idx] = (uint8_t)((mask[_idx] & 0xF0)          \
-                                              | (_s & 0x0F));               \
-                        _lo++; _idx++;                                      \
-                    }                                                       \
-                    while (_lo + 1 < _hi) {                                 \
-                        const uint8_t _a = (uint8_t)(GET_SLOT(_lo));        \
-                        const uint8_t _b = (uint8_t)(GET_SLOT(_lo + 1));    \
-                        mask[_idx++] = (uint8_t)((_a << 4) | _b);           \
-                        _lo += 2;                                           \
-                    }                                                       \
-                    if (_lo < _hi) {                                        \
-                        const uint8_t _s = (uint8_t)(GET_SLOT(_lo));        \
-                        mask[_idx] = (uint8_t)((_s << 4)                    \
-                                              | (mask[_idx] & 0x0F));       \
-                    }                                                       \
-                }                                                           \
-            } while (0)
-
-        #define SLOT_R0(X)   (slot8r0[p0[(X)]])
-        #define SLOT_R1(X)   (slot8r1[p1[(X)]])
-        #define SLOT_BOTH(X) (merged_idx[(p0[(X)] << 3) | p1[(X)]])
-
-        if (ctrl == 0) {
-            PACK_SEGMENT(s0s, s0e, SLOT_R0);
-        } else if (ctrl == 3) {
-            PACK_SEGMENT(s1s, s1e, SLOT_R1);
-        } else {
-            const int ol = (s0s > s1s) ? s0s : s1s;
-            const int oh = (s0e < s1e) ? s0e : s1e;
-            if (ol < oh) {
-                PACK_SEGMENT(ol, oh, SLOT_BOTH);
-                if (s0s < ol) PACK_SEGMENT(s0s, ol, SLOT_R0);
-                if (s1s < ol) PACK_SEGMENT(s1s, ol, SLOT_R1);
-                if (s0e > oh) PACK_SEGMENT(oh, s0e, SLOT_R0);
-                if (s1e > oh) PACK_SEGMENT(oh, s1e, SLOT_R1);
-            } else {
-                if (s0s < s0e) PACK_SEGMENT(s0s, s0e, SLOT_R0);
-                if (s1s < s1e) PACK_SEGMENT(s1s, s1e, SLOT_R1);
+        uint16_t color_merged[64];
+        int overlap_lo = 0, overlap_hi = 0;
+        if (ctrl == 1 || ctrl == 2) {
+            overlap_lo = (s0s > s1s) ? s0s : s1s;
+            overlap_hi = (s0e < s1e) ? s0e : s1e;
+            if (overlap_lo < overlap_hi) {
+                for (int i = 0; i < 64; i++)
+                    color_merged[i] = tlut_l[merged_idx[i]];
             }
         }
 
-        #undef SLOT_R0
-        #undef SLOT_R1
-        #undef SLOT_BOTH
-        #undef PACK_SEGMENT
+        // Walk [span_start, span_end), look up the merged colour per pixel,
+        // emit a new Run whenever the colour changes. runs[i].x_end is the
+        // exclusive end of that run; the implicit start is span_start
+        // (i == 0) or runs[i-1].x_end. The emit path skips runs whose
+        // colour equals c_oob (Phase 2a paints that row-wide), so a leading
+        // c_oob region naturally collapses to a single skipped run.
+        Run* runs = runs_ptr(y);
+        int  n = 0;
+        uint16_t prev_color = 0;
 
-        uint64_t r_t4 = get_ticks_us();
-        sub_fill += (uint32_t)(r_t4 - r_t3);
-        sub_rows++;
+        // EMIT(X, COLOR): close the active run at X (exclusive) and open a
+        // new run with COLOR. No-op if colour matches the previous run.
+        // Overflow drops new appends but keeps closing the trailing run —
+        // the visual fallout is the (MAX-1)th colour bleeding to span_end.
+        #define EMIT(X, COLOR)                                              \
+            do {                                                            \
+                const uint16_t _c = (COLOR);                                \
+                if (n == 0 || _c != prev_color) {                           \
+                    if (n > 0) runs[n - 1].x_end = (uint16_t)(X);           \
+                    if (n < MAX_RUNS_PER_ROW) {                             \
+                        runs[n].color5551 = _c;                             \
+                        n++;                                                \
+                    } else {                                                \
+                        sub_overflow++;                                     \
+                    }                                                       \
+                    prev_color = _c;                                        \
+                }                                                           \
+            } while (0)
 
-        line[y].kind = DRAW;
+        if (ctrl == 0)
+        {
+            const uint8_t* p0d = src0 + t0b;
+            const int len = s0e - s0s;
+            for (int i = 0; i < len; i++) {
+                EMIT(s0s + i, color_r0[p0d[i]]);
+            }
+        }
+        else if (ctrl == 3)
+        {
+            const uint8_t* p1d = src1 + t1b;
+            const int len = s1e - s1s;
+            for (int i = 0; i < len; i++) {
+                EMIT(s1s + i, color_r1[p1d[i]]);
+            }
+        }
+        else
+        {
+            // ctrl=1/2 dual-road. Walk pieces of [span_start, span_end) with
+            // uniform in0/in1 status by partitioning at s0s/s0e/s1s/s1e.
+            // p0d[x] / p1d[x] are valid for x in their respective road's
+            // span; we only dereference them inside the corresponding piece.
+            const uint8_t* p0d = src0 + (t0b - s0s);
+            const uint8_t* p1d = src1 + (t1b - s1s);
+
+            int bounds[6];
+            int nb = 0;
+            bounds[nb++] = span_start;
+            if (s0s > span_start && s0s < span_end) bounds[nb++] = s0s;
+            if (s0e > span_start && s0e < span_end) bounds[nb++] = s0e;
+            if (s1s > span_start && s1s < span_end) bounds[nb++] = s1s;
+            if (s1e > span_start && s1e < span_end) bounds[nb++] = s1e;
+            bounds[nb++] = span_end;
+            // Insertion sort the boundary list (nb <= 6).
+            for (int i = 1; i < nb; i++) {
+                int v = bounds[i], j = i;
+                while (j > 0 && bounds[j - 1] > v) {
+                    bounds[j] = bounds[j - 1]; j--;
+                }
+                bounds[j] = v;
+            }
+
+            for (int piece = 0; piece + 1 < nb; piece++) {
+                const int lo = bounds[piece];
+                const int hi = bounds[piece + 1];
+                if (lo >= hi) continue;
+                const bool in0 = (lo >= s0s) && (lo < s0e);
+                const bool in1 = (lo >= s1s) && (lo < s1e);
+                if (in0 && in1) {
+                    for (int x = lo; x < hi; x++) {
+                        EMIT(x, color_merged[(p0d[x] << 3) | p1d[x]]);
+                    }
+                } else if (in0) {
+                    for (int x = lo; x < hi; x++) {
+                        EMIT(x, color_r0[p0d[x]]);
+                    }
+                } else if (in1) {
+                    for (int x = lo; x < hi; x++) {
+                        EMIT(x, color_r1[p1d[x]]);
+                    }
+                } else {
+                    // Inter-road OOB piece: single c_oob run spanning [lo, hi).
+                    EMIT(lo, c_oob);
+                }
+            }
+        }
+
+        #undef EMIT
+
+        if (n > 0) {
+            runs[n - 1].x_end = (uint16_t)span_end;
+            line[y].n_runs    = (uint16_t)n;
+            line[y].kind      = DRAW;
+            sub_rows++;
+            sub_runs += (uint32_t)n;
+        } else {
+            line[y].n_runs = 0;
+            line[y].kind   = OOB_ONLY;
+        }
+
+        uint64_t r_t3 = get_ticks_us();
+        sub_fill += (uint32_t)(r_t3 - r_t2);
     }
 
     uint64_t tA = get_ticks_us();
-
-    // mask_buf and tlut_buf are accessed via uncached aliases — every byte
-    // written above already hit RDRAM via the store buffer, so the RDP
-    // DMAs see fresh data without an explicit writeback.
-
     last_us = (last_us * 7 + (uint32_t)(tA - t0)) >> 3;
 
     if ((s_frame % 60) == 0) {
-        debugf("hwroad_rdp build: wait=%lu tlut=%lu spans=%lu fill=%lu rows=%lu total=%lu\n",
+        debugf("hwroad_rdp build: wait=%lu tlut=%lu spans=%lu fill=%lu rows=%lu runs=%lu ovf=%lu total=%lu\n",
                (unsigned long)sub_wait,
                (unsigned long)sub_tlut,
                (unsigned long)sub_spans,
                (unsigned long)sub_fill,
                (unsigned long)sub_rows,
+               (unsigned long)sub_runs,
+               (unsigned long)sub_overflow,
                (unsigned long)(tA - t0));
     }
 }
@@ -508,21 +499,22 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
 // ---------------------------------------------------------------------------
 // HWRoad::emit_foreground_lores_rdp
 //
-// RDP-only phase. Reads the per-line state, mask_buf, and tlut_buf produced
-// by build_foreground_lores_rdp (this frame) and emits a per-line fill
-// rectangle plus a CI4 + TLUT textured rectangle. Caller must have a target
-// rdpq_attach'd; coordinates are framebuffer-space.
+// RDP-only phase. Reads per-line state + runs_buf produced by
+// build_foreground_lores_rdp and emits two passes of fill rectangles:
+//   2a) one per active line painting c_oob row-wide.
+//   2b) one per visible run (colour != c_oob) within each DRAW line.
+// Caller must have a target rdpq_attach'd; coordinates are framebuffer-space.
 // ---------------------------------------------------------------------------
 void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
 {
     using namespace n64::hwroad_rdp;
 
-    if (!mask_buf || !tlut_buf) return;
+    if (!runs_buf) return;
 
     uint64_t t0 = get_ticks_us();
     const int W = config.s16_width;
 
-    // ---- Phase 2a: per-line OOB fill --------------------------------------
+    // ---- Phase 2a: per-line c_oob fill ------------------------------------
 
     rdpq_set_mode_fill(RGBA32(0, 0, 0, 0));
     for (int y = 0; y < MAX_LINES; y++)
@@ -535,102 +527,40 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
 
     uint64_t tB = get_ticks_us();
 
-    // ---- Phase 2b: CI4 textured rect per active line ----------------------
+    // ---- Phase 2b: per-run fill rectangles --------------------------------
 
-    rdpq_set_mode_standard();
-    rdpq_mode_tlut(TLUT_RGBA16);
-    rdpq_mode_alphacompare(1);
-
-    // Tile budget (8 total):
-    //   TILE0..TILE4 = banded CI4 draw views, palette=0..4, pitch=MASK_BYTES
-    //   TILE5        = banded I8 load view, pitch=MASK_BYTES
-    //   TILE6        = DRAW_DIRECT_R0 CI4 view (different pitch)
-    //   TILE7        = DRAW_DIRECT_R0 I8 load view
-    //
-    // Banding rationale: per-line tex_upload_tlut + load_tile dominate the
-    // ~21.5ms RDP drain (≈200 active lines × 2 TMEM DMAs each). Stacking K
-    // consecutive DRAW rows into one load_tile + one multi-palette TLUT
-    // load collapses 2K DMAs into 2 per band. K_MAX=5 limited by available
-    // tile descriptors. CPU-side per-line cost grows by K set_tile register
-    // writes per band — negligible vs TMEM DMA savings.
-    constexpr int BAND_MAX = 5;
-    constexpr int CI4_DIRECT_BYTES =
-        ((((MAX_SPAN_PX + 15 + 1) >> 1) + 7) & ~7);  // 168
-
-    for (int k = 0; k < BAND_MAX; k++) {
-        rdpq_tileparms_t p{};
-        p.palette = (uint8_t)k;
-        const rdpq_tile_t t = (rdpq_tile_t)(TILE0 + k);
-        rdpq_set_tile(t, FMT_CI4, 0, MASK_BYTES, &p);
-        rdpq_set_tile_size(t, 0, 0, MAX_SPAN_PX, BAND_MAX);
-    }
-    rdpq_set_tile(TILE5, FMT_I8,  0, MASK_BYTES, NULL);
-    rdpq_set_tile(TILE6, FMT_CI4, 0, CI4_DIRECT_BYTES, NULL);
-    rdpq_set_tile_size(TILE6, 0, 0, MAX_SPAN_PX + 15, 1);
-    rdpq_set_tile(TILE7, FMT_I8,  0, CI4_DIRECT_BYTES, NULL);
-
-    int y = 0;
-    while (y < MAX_LINES)
+    // Still in fill mode from Phase 2a. Walk each DRAW row's run list and
+    // emit one rdpq_fill_rectangle per visible run (colour != c_oob).
+    // Transparent slots (tlut value 0) also skip the emit, matching what
+    // the old alphacompare path did.
+    uint32_t rects = 0;
+    for (int y = 0; y < MAX_LINES; y++)
     {
-        const uint8_t kind = line[y].kind;
-        if (kind == SKIP || kind == OOB_ONLY) { y++; continue; }
-
-        if (kind == DRAW_DIRECT_R0)
-        {
-            const int span = line[y].s_end - line[y].s_start;
-            const int x0 = x_off + line[y].s_start;
-            const int x1 = x_off + line[y].s_end;
-            const int s_off = line[y].src_s_offset;
-            const int load_bytes = ((((s_off + span + 1) >> 1) + 7) & ~7);
-            rdpq_tex_upload_tlut(tlut_ptr(y), 0, TLUT_ENTRIES);
-            rdpq_set_texture_image_raw(0, line[y].src_phys,
-                                       FMT_I8, load_bytes, 1);
-            rdpq_load_tile(TILE7, 0, 0, load_bytes, 1);
-            rdpq_texture_rectangle(TILE6,
-                                   x0, y_off + y,
-                                   x1, y_off + y + 1,
-                                   s_off, 0);
-            y++;
-            continue;
+        if (line[y].kind != DRAW) continue;
+        const Run*     runs   = runs_ptr(y);
+        const int      n      = line[y].n_runs;
+        const uint16_t c_oob  = line[y].c_oob;
+        int prev_x = line[y].s_start;
+        for (int r = 0; r < n; r++) {
+            const uint16_t color = runs[r].color5551;
+            const int      xe    = runs[r].x_end;
+            if (color != c_oob && color != 0 && xe > prev_x) {
+                rdpq_set_fill_color(rgba32_from_5551(color));
+                rdpq_fill_rectangle(x_off + prev_x, y_off + y,
+                                    x_off + xe,     y_off + y + 1);
+                rects++;
+            }
+            prev_x = xe;
         }
-
-        // kind == DRAW: accumulate band of contiguous DRAW lines.
-        const int band_first = y;
-        int band_count = 1;
-        while (band_count < BAND_MAX
-               && (band_first + band_count) < MAX_LINES
-               && line[band_first + band_count].kind == DRAW)
-        {
-            band_count++;
-        }
-
-        // One source DMA loading band_count mask rows.
-        rdpq_set_texture_image_raw(0, PhysicalAddr(mask_ptr(band_first)),
-                                   FMT_I8, MASK_BYTES, band_count);
-        rdpq_load_tile(TILE5, 0, 0, MASK_BYTES, band_count);
-        // One TLUT DMA loading band_count palettes at slots 0..band_count*16-1.
-        rdpq_tex_upload_tlut(tlut_ptr(band_first), 0, band_count * TLUT_ENTRIES);
-
-        for (int k = 0; k < band_count; k++)
-        {
-            const int ly = band_first + k;
-            const int x0 = x_off + line[ly].s_start;
-            const int x1 = x_off + line[ly].s_end;
-            rdpq_texture_rectangle((rdpq_tile_t)(TILE0 + k),
-                                   x0, y_off + ly,
-                                   x1, y_off + ly + 1,
-                                   0, k);
-        }
-
-        y += band_count;
     }
 
     uint64_t tC = get_ticks_us();
 
     if ((s_frame % 60) == 0) {
-        debugf("hwroad_rdp emit: fill=%lu tex=%lu total=%lu\n",
+        debugf("hwroad_rdp emit: fill=%lu runs=%lu rects=%lu total=%lu\n",
                (unsigned long)(tB - t0),
                (unsigned long)(tC - tB),
+               (unsigned long)rects,
                (unsigned long)(tC - t0));
     }
 }
