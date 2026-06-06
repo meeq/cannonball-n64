@@ -51,13 +51,13 @@
 #   3. DMA TLUT (32 B) → TLUT_DMEM.
 #   4. ctrl=0 → DMA SRC0, vec_scan(SRC0, slot8r0, s0s, s0e-s0s).
 #      ctrl=3 → DMA SRC1, vec_scan(SRC1, slot8r1, s1s, s1e-s1s).
-#      ctrl=1/2 → CPU dispatcher falls back to build_foreground_lores_rdp
-#      before this overlay runs; do_case12 here is a single-c_oob stub
-#      kept only so the row loop has something to dispatch when called.
+#      ctrl=1/2 → DMA both srcs; build sorted piece bounds in BOUNDS;
+#                 walk pieces emitting via per-piece scalar scan
+#                 (pair / r0-only / r1-only / c_oob).
 #   5. Write n_runs[y] into N_RUNS_OUT DMEM table; DMA runs[] out.
 #   6. After all rows, bulk-DMA N_RUNS_OUT to frame_state.n_runs_phys.
 #
-# vec_scan loop shape (scalar):
+# vec_scan loop shape (case 0/3 — sentinel-terminated extend):
 #   outer:
 #     b     = src[i]
 #     color = tlut[slot_table[b]]
@@ -66,6 +66,21 @@
 #     (sentinel src[len]=0xFF stamped at DMA time terminates the run
 #      extend without a per-iter length check; outer-loop test then
 #      sees i==len and falls through to the trailing close.)
+#
+# do_case12 loop shape (per piece — bounds-checked extend):
+#   For each sorted piece [lo, hi) inside [span_start, span_end):
+#     in0 = lo in [s0s, s0e);  in1 = lo in [s1s, s1e)
+#     dispatch on (in0, in1):
+#       (1,1) pair    : color = tlut[merged_idx[(b0<<3)|b1]]
+#                       extend while p0[x]==b0 && p1[x]==b1
+#       (1,0) r0_only : color = tlut[slot8r0[b0]]
+#                       extend while p0[x]==b0
+#       (0,1) r1_only : color = tlut[slot8r1[b1]]
+#                       extend while p1[x]==b1
+#       (0,0) c_oob   : emit one c_oob run (no scan)
+#     piece extends share n / prev_color so adjacent same-colour pieces
+#     coalesce into one run, matching the CPU EMIT macro semantics.
+#   Final trailing run is closed at span_end after all pieces walked.
 ####################################################################
 
 #include <rsp_queue.inc>
@@ -119,6 +134,12 @@ RUNS:        .space 256
 # Per-frame n_runs table. One u16 per row; bulk DMA'd to RDRAM at
 # the end of the command (after the row loop drains).
 N_RUNS_OUT:  .space 512         # 256 rows * 2 = 512B (covers MAX_LINES=224 plus slack)
+.align 4
+# Per-row piece-walk scratch for do_case12. BOUNDS holds up to 6
+# sorted halfword bounds (span_start / s0s / s0e / s1s / s1e / span_end);
+# NB_SAVE is the count after pruning duplicates and out-of-range entries.
+BOUNDS:      .space 16
+NB_SAVE:     .space 4
 
 ####################################################################
 # Code segment.
@@ -148,6 +169,9 @@ N_RUNS_OUT:  .space 512         # 256 rows * 2 = 512B (covers MAX_LINES=224 plus
 #define FS_SLOT8R0       0x08
 #define FS_SLOT8R1       0x10
 #define FS_MERGED        0x18
+
+# Run-list cap per row. Must match the CPU side in hwroad_rdp_rsp.cpp.
+#define MAX_RUNS_PER_ROW 64
 
 # DMA sizing. 336 B = max span (320) + max misalign (7), rounded to
 # multiple of 8.
@@ -261,16 +285,400 @@ do_case3:
     j       vec_scan
     nop
 
+############################################################
+# Register plan for do_case12 piece walk:
+#   Persistent (live across inner scanners):
+#     t1 = s0s          t2 = s0e
+#     t3 = s1s          t4 = s1e
+#     v0 = SRC0_BASE    v1 = SRC1_BASE
+#     s5 = RUNS         s6 = TLUT_DMEM
+#     s7 = MERGED       s8 = SLOT8R0  (slot8r1 = s8 + 8)
+#     a3 = n_runs       k1 = prev_color
+#     k0 = row index    (preserved for emit_done_with_n_in_t3)
+#     t8 = piece index
+#
+#   Per piece (set in walk loop, read by scanner entry):
+#     a1 = lo (piece start screen_x)
+#     a2 = hi (piece end screen_x)
+#
+#   Inside inner scanner (free scratch, clobbered each iter):
+#     a0 = i (scan position screen_x)
+#     t0, t5, t6, t7  — generic scratch
+#     t9              — pair_extend uses for b1
+#
+# All bounds-build + sort scratch (t-regs) is consumed before the
+# persistent-state load; the load freshens t1..t4 from DESC.
+############################################################
+
 do_case12:
-    # Stub: emit a single Run covering [span_start, span_end) with
-    # c_oob_color. Visible bug at split — fix in case-12 task.
-    lhu     t0, %lo(DESC) + DESC_SS
-    lhu     t1, %lo(DESC) + DESC_SE
-    lhu     t2, %lo(DESC) + DESC_C_OOB
-    # runs[0].x_end = span_end (offset 0); runs[0].color5551 = c_oob (offset 2)
-    sh      t1, %lo(RUNS) + 0
-    sh      t2, %lo(RUNS) + 2
-    li      t3, 1                        # n_runs = 1
+    # ---- DMA both src rows. ----------------------------------
+    lw      s0, %lo(DESC) + DESC_SRC0_PHYS
+    li      s4, %lo(SRC0)
+    jal     DMAIn
+    li      t0, DMA_SIZE(SRC_DMA_BYTES, 1)
+    sw      s4, %lo(SRC0_BASE)
+    lw      s0, %lo(DESC) + DESC_SRC1_PHYS
+    li      s4, %lo(SRC1)
+    jal     DMAIn
+    li      t0, DMA_SIZE(SRC_DMA_BYTES, 1)
+    sw      s4, %lo(SRC1_BASE)
+
+    # ---- Build BOUNDS[] ---------------------------------------
+    # bounds[0] = span_start; then push s0s/s0e/s1s/s1e iff strictly
+    # inside (span_start, span_end); finally bounds[nb++] = span_end.
+    # All build-phase scratch uses t-regs; t1..t4 will be reloaded
+    # for the persistent piece-walk state after the sort.
+    lhu     t5, %lo(DESC) + DESC_SS          # ss
+    lhu     t6, %lo(DESC) + DESC_SE          # se
+    li      t8, %lo(BOUNDS)
+    sh      t5, 0(t8)                        # bounds[0] = ss
+    addiu   t8, t8, 2
+
+    lhu     t7, %lo(DESC) + DESC_S0S
+    sltu    t0, t5, t7                       # ss < s0s ?
+    sltu    t2, t7, t6                       # s0s < se ?
+    and     t0, t0, t2
+    beqz    t0, .c12_skip_s0s
+    nop
+    sh      t7, 0(t8)
+    addiu   t8, t8, 2
+.c12_skip_s0s:
+
+    lhu     t7, %lo(DESC) + DESC_S0E
+    sltu    t0, t5, t7
+    sltu    t2, t7, t6
+    and     t0, t0, t2
+    beqz    t0, .c12_skip_s0e
+    nop
+    sh      t7, 0(t8)
+    addiu   t8, t8, 2
+.c12_skip_s0e:
+
+    lhu     t7, %lo(DESC) + DESC_S1S
+    sltu    t0, t5, t7
+    sltu    t2, t7, t6
+    and     t0, t0, t2
+    beqz    t0, .c12_skip_s1s
+    nop
+    sh      t7, 0(t8)
+    addiu   t8, t8, 2
+.c12_skip_s1s:
+
+    lhu     t7, %lo(DESC) + DESC_S1E
+    sltu    t0, t5, t7
+    sltu    t2, t7, t6
+    and     t0, t0, t2
+    beqz    t0, .c12_skip_s1e
+    nop
+    sh      t7, 0(t8)
+    addiu   t8, t8, 2
+.c12_skip_s1e:
+
+    sh      t6, 0(t8)                        # bounds[nb] = se
+    addiu   t8, t8, 2
+
+    # nb = (t8 - BOUNDS) / 2
+    li      t0, %lo(BOUNDS)
+    subu    t1, t8, t0
+    srl     t1, t1, 1                        # t1 = nb
+    sw      t1, %lo(NB_SAVE)
+
+    # ---- Insertion sort BOUNDS[0..nb) -----------------------
+    li      t2, 1                            # i = 1
+.c12_sort_outer:
+    sltu    t0, t2, t1
+    beqz    t0, .c12_sort_done
+    nop
+    sll     t3, t2, 1
+    li      t8, %lo(BOUNDS)
+    addu    t3, t8, t3
+    lhu     t4, 0(t3)                        # v = bounds[i]
+    move    t5, t2                           # j = i
+.c12_sort_inner:
+    blez    t5, .c12_sort_place
+    nop
+    addiu   t6, t5, -1
+    sll     t7, t6, 1
+    addu    t7, t8, t7
+    lhu     t6, 0(t7)                        # bounds[j-1]
+    sltu    t0, t4, t6                       # v < bounds[j-1] ?
+    beqz    t0, .c12_sort_place
+    nop
+    sll     t7, t5, 1
+    addu    t7, t8, t7
+    sh      t6, 0(t7)                        # bounds[j] = bounds[j-1]
+    addiu   t5, t5, -1
+    j       .c12_sort_inner
+    nop
+.c12_sort_place:
+    sll     t6, t5, 1
+    addu    t6, t8, t6
+    sh      t4, 0(t6)                        # bounds[j] = v
+    addiu   t2, t2, 1
+    j       .c12_sort_outer
+    nop
+.c12_sort_done:
+
+    # ---- Load persistent piece-walk state -------------------
+    li      a3, 0                            # n_runs
+    li      k1, 0x10000                      # prev_color sentinel
+    lhu     t1, %lo(DESC) + DESC_S0S
+    lhu     t2, %lo(DESC) + DESC_S0E
+    lhu     t3, %lo(DESC) + DESC_S1S
+    lhu     t4, %lo(DESC) + DESC_S1E
+    lw      v0, %lo(SRC0_BASE)
+    lw      v1, %lo(SRC1_BASE)
+    li      s5, %lo(RUNS)
+    li      s6, %lo(TLUT_DMEM)
+    li      s7, %lo(FRAME_STATE) + FS_MERGED
+    li      s8, %lo(FRAME_STATE) + FS_SLOT8R0
+
+    li      t8, 0                            # piece index
+.c12_piece_loop:
+    lw      t6, %lo(NB_SAVE)
+    addiu   t0, t6, -1                       # nb - 1
+    sltu    t0, t8, t0
+    beqz    t0, .c12_pieces_done
+    nop
+
+    sll     t6, t8, 1
+    li      t7, %lo(BOUNDS)
+    addu    t6, t7, t6
+    lhu     a1, 0(t6)                        # lo
+    lhu     a2, 2(t6)                        # hi
+
+    sltu    t0, a1, a2
+    beqz    t0, .c12_piece_next
+    nop
+
+    # in0 = (lo >= s0s) && (lo < s0e)
+    sltu    t5, a1, t1                       # lo < s0s ?
+    xori    t5, t5, 1
+    sltu    t6, a1, t2                       # lo < s0e ?
+    and     t5, t5, t6                       # t5 = in0
+
+    # in1 = (lo >= s1s) && (lo < s1e)
+    sltu    t6, a1, t3
+    xori    t6, t6, 1
+    sltu    t7, a1, t4
+    and     t6, t6, t7                       # t6 = in1
+
+    # Dispatch on (in0, in1).
+    bnez    t5, .c12_in0_set
+    nop
+    bnez    t6, .c12_piece_r1
+    nop
+    j       .c12_piece_oob
+    nop
+.c12_in0_set:
+    bnez    t6, .c12_piece_pair
+    nop
+    j       .c12_piece_r0
+    nop
+
+############################################################
+# .c12_piece_r0 — road 0 only over [lo, hi).
+############################################################
+.c12_piece_r0:
+    move    a0, a1                           # screen_x = lo
+.r0_outer:
+    sltu    t0, a0, a2
+    beqz    t0, .c12_piece_next
+    nop
+    subu    t5, a0, t1                       # offset = x - s0s
+    addu    t5, v0, t5
+    lbu     t6, 0(t5)                        # b
+    addu    t5, s8, t6                       # &slot8r0[b]
+    lbu     t7, 0(t5)                        # slot
+    sll     t7, t7, 1
+    addu    t5, s6, t7
+    lhu     t7, 0(t5)                        # color
+    beq     t7, k1, .r0_extend
+    nop
+    blez    a3, .r0_open
+    nop
+    addiu   t5, a3, -1
+    sll     t5, t5, 2
+    addu    t5, s5, t5
+    sh      a0, 0(t5)                        # runs[n-1].x_end = screen_x
+.r0_open:
+    li      t5, MAX_RUNS_PER_ROW
+    sltu    t5, a3, t5
+    beqz    t5, .r0_set_prev
+    nop
+    sll     t5, a3, 2
+    addu    t5, s5, t5
+    sh      t7, 2(t5)                        # runs[n].color
+    addiu   a3, a3, 1
+.r0_set_prev:
+    move    k1, t7
+.r0_extend:
+    addiu   a0, a0, 1
+    sltu    t0, a0, a2
+    beqz    t0, .r0_outer
+    nop
+    subu    t5, a0, t1
+    addu    t5, v0, t5
+    lbu     t5, 0(t5)
+    beq     t5, t6, .r0_extend
+    nop
+    j       .r0_outer
+    nop
+
+############################################################
+# .c12_piece_r1 — road 1 only over [lo, hi).
+############################################################
+.c12_piece_r1:
+    move    a0, a1
+.r1_outer:
+    sltu    t0, a0, a2
+    beqz    t0, .c12_piece_next
+    nop
+    subu    t5, a0, t3                       # offset = x - s1s
+    addu    t5, v1, t5
+    lbu     t6, 0(t5)                        # b
+    addiu   t5, s8, 8                        # &slot8r1
+    addu    t5, t5, t6
+    lbu     t7, 0(t5)                        # slot
+    sll     t7, t7, 1
+    addu    t5, s6, t7
+    lhu     t7, 0(t5)                        # color
+    beq     t7, k1, .r1_extend
+    nop
+    blez    a3, .r1_open
+    nop
+    addiu   t5, a3, -1
+    sll     t5, t5, 2
+    addu    t5, s5, t5
+    sh      a0, 0(t5)
+.r1_open:
+    li      t5, MAX_RUNS_PER_ROW
+    sltu    t5, a3, t5
+    beqz    t5, .r1_set_prev
+    nop
+    sll     t5, a3, 2
+    addu    t5, s5, t5
+    sh      t7, 2(t5)
+    addiu   a3, a3, 1
+.r1_set_prev:
+    move    k1, t7
+.r1_extend:
+    addiu   a0, a0, 1
+    sltu    t0, a0, a2
+    beqz    t0, .r1_outer
+    nop
+    subu    t5, a0, t3
+    addu    t5, v1, t5
+    lbu     t5, 0(t5)
+    beq     t5, t6, .r1_extend
+    nop
+    j       .r1_outer
+    nop
+
+############################################################
+# .c12_piece_pair — both roads in [lo, hi). merged_idx lookup.
+#   Holds b0 in t6, b1 in t9 across the inner extend loop.
+############################################################
+.c12_piece_pair:
+    move    a0, a1
+.pair_outer:
+    sltu    t0, a0, a2
+    beqz    t0, .c12_piece_next
+    nop
+    subu    t5, a0, t1
+    addu    t5, v0, t5
+    lbu     t6, 0(t5)                        # b0
+    subu    t5, a0, t3
+    addu    t5, v1, t5
+    lbu     t9, 0(t5)                        # b1
+    sll     t5, t6, 3
+    or      t5, t5, t9                        # (b0 << 3) | b1
+    addu    t5, s7, t5
+    lbu     t5, 0(t5)                        # merged slot
+    sll     t5, t5, 1
+    addu    t5, s6, t5
+    lhu     t7, 0(t5)                        # color
+    beq     t7, k1, .pair_extend
+    nop
+    blez    a3, .pair_open
+    nop
+    addiu   t5, a3, -1
+    sll     t5, t5, 2
+    addu    t5, s5, t5
+    sh      a0, 0(t5)
+.pair_open:
+    li      t5, MAX_RUNS_PER_ROW
+    sltu    t5, a3, t5
+    beqz    t5, .pair_set_prev
+    nop
+    sll     t5, a3, 2
+    addu    t5, s5, t5
+    sh      t7, 2(t5)
+    addiu   a3, a3, 1
+.pair_set_prev:
+    move    k1, t7
+.pair_extend:
+    addiu   a0, a0, 1
+    sltu    t0, a0, a2
+    beqz    t0, .pair_outer
+    nop
+    subu    t5, a0, t1
+    addu    t5, v0, t5
+    lbu     t5, 0(t5)
+    bne     t5, t6, .pair_outer              # b0 changed
+    nop
+    subu    t5, a0, t3
+    addu    t5, v1, t5
+    lbu     t5, 0(t5)
+    beq     t5, t9, .pair_extend             # b1 still matches
+    nop
+    j       .pair_outer                       # b1 changed
+    nop
+
+############################################################
+# .c12_piece_oob — entire piece is out-of-bounds for both roads.
+#   Emit one c_oob_color run (no scan; coalesces with prior c_oob).
+############################################################
+.c12_piece_oob:
+    lhu     t7, %lo(DESC) + DESC_C_OOB
+    beq     t7, k1, .c12_piece_next          # already in a c_oob run
+    nop
+    blez    a3, .oob_open
+    nop
+    addiu   t5, a3, -1
+    sll     t5, t5, 2
+    addu    t5, s5, t5
+    sh      a1, 0(t5)                        # runs[n-1].x_end = lo
+.oob_open:
+    li      t5, MAX_RUNS_PER_ROW
+    sltu    t5, a3, t5
+    beqz    t5, .oob_set_prev
+    nop
+    sll     t5, a3, 2
+    addu    t5, s5, t5
+    sh      t7, 2(t5)
+    addiu   a3, a3, 1
+.oob_set_prev:
+    move    k1, t7
+    # Fall through to .c12_piece_next.
+
+.c12_piece_next:
+    addiu   t8, t8, 1
+    j       .c12_piece_loop
+    nop
+
+.c12_pieces_done:
+    # Close trailing run at span_end. If no runs were emitted (a3 == 0),
+    # skip — emit_done_with_n_in_t3 will see n_runs = 0 and drop the DMA.
+    blez    a3, .c12_done
+    nop
+    lhu     t0, %lo(DESC) + DESC_SE
+    addiu   t5, a3, -1
+    sll     t5, t5, 2
+    addu    t5, s5, t5
+    sh      t0, 0(t5)                        # runs[n-1].x_end = span_end
+.c12_done:
+    move    t3, a3                           # n_runs
     j       emit_done_with_n_in_t3
     nop
 
@@ -298,7 +706,6 @@ do_case12:
 #   s5 = runs base in DMEM
 #   s6 = TLUT_DMEM base
 ############################################################
-#define MAX_RUNS_PER_ROW 64
 
 vec_scan:
     li      a2, 0                         # i = 0

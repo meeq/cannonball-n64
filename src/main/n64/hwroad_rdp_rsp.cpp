@@ -43,9 +43,8 @@ namespace n64
 namespace hwroad_rdp_rsp
 {
 
-// Shipping default: RSP path on. Dispatcher transparently falls back to the
-// CPU build for ctrl=1/2 (dual-road) because do_case12 in the overlay is
-// still a single-c_oob stub.
+// Shipping default: RSP path on. Handles all ctrl values (0/1/2/3); ctrl=1/2
+// dual-road frames are scanned piece-wise inside do_case12.
 bool     enabled    = true;
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
@@ -210,16 +209,6 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
 
     const uint8_t ctrl = road_control & 3;
     rsp::s_frame++;
-
-    // Dual-road sections (ctrl=1/2) aren't handled by the RSP overlay yet —
-    // do_case12 in rsp_hwroad_rdp.S still emits a single c_oob run that
-    // would paint the visible road area as a uniform OOB band. Fall back to
-    // the CPU build for those frames. Single-road frames (ctrl=0 or 3) take
-    // the full RSP path below.
-    if (ctrl == 1 || ctrl == 2) {
-        build_foreground_lores_rdp(rgb_lut);
-        return;
-    }
 
     // roads[] is read-only after decode_road. Flush once so the RSP DMA
     // never races a stale cache line. The CPU path doesn't need this
