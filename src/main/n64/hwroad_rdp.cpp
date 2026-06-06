@@ -541,55 +541,88 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
 
-    // TILE0 = CI4 draw view at TMEM[0]. TILE1 = I8 load view (RDP's 4bpp
-    // load constraint). MASK_BYTES is the max row pitch we ever load on
-    // the mask path. TILE2/TILE3 are the matching CI4/I8 views used by
-    // DRAW_DIRECT_R0 — they read roads_ci4 directly, where misaligned
-    // 8-byte loads can extend the source by up to 15 CI4 pixels (≈8 bytes)
-    // beyond the active span. Wider pitch + size accommodate that.
+    // Tile budget (8 total):
+    //   TILE0..TILE4 = banded CI4 draw views, palette=0..4, pitch=MASK_BYTES
+    //   TILE5        = banded I8 load view, pitch=MASK_BYTES
+    //   TILE6        = DRAW_DIRECT_R0 CI4 view (different pitch)
+    //   TILE7        = DRAW_DIRECT_R0 I8 load view
+    //
+    // Banding rationale: per-line tex_upload_tlut + load_tile dominate the
+    // ~21.5ms RDP drain (≈200 active lines × 2 TMEM DMAs each). Stacking K
+    // consecutive DRAW rows into one load_tile + one multi-palette TLUT
+    // load collapses 2K DMAs into 2 per band. K_MAX=5 limited by available
+    // tile descriptors. CPU-side per-line cost grows by K set_tile register
+    // writes per band — negligible vs TMEM DMA savings.
+    constexpr int BAND_MAX = 5;
     constexpr int CI4_DIRECT_BYTES =
         ((((MAX_SPAN_PX + 15 + 1) >> 1) + 7) & ~7);  // 168
-    rdpq_set_tile(TILE0, FMT_CI4, 0, MASK_BYTES, NULL);
-    rdpq_set_tile_size(TILE0, 0, 0, MAX_SPAN_PX, 1);
-    rdpq_set_tile(TILE1, FMT_I8,  0, MASK_BYTES, NULL);
-    rdpq_set_tile(TILE2, FMT_CI4, 0, CI4_DIRECT_BYTES, NULL);
-    rdpq_set_tile_size(TILE2, 0, 0, MAX_SPAN_PX + 15, 1);
-    rdpq_set_tile(TILE3, FMT_I8,  0, CI4_DIRECT_BYTES, NULL);
 
-    for (int y = 0; y < MAX_LINES; y++)
+    for (int k = 0; k < BAND_MAX; k++) {
+        rdpq_tileparms_t p{};
+        p.palette = (uint8_t)k;
+        const rdpq_tile_t t = (rdpq_tile_t)(TILE0 + k);
+        rdpq_set_tile(t, FMT_CI4, 0, MASK_BYTES, &p);
+        rdpq_set_tile_size(t, 0, 0, MAX_SPAN_PX, BAND_MAX);
+    }
+    rdpq_set_tile(TILE5, FMT_I8,  0, MASK_BYTES, NULL);
+    rdpq_set_tile(TILE6, FMT_CI4, 0, CI4_DIRECT_BYTES, NULL);
+    rdpq_set_tile_size(TILE6, 0, 0, MAX_SPAN_PX + 15, 1);
+    rdpq_set_tile(TILE7, FMT_I8,  0, CI4_DIRECT_BYTES, NULL);
+
+    int y = 0;
+    while (y < MAX_LINES)
     {
         const uint8_t kind = line[y].kind;
-        if (kind != DRAW && kind != DRAW_DIRECT_R0) continue;
-
-        const int span = line[y].s_end - line[y].s_start;
-        const int x0 = x_off + line[y].s_start;
-        const int x1 = x_off + line[y].s_end;
-
-        rdpq_tex_upload_tlut(tlut_ptr(y), 0, TLUT_ENTRIES);
+        if (kind == SKIP || kind == OOB_ONLY) { y++; continue; }
 
         if (kind == DRAW_DIRECT_R0)
         {
-            const int s_off = line[y].src_s_offset;  // CI4 pixels
+            const int span = line[y].s_end - line[y].s_start;
+            const int x0 = x_off + line[y].s_start;
+            const int x1 = x_off + line[y].s_end;
+            const int s_off = line[y].src_s_offset;
             const int load_bytes = ((((s_off + span + 1) >> 1) + 7) & ~7);
+            rdpq_tex_upload_tlut(tlut_ptr(y), 0, TLUT_ENTRIES);
             rdpq_set_texture_image_raw(0, line[y].src_phys,
                                        FMT_I8, load_bytes, 1);
-            rdpq_load_tile(TILE3, 0, 0, load_bytes, 1);
-            rdpq_texture_rectangle(TILE2,
+            rdpq_load_tile(TILE7, 0, 0, load_bytes, 1);
+            rdpq_texture_rectangle(TILE6,
                                    x0, y_off + y,
                                    x1, y_off + y + 1,
                                    s_off, 0);
+            y++;
+            continue;
         }
-        else
+
+        // kind == DRAW: accumulate band of contiguous DRAW lines.
+        const int band_first = y;
+        int band_count = 1;
+        while (band_count < BAND_MAX
+               && (band_first + band_count) < MAX_LINES
+               && line[band_first + band_count].kind == DRAW)
         {
-            const int span_bytes = (span + 1) >> 1;
-            rdpq_set_texture_image_raw(0, PhysicalAddr(mask_ptr(y)),
-                                       FMT_I8, span_bytes, 1);
-            rdpq_load_tile(TILE1, 0, 0, span_bytes, 1);
-            rdpq_texture_rectangle(TILE0,
-                                   x0, y_off + y,
-                                   x1, y_off + y + 1,
-                                   0, 0);
+            band_count++;
         }
+
+        // One source DMA loading band_count mask rows.
+        rdpq_set_texture_image_raw(0, PhysicalAddr(mask_ptr(band_first)),
+                                   FMT_I8, MASK_BYTES, band_count);
+        rdpq_load_tile(TILE5, 0, 0, MASK_BYTES, band_count);
+        // One TLUT DMA loading band_count palettes at slots 0..band_count*16-1.
+        rdpq_tex_upload_tlut(tlut_ptr(band_first), 0, band_count * TLUT_ENTRIES);
+
+        for (int k = 0; k < band_count; k++)
+        {
+            const int ly = band_first + k;
+            const int x0 = x_off + line[ly].s_start;
+            const int x1 = x_off + line[ly].s_end;
+            rdpq_texture_rectangle((rdpq_tile_t)(TILE0 + k),
+                                   x0, y_off + ly,
+                                   x1, y_off + ly + 1,
+                                   0, k);
+        }
+
+        y += band_count;
     }
 
     uint64_t tC = get_ticks_us();
