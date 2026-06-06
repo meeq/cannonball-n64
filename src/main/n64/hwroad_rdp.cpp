@@ -104,6 +104,43 @@ namespace
         return RGBA32(r, g, b, 0xFF);
     }
 
+    // Scan p[i..len) for the largest j such that p[i..j) == b. u32-chunked
+    // once j is 4-aligned. Road source rows have long runs of same-value
+    // bytes (gutter, road body, lane edges), so byte-run extension collapses
+    // the per-pixel walk into one EMIT per byte transition.
+    inline int extend_byte_run(const uint8_t* p, int i, int len, uint8_t b)
+    {
+        int j = i + 1;
+        while (j < len && ((uintptr_t)(p + j) & 3) != 0) {
+            if (p[j] != b) return j;
+            j++;
+        }
+        const uint32_t uniform = (uint32_t)b * 0x01010101u;
+        while (j + 4 <= len) {
+            uint32_t w;
+            __builtin_memcpy(&w, p + j, 4);
+            if (w != uniform) break;
+            j += 4;
+        }
+        while (j < len && p[j] == b) j++;
+        return j;
+    }
+
+    // Pair version for ctrl=1/2 both-road overlap pieces. Byte-only — u32
+    // chunking, u64 chunking, dual-stream merge, and cross-row transition
+    // caching all regressed or no-op'd here: per-iter setup outweighs the
+    // win at OutRun's ~24 px run lengths (u64 chunking measured 14.5ms vs
+    // byte-loop 12.6ms at 152 rows), and pointer-keyed vertical coherence
+    // misses ~100% because each screen row picks its own texture row from
+    // the perspective table. This tight byte loop is the 152-row floor.
+    inline int extend_byte_run_pair(const uint8_t* p0, const uint8_t* p1,
+                                    int i, int len, uint8_t b0, uint8_t b1)
+    {
+        int j = i + 1;
+        while (j < len && p0[j] == b0 && p1[j] == b1) j++;
+        return j;
+    }
+
     // Inline copy of HWRoad::compute_road_span — kept private to hwroad.cpp.
     inline void compute_span(int32_t hpos, int W,
                              int& s_start, int& s_end, int& t_base)
@@ -400,16 +437,22 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
         {
             const uint8_t* p0d = src0 + t0b;
             const int len = s0e - s0s;
-            for (int i = 0; i < len; i++) {
-                EMIT(s0s + i, color_r0[p0d[i]]);
+            int i = 0;
+            while (i < len) {
+                const uint8_t b = p0d[i];
+                EMIT(s0s + i, color_r0[b]);
+                i = extend_byte_run(p0d, i, len, b);
             }
         }
         else if (ctrl == 3)
         {
             const uint8_t* p1d = src1 + t1b;
             const int len = s1e - s1s;
-            for (int i = 0; i < len; i++) {
-                EMIT(s1s + i, color_r1[p1d[i]]);
+            int i = 0;
+            while (i < len) {
+                const uint8_t b = p1d[i];
+                EMIT(s1s + i, color_r1[b]);
+                i = extend_byte_run(p1d, i, len, b);
             }
         }
         else
@@ -445,16 +488,26 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
                 const bool in0 = (lo >= s0s) && (lo < s0e);
                 const bool in1 = (lo >= s1s) && (lo < s1e);
                 if (in0 && in1) {
-                    for (int x = lo; x < hi; x++) {
-                        EMIT(x, color_merged[(p0d[x] << 3) | p1d[x]]);
+                    int x = lo;
+                    while (x < hi) {
+                        const uint8_t b0 = p0d[x];
+                        const uint8_t b1 = p1d[x];
+                        EMIT(x, color_merged[(b0 << 3) | b1]);
+                        x = extend_byte_run_pair(p0d, p1d, x, hi, b0, b1);
                     }
                 } else if (in0) {
-                    for (int x = lo; x < hi; x++) {
-                        EMIT(x, color_r0[p0d[x]]);
+                    int x = lo;
+                    while (x < hi) {
+                        const uint8_t b = p0d[x];
+                        EMIT(x, color_r0[b]);
+                        x = extend_byte_run(p0d, x, hi, b);
                     }
                 } else if (in1) {
-                    for (int x = lo; x < hi; x++) {
-                        EMIT(x, color_r1[p1d[x]]);
+                    int x = lo;
+                    while (x < hi) {
+                        const uint8_t b = p1d[x];
+                        EMIT(x, color_r1[b]);
+                        x = extend_byte_run(p1d, x, hi, b);
                     }
                 } else {
                     // Inter-road OOB piece: single c_oob run spanning [lo, hi).

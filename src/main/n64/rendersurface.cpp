@@ -252,7 +252,6 @@ bool Render::finalize_frame()
 #if N64_PROFILE_RDP_DRAIN
     uint32_t rbg_emit = 0, rbg_drain = 0;
     uint32_t tbg_emit = 0, tbg_drain = 0;
-    uint32_t tfg_emit = 0, tfg_drain = 0;
     uint32_t spr_emit = 0, spr_drain = 0;
     uint32_t txt_emit = 0, txt_drain = 0;
 #endif
@@ -274,15 +273,15 @@ bool Render::finalize_frame()
 
     // Tile background + foreground: writeback the TLUT cache (the engine
     // updates it from cached convert_palette writes) so the RDP TLUT load
-    // DMAs see fresh bytes, then walk both tilemap pages with RDP textured
-    // rectangles. Order matters — page 1 (bg) under page 0 (fg) — and both
-    // sit under the engine composite, which still owns road_fg/sprites/text
-    // via pixels[]. priority=1 tiles stay on the CPU (drawn in front of
-    // sprites at engine layer-5).
+    // DMAs see fresh bytes, then walk both tilemap pages in one shared
+    // atlas/draw pass. BG (page 1) draws under FG (page 0), and both sit
+    // under the engine composite, which still owns road_fg/sprites/text via
+    // pixels[]. priority=1 tiles stay on the CPU (drawn in front of sprites
+    // at engine layer-5).
     data_cache_hit_writeback(tile_tlut, sizeof(tile_tlut));
 
     uint64_t tbg_t0 = get_ticks_us();
-    video.tile_layer->render_rdp_tile_layer(tile_tlut, 1, 0, x, y_offset);
+    video.tile_layer->render_rdp_tile_layers(tile_tlut, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
 #if N64_PROFILE_RDP_DRAIN
     rspq_wait();
@@ -293,19 +292,9 @@ bool Render::finalize_frame()
     n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
-
-    uint64_t tfg_t0 = get_ticks_us();
-    video.tile_layer->render_rdp_tile_layer(tile_tlut, 0, 0, x, y_offset);
-    uint64_t tfg_t1 = get_ticks_us();
-#if N64_PROFILE_RDP_DRAIN
-    rspq_wait();
-    uint64_t tfg_t2 = get_ticks_us();
-    tfg_emit  = (uint32_t)(tfg_t1 - tfg_t0);
-    tfg_drain = (uint32_t)(tfg_t2 - tfg_t1);
-#endif
-    n64_profile::sub_us[n64_profile::SUB_TILE_FG] =
-        (n64_profile::sub_us[n64_profile::SUB_TILE_FG] * 7
-         + (uint32_t)(tfg_t1 - tfg_t0)) >> 3;
+    // tfg is now folded into tbg; keep the slot but report 0 so the overlay
+    // makes it visible at a glance that the merge happened.
+    n64_profile::sub_us[n64_profile::SUB_TILE_FG] = 0;
 
     // Composite the engine scratch surface on top. Standard mode + alpha
     // compare keeps RGBA5551 alpha=0 texels (untouched scratch background)
@@ -363,11 +352,10 @@ bool Render::finalize_frame()
     if ((drain_log_frame++ % 60) == 0)
     {
         debugf("rdp[%5lu] rbg e=%4lu d=%4lu  tbg e=%4lu d=%4lu  "
-               "tfg e=%4lu d=%4lu  spr e=%4lu d=%4lu  txt e=%4lu d=%4lu\n",
+               "spr e=%4lu d=%4lu  txt e=%4lu d=%4lu\n",
                (unsigned long)drain_log_frame,
                (unsigned long)rbg_emit, (unsigned long)rbg_drain,
                (unsigned long)tbg_emit, (unsigned long)tbg_drain,
-               (unsigned long)tfg_emit, (unsigned long)tfg_drain,
                (unsigned long)spr_emit, (unsigned long)spr_drain,
                (unsigned long)txt_emit, (unsigned long)txt_drain);
     }

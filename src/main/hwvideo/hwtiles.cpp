@@ -202,24 +202,29 @@ void hwtiles::render_all_tiles(uint16_t* buf)
 }
 
 // RDP path: emit one textured-rectangle per visible tile straight into the
-// attached framebuffer at (x_offset, y_offset). Mirrors render_tile_layer's
-// page/scroll/priority/code decode.
+// attached framebuffer at (x_offset, y_offset). Walks BG (page=1) then FG
+// (page=0) in a single pass so atlas chunks can pack uniques from both pages,
+// saving the second walk's setup + draw-call overhead and the page-boundary
+// chunk close.
 //
-// Two-pass atlas variant: walk tile_ram once to collect the visible tiles
-// and their unique codes; copy each unique code's 32-byte CI4 row block
-// into a scratch atlas; upload the whole atlas to TMEM with one LOAD;
-// then draw all visible tiles via texture_rectangle indexing into that
-// atlas. Collapses ~50–80 per-tile LOAD_TILE pairs into a single LOAD per
-// page — less rspq queue pressure and one DMA / longer drawing run.
+// Two-pass atlas variant: walk both tilemap pages once to collect the visible
+// tiles and their unique codes; copy each unique code's 32-byte CI4 row block
+// into a scratch atlas; upload the whole atlas to TMEM with one LOAD; then
+// draw all visible tiles via texture_rectangle indexing into that atlas.
+// Collapses ~50–80 per-tile LOAD_TILE pairs into a single LOAD per chunk.
+//
+// Layering: BG visibles are appended before FG visibles, so within a chunk
+// that spans both pages the draw order is BG-first / FG-second — FG correctly
+// occludes BG. Across chunks, chunk N draws strictly before chunk N+1.
 //
 // TMEM budget: bank 0 is 2 KB. We pack two CI4 8x8 tiles per 8-byte TMEM
 // line (left/right halves of a 16-px-wide line), 32 pairs × 8 rows × 8 B
 // = 2 KB exactly = 64 tiles. Upload uses LOAD_BLOCK through libdragon's
 // 4bpp-as-RGBA16 trick (rdpq_tex.c texload_block_4bpp), which round-trips
 // the wide line cleanly — see the TMEM swap probe in rendersurface.cpp.
-void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
-                                    uint8_t page_index, uint8_t priority_draw,
-                                    int x_offset, int y_offset)
+void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
+                                     uint8_t priority_draw,
+                                     int x_offset, int y_offset)
 {
     constexpr int ATLAS_MAX = 64;           // tiles per atlas chunk (fills bank 0)
     constexpr int ATLAS_PITCH = 8;          // bytes per atlas row (TMEM line)
@@ -227,8 +232,7 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     constexpr int ATLAS_PAIR_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
     constexpr int ATLAS_BYTES = (ATLAS_MAX / 2) * ATLAS_PAIR_BYTES; // 2048
     // Atlas ring: each chunk packs into one of K_RING buffers and rotates.
-    // Across both calls per frame (BG up to 3 chunks, FG ~1) plus a frame of
-    // headroom for in-flight RSP commands, K=8 leaves no in-flight buffer
+    // BG+FG share the ring across one call. K=8 leaves no in-flight buffer
     // exposed to clobbering. See [[rdp-deferred-dma-static-source]].
     constexpr int K_ATLAS_RING = 8;
     constexpr int MAX_CHUNKS_PER_CALL = 8;
@@ -254,93 +258,99 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     int n_chunks = 0;
     uint8_t* atlas_cur = s_atlas_ring[s_ring_ix];
 
-    const uint16_t EffPage = page[page_index];
-    uint16_t xScroll = scroll_x[page_index];
-    uint16_t yScroll = scroll_y[page_index];
-
-    if ((xScroll & 0x8000) != 0)
-        xScroll = (text_ram[0xf80 + (0x40 * page_index) + 0] << 8)
-                | text_ram[0xf80 + (0x40 * page_index) + 1];
-    if ((yScroll & 0x8000) != 0)
-        yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
-                | text_ram[0xf16 + (0x40 * page_index) + 1];
-
-    const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
-    const int oy = yScroll & 0x1ff;             // 0..511
-
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
     int n_unique  = 0;
 
-    for (int my = 0; my < 64; my++)
+    // Walk BG (page=1) first, then FG (page=0). BG must draw under FG.
+    for (int pass = 0; pass < 2; pass++)
     {
-        int y = 8 * my - oy;
-        if (y < -288) y += 512;
-        if (y <= -8 || y >= S16_HEIGHT) continue;
+        const uint8_t page_index = (pass == 0) ? 1 : 0;
 
-        for (int mx = 0; mx < 128; mx++)
+        const uint16_t EffPage = page[page_index];
+        uint16_t xScroll = scroll_x[page_index];
+        uint16_t yScroll = scroll_y[page_index];
+
+        if ((xScroll & 0x8000) != 0)
+            xScroll = (text_ram[0xf80 + (0x40 * page_index) + 0] << 8)
+                    | text_ram[0xf80 + (0x40 * page_index) + 1];
+        if ((yScroll & 0x8000) != 0)
+            yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
+                    | text_ram[0xf16 + (0x40 * page_index) + 1];
+
+        const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
+        const int oy = yScroll & 0x1ff;             // 0..511
+
+        for (int my = 0; my < 64; my++)
         {
-            uint16_t ActPage = 0;
-            if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
-            if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
-            if (my >= 32 && mx < 64)   ActPage = (EffPage >>  8) & 0x0f;
-            if (my >= 32 && mx >= 64)  ActPage = (EffPage >> 12) & 0x0f;
+            int y = 8 * my - oy;
+            if (y < -288) y += 512;
+            if (y <= -8 || y >= S16_HEIGHT) continue;
 
-            const uint32_t TileIndex =
-                64 * 32 * 2 * ActPage + ((2 * 64 * my) & 0xfff) + ((2 * mx) & 0x7f);
-            const uint16_t Data =
-                (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
+            for (int mx = 0; mx < 128; mx++)
+            {
+                uint16_t ActPage = 0;
+                if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
+                if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
+                if (my >= 32 && mx < 64)   ActPage = (EffPage >>  8) & 0x0f;
+                if (my >= 32 && mx >= 64)  ActPage = (EffPage >> 12) & 0x0f;
 
-            if (((Data >> 15) & 1) != priority_draw) continue;
+                const uint32_t TileIndex =
+                    64 * 32 * 2 * ActPage + ((2 * 64 * my) & 0xfff) + ((2 * mx) & 0x7f);
+                const uint16_t Data =
+                    (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
 
-            uint32_t Code = Data & 0x1fff;
-            Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
-            Code &= (NUM_TILES - 1);
-            if (Code == 0) continue;
+                if (((Data >> 15) & 1) != priority_draw) continue;
 
-            int x = 8 * mx - ox;
-            if (x < -x_clamp) x += 1024;
-            if (x <= -8 || x >= s16_width_noscale) continue;
+                uint32_t Code = Data & 0x1fff;
+                Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
+                Code &= (NUM_TILES - 1);
+                if (Code == 0) continue;
 
-            const int Colour = (Data >> 6) & 0x7f;
+                int x = 8 * mx - ox;
+                if (x < -x_clamp) x += 1024;
+                if (x <= -8 || x >= s16_width_noscale) continue;
 
-            uint16_t slot = s_code_to_slot[Code];
-            if (slot == 0xffff) {
-                // Chunk full → close it, advance ring, reset slot map for
-                // codes that lived in this chunk, allocate this Code into
-                // the new chunk's slot 0. Code itself re-enters as a fresh
-                // unique in the new chunk's atlas.
-                if (n_unique >= ATLAS_MAX) {
-                    if (n_chunks >= MAX_CHUNKS_PER_CALL) break; // safety
-                    chunk_vis_end[n_chunks] = n_visible;
-                    chunk_uniq   [n_chunks] = n_unique;
-                    chunk_ring_ix[n_chunks] = s_ring_ix;
-                    n_chunks++;
-                    for (int k = 0; k < n_unique; k++)
-                        s_code_to_slot[s_used_codes[k]] = 0xffff;
-                    n_unique = 0;
-                    s_ring_ix = (uint8_t)((s_ring_ix + 1) % K_ATLAS_RING);
-                    atlas_cur = s_atlas_ring[s_ring_ix];
+                const int Colour = (Data >> 6) & 0x7f;
+
+                uint16_t slot = s_code_to_slot[Code];
+                if (slot == 0xffff) {
+                    // Chunk full → close it, advance ring, reset slot map for
+                    // codes that lived in this chunk, allocate this Code into
+                    // the new chunk's slot 0. Code itself re-enters as a fresh
+                    // unique in the new chunk's atlas.
+                    if (n_unique >= ATLAS_MAX) {
+                        if (n_chunks >= MAX_CHUNKS_PER_CALL) break; // safety
+                        chunk_vis_end[n_chunks] = n_visible;
+                        chunk_uniq   [n_chunks] = n_unique;
+                        chunk_ring_ix[n_chunks] = s_ring_ix;
+                        n_chunks++;
+                        for (int k = 0; k < n_unique; k++)
+                            s_code_to_slot[s_used_codes[k]] = 0xffff;
+                        n_unique = 0;
+                        s_ring_ix = (uint8_t)((s_ring_ix + 1) % K_ATLAS_RING);
+                        atlas_cur = s_atlas_ring[s_ring_ix];
+                    }
+                    slot = (uint16_t)n_unique;
+                    s_code_to_slot[Code] = slot;
+                    s_used_codes[n_unique] = (uint16_t)Code;
+                    // Paired pack: left half = in_pair 0, right half = in_pair 1.
+                    const int pair_idx = n_unique >> 1;
+                    const int in_pair  = n_unique & 1;
+                    uint32_t* dst =
+                        (uint32_t*)&atlas_cur[pair_idx * ATLAS_PAIR_BYTES];
+                    const uint32_t* src = &tiles[Code * 8];
+                    for (int r = 0; r < 8; r++)
+                        dst[r * 2 + in_pair] = src[r];
+                    n_unique++;
                 }
-                slot = (uint16_t)n_unique;
-                s_code_to_slot[Code] = slot;
-                s_used_codes[n_unique] = (uint16_t)Code;
-                // Paired pack: left half = in_pair 0, right half = in_pair 1.
-                const int pair_idx = n_unique >> 1;
-                const int in_pair  = n_unique & 1;
-                uint32_t* dst =
-                    (uint32_t*)&atlas_cur[pair_idx * ATLAS_PAIR_BYTES];
-                const uint32_t* src = &tiles[Code * 8];
-                for (int r = 0; r < 8; r++)
-                    dst[r * 2 + in_pair] = src[r];
-                n_unique++;
-            }
 
-            s_visible[n_visible].x      = (int16_t)(x + x_offset);
-            s_visible[n_visible].y      = (int16_t)(y + y_offset);
-            s_visible[n_visible].slot   = slot;
-            s_visible[n_visible].colour = (uint8_t)Colour;
-            n_visible++;
+                s_visible[n_visible].x      = (int16_t)(x + x_offset);
+                s_visible[n_visible].y      = (int16_t)(y + y_offset);
+                s_visible[n_visible].slot   = slot;
+                s_visible[n_visible].colour = (uint8_t)Colour;
+                n_visible++;
+            }
         }
     }
 
@@ -399,7 +409,9 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
     }
 }
 
-// RDP path for the text layer. Same atlas + TLUT cache as the tile layer, but:
+// RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as
+// render_rdp_tile_layers (see that function for the TMEM packing rationale);
+// the text-layer differences are confined to Pass 1 decode:
 //   * walks the 32x64 text_ram grid instead of tile_ram
 //   * no scrolling; tile origin is shifted by -192 (matches the CPU path)
 //   * Colour is 3-bit (0..7) — only the first 8 TLUT slots are touched
@@ -408,23 +420,44 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                                     uint8_t priority_draw,
                                     int x_offset, int y_offset)
 {
-    rdpq_set_mode_standard();
-    rdpq_mode_tlut(TLUT_RGBA16);
-    rdpq_mode_alphacompare(1);
-    rdpq_set_tile(TILE0, FMT_CI4, 0, 8, NULL);
-    rdpq_set_tile_size(TILE0, 0, 0, 8, 8);
-    rdpq_set_tile(TILE1, FMT_I8,  0, 8, NULL);
+    constexpr int ATLAS_MAX        = 64;
+    constexpr int ATLAS_PITCH      = 8;
+    constexpr int ATLAS_TILE_H     = 8;
+    constexpr int ATLAS_PAIR_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
+    constexpr int ATLAS_BYTES      = (ATLAS_MAX / 2) * ATLAS_PAIR_BYTES; // 2048
+    constexpr int K_ATLAS_RING     = 8;
+    constexpr int MAX_CHUNKS_PER_CALL = 4;
 
-    // TLUT-upload cache: text rows often share a palette across long runs
-    // (HUD strings are typically one or two colors).
-    int last_colour = -1;
+    struct Visible { int16_t x, y; uint16_t slot; uint8_t colour; };
 
-    // Tile-data cache: see render_rdp_tile_layer for the rationale.
-    int last_code = -1;
+    // Text grid is 32x64 = 2048 cells; HUD usually populates a small fraction.
+    static Visible  s_visible[2048];
+    static uint16_t s_used_codes[ATLAS_MAX];
+    static uint16_t s_code_to_slot[NUM_TILES];
+    static bool     s_slot_map_initted = false;
+    if (!s_slot_map_initted) {
+        for (int i = 0; i < NUM_TILES; i++) s_code_to_slot[i] = 0xffff;
+        s_slot_map_initted = true;
+    }
+    alignas(8) static uint8_t s_atlas_ring[K_ATLAS_RING][ATLAS_BYTES];
+    static uint8_t s_ring_ix = 0;
+
+    int chunk_vis_end[MAX_CHUNKS_PER_CALL];
+    int chunk_uniq   [MAX_CHUNKS_PER_CALL];
+    int chunk_ring_ix[MAX_CHUNKS_PER_CALL];
+    int n_chunks = 0;
+    uint8_t* atlas_cur = s_atlas_ring[s_ring_ix];
+
+    // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
+    int n_visible = 0;
+    int n_unique  = 0;
 
     uint32_t TileIndex = 0;
     for (int my = 0; my < 32; my++)
     {
+        const int y = 8 * my;
+        if (y < 0 || y >= S16_HEIGHT) { TileIndex += 64 * 2; continue; }
+
         for (int mx = 0; mx < 64; mx++, TileIndex += 2)
         {
             const uint16_t Code_raw =
@@ -433,39 +466,103 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
             if (((Code_raw >> 15) & 1) != priority_draw)
                 continue;
 
-            const int Colour = (Code_raw >> 9) & 0x07;
             uint32_t Code = Code_raw & 0x1ff;
             Code += tile_banks[0] * 0x1000;
             Code &= (NUM_TILES - 1);
-            if (Code == 0)
-                continue;
+            if (Code == 0) continue;
 
-            int x = 8 * mx - 192;
-            int y = 8 * my;
-
-            // CPU path's outer visibility test (clip path also excluded the
-            // 0..7 left strip via `x > -8 && y >= 0`). RDP scissor handles
-            // partial-edge tiles, so the same gate is sufficient.
+            const int x = 8 * mx - 192;
             if (x <= -8 || x >= s16_width_noscale) continue;
-            if (y < 0  || y >= S16_HEIGHT)         continue;
 
-            if (Colour != last_colour)
-            {
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
-                last_colour = Colour;
+            const int Colour = (Code_raw >> 9) & 0x07;
+
+            uint16_t slot = s_code_to_slot[Code];
+            if (slot == 0xffff) {
+                if (n_unique >= ATLAS_MAX) {
+                    if (n_chunks >= MAX_CHUNKS_PER_CALL) break;
+                    chunk_vis_end[n_chunks] = n_visible;
+                    chunk_uniq   [n_chunks] = n_unique;
+                    chunk_ring_ix[n_chunks] = s_ring_ix;
+                    n_chunks++;
+                    for (int k = 0; k < n_unique; k++)
+                        s_code_to_slot[s_used_codes[k]] = 0xffff;
+                    n_unique = 0;
+                    s_ring_ix = (uint8_t)((s_ring_ix + 1) % K_ATLAS_RING);
+                    atlas_cur = s_atlas_ring[s_ring_ix];
+                }
+                slot = (uint16_t)n_unique;
+                s_code_to_slot[Code] = slot;
+                s_used_codes[n_unique] = (uint16_t)Code;
+                const int pair_idx = n_unique >> 1;
+                const int in_pair  = n_unique & 1;
+                uint32_t* dst =
+                    (uint32_t*)&atlas_cur[pair_idx * ATLAS_PAIR_BYTES];
+                const uint32_t* src = &tiles[Code * 8];
+                for (int r = 0; r < 8; r++)
+                    dst[r * 2 + in_pair] = src[r];
+                n_unique++;
             }
 
-            const int dx = x + x_offset + config.s16_x_off;
-            const int dy = y + y_offset;
-            if ((int)Code != last_code)
-            {
-                rdpq_set_texture_image_raw(
-                    0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
-                rdpq_load_tile(TILE1, 0, 0, 4, 8);
-                last_code = (int)Code;
-            }
-            rdpq_texture_rectangle(TILE0, dx, dy, dx + 8, dy + 8, 0, 0);
+            s_visible[n_visible].x      =
+                (int16_t)(x + x_offset + config.s16_x_off);
+            s_visible[n_visible].y      = (int16_t)(y + y_offset);
+            s_visible[n_visible].slot   = slot;
+            s_visible[n_visible].colour = (uint8_t)Colour;
+            n_visible++;
         }
+    }
+
+    if (n_unique > 0 && n_chunks < MAX_CHUNKS_PER_CALL) {
+        chunk_vis_end[n_chunks] = n_visible;
+        chunk_uniq   [n_chunks] = n_unique;
+        chunk_ring_ix[n_chunks] = s_ring_ix;
+        n_chunks++;
+        for (int k = 0; k < n_unique; k++)
+            s_code_to_slot[s_used_codes[k]] = 0xffff;
+        s_ring_ix = (uint8_t)((s_ring_ix + 1) % K_ATLAS_RING);
+    }
+
+    // ---- Pass 2: upload + draw each chunk ---------------------------------
+    if (n_chunks == 0) return;
+
+    rdpq_set_mode_standard();
+    rdpq_mode_tlut(TLUT_RGBA16);
+    rdpq_mode_alphacompare(1);
+    rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
+    rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
+
+    int last_colour = -1;
+    int vis_start   = 0;
+    for (int c = 0; c < n_chunks; c++)
+    {
+        const int n_uniq_c       = chunk_uniq[c];
+        const int vis_end        = chunk_vis_end[c];
+        const int n_pairs_c      = (n_uniq_c + 1) >> 1;
+        const int atlas_h_c      = n_pairs_c * ATLAS_TILE_H;
+        const int atlas_bytes_c  = n_pairs_c * ATLAS_PAIR_BYTES;
+        const int rgba16_texels  = atlas_bytes_c >> 1;
+        uint8_t* atlas_c         = s_atlas_ring[chunk_ring_ix[c]];
+
+        data_cache_hit_writeback(atlas_c, atlas_bytes_c);
+        rdpq_set_tile_size(TILE0, 0, 0, 16, atlas_h_c);
+        rdpq_set_texture_image_raw(0, PhysicalAddr(atlas_c),
+                                   FMT_RGBA16, ATLAS_PITCH / 2, atlas_h_c);
+        rdpq_load_block(TILE1, 0, 0, rgba16_texels, ATLAS_PITCH);
+
+        for (int i = vis_start; i < vis_end; i++)
+        {
+            const Visible& v = s_visible[i];
+            if (v.colour != last_colour) {
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[v.colour * 16], 0, 16);
+                last_colour = v.colour;
+            }
+            const int pair_idx = v.slot >> 1;
+            const int in_pair  = v.slot & 1;
+            rdpq_texture_rectangle(TILE0,
+                v.x, v.y, v.x + 8, v.y + 8,
+                in_pair * 8, pair_idx * ATLAS_TILE_H);
+        }
+        vis_start = vis_end;
     }
 }
 

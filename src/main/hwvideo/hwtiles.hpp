@@ -29,20 +29,22 @@ public:
     void render_text_layer(uint16_t*, uint8_t);
     void render_all_tiles(uint16_t*);
 
-    // RDP tile-layer renderer: walks the tilemap the same way render_tile_layer
-    // does (page select, scrolling, code+colour decode) but emits one
-    // textured-rectangle per visible tile straight into the attached
-    // framebuffer at (x_offset, y_offset). Requires the renderer to have
-    // attached the display and to pass its per-palette TLUT cache
-    // (128 contiguous 16-entry RGBA5551 TLUTs, slot stride 8 entries —
-    // matches the engine's tile-palette layout).
-    void render_rdp_tile_layer(const uint16_t* tile_tlut,
-                               uint8_t page_index, uint8_t priority_draw,
-                               int x_offset, int y_offset);
+    // RDP tile-layer renderer: walks both BG (page=1) and FG (page=0) tilemaps
+    // in a single pass that shares the atlas ring, unique-code map, and chunk
+    // metadata. Equivalent to two render_rdp_tile_layer calls in BG→FG order
+    // but with one decode pass and atlas chunks that can pack BG+FG uniques
+    // together (so a chunk that ends mid-BG keeps filling with early FG tiles
+    // instead of starting a new chunk per page). Within any chunk that spans
+    // both pages, visibles are emitted in collection order (BG before FG) so
+    // FG correctly draws over BG. Requires the renderer to have attached the
+    // display and to pass its per-palette TLUT cache.
+    void render_rdp_tile_layers(const uint16_t* tile_tlut,
+                                uint8_t priority_draw,
+                                int x_offset, int y_offset);
 
     // RDP text-layer renderer: walks the 32x64 text_ram grid (no scrolling,
     // no page select) and emits one textured-rectangle per visible tile.
-    // Same atlas + TLUT cache as render_rdp_tile_layer; only the first 8
+    // Same atlas + TLUT cache as render_rdp_tile_layers; only the first 8
     // TLUT slots are touched (text Colour is 3-bit).
     void render_rdp_text_layer(const uint16_t* tile_tlut,
                                uint8_t priority_draw,
