@@ -20,13 +20,30 @@ namespace detail
     constexpr int MASK_BYTES   = (MAX_SPAN_PX + 1) / 2;
     constexpr int TLUT_ENTRIES = 16;
 
-    enum LineKind : uint8_t { SKIP = 0, OOB_ONLY = 1, DRAW = 2 };
+    // SKIP / OOB_ONLY behave as before. DRAW = CI4 mask in mask_buf (full
+    // merge path). DRAW_DIRECT_R0 = CI8 read straight from roads[row0]+t0b
+    // — used when slot8r0[p] is the identity transform, so the per-pixel
+    // CPU pack is unnecessary. TLUT slots 0..7 already hold road0 c[0..7],
+    // which matches what an identity-slot CI8 lookup needs.
+    enum LineKind : uint8_t
+    {
+        SKIP            = 0,
+        OOB_ONLY        = 1,
+        DRAW            = 2,
+        DRAW_DIRECT_R0  = 3,
+    };
 
     struct LineState
     {
         uint8_t  kind;
         uint16_t s_start, s_end;
         uint16_t c_oob;
+        // Direct-source variant: physical address of the CI8 row data
+        // (rounded down to 8-byte alignment) and the pixel offset within
+        // the loaded tile that corresponds to s_start. Only meaningful
+        // when kind == DRAW_DIRECT_*.
+        uint32_t src_phys;
+        uint8_t  src_s_offset;
     };
 
     // Defined in hwroad_rdp.cpp. mask_buf / tlut_buf are uncached aliases

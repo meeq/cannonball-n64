@@ -58,6 +58,35 @@ bool     enabled = true;
 uint32_t last_us = 0;
 static uint32_t s_frame = 0;
 
+// Direct-source variant: skip the CPU CI4 pack for single-road rows whose
+// slot transform is the identity (ctrl=0, and ctrl=1 with road1 not visible
+// on this scanline). The RDP samples roads_ci4[row0] — a CI4-packed copy
+// of roads[] built once at boot — and looks up through the per-line TLUT
+// directly. Set to false to fall through to the mask-pack path for A/B.
+bool     direct_source_enabled = true;
+static bool s_roads_ci4_ready  = false;
+
+// CI4-packed copy of HWRoad::roads. roads[] stores one palette index per
+// byte (3 bits used). Each CI4 byte we build here packs two consecutive
+// roads bytes into (high nibble, low nibble) — the same nibble order the
+// CPU pack produced for the identity-slot case. Same row pitch (256 bytes
+// per row, 512 pixels) as the source roads[] array. ~64 KB total.
+constexpr int ROADS_CI4_ROWS  = 257;
+constexpr int ROADS_CI4_PITCH = 256;
+static uint8_t roads_ci4[ROADS_CI4_ROWS * ROADS_CI4_PITCH] __attribute__((aligned(16)));
+
+static void prepare_roads_ci4(const uint8_t* roads)
+{
+    for (int row = 0; row < ROADS_CI4_ROWS; row++) {
+        const uint8_t* src = roads + row * 512;
+        uint8_t*       dst = roads_ci4 + row * ROADS_CI4_PITCH;
+        for (int i = 0; i < ROADS_CI4_PITCH; i++)
+            dst[i] = (uint8_t)((src[2 * i] << 4) | (src[2 * i + 1] & 0x0F));
+    }
+    data_cache_hit_writeback_invalidate(roads_ci4, sizeof(roads_ci4));
+    s_roads_ci4_ready = true;
+}
+
 // Shared with hwroad_rdp_rsp.cpp via the internal header.
 namespace detail
 {
@@ -74,6 +103,7 @@ using detail::LineState;
 using detail::SKIP;
 using detail::OOB_ONLY;
 using detail::DRAW;
+using detail::DRAW_DIRECT_R0;
 using detail::mask_buf;
 using detail::tlut_buf;
 using detail::line;
@@ -171,6 +201,12 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
 
     const uint8_t ctrl = road_control & 3;
     s_frame++;
+
+    // Build the CI4-packed copy of roads[] the first time we need it.
+    // decode_road writes the source through the cache; prepare_roads_ci4
+    // writes back/invalidates its output so the RDP sees fresh bytes.
+    if (direct_source_enabled && !s_roads_ci4_ready)
+        prepare_roads_ci4(roads);
     if ((s_frame % 60) == 0)
         debugf("hwroad_rdp: ctrl=%u last_us=%lu\n",
                (unsigned)ctrl, (unsigned long)last_us);
@@ -330,6 +366,31 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
 
         if (span_end <= span_start) { line[y].kind = OOB_ONLY; continue; }
 
+        // Direct-source fast path. For ctrl=0 (only road0) and for ctrl=1
+        // with road1's span empty, slot8r0 is the identity transform — so
+        // the merged CI4 nibble at output pixel x is just roads_row0[t0b+x].
+        // Skip the CPU pack and point the RDP at the pre-packed roads_ci4
+        // copy. The OOB src0 row isn't included in roads_ci4, so also
+        // require road0 in-bounds (data0 & 0x800 == 0).
+        const bool can_direct_r0 =
+            direct_source_enabled && s_roads_ci4_ready &&
+            ((data0 & 0x800) == 0) &&
+            ((ctrl == 0) || (ctrl == 1 && s1s >= s1e));
+        if (can_direct_r0) {
+            const int row0 = (int)((data0 >> 1) & 0xff);
+            const uint8_t* src_ci4 =
+                roads_ci4 + row0 * ROADS_CI4_PITCH + (t0b >> 1);
+            const uint32_t src_byte = PhysicalAddr((void*)src_ci4);
+            const uint32_t aligned  = src_byte & ~7u;
+            const int byte_misalign = (int)(src_byte - aligned);
+            const int s_off_ci4     = (byte_misalign << 1) | (t0b & 1);
+            line[y].kind         = DRAW_DIRECT_R0;
+            line[y].src_phys     = aligned;
+            line[y].src_s_offset = (uint8_t)s_off_ci4;
+            sub_rows++;
+            continue;
+        }
+
         const int span       = span_end - span_start;
         const int byte_count = (span + 1) >> 1;
         uint8_t* mask        = mask_ptr(y);   // uncached alias
@@ -481,30 +542,54 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     rdpq_mode_alphacompare(1);
 
     // TILE0 = CI4 draw view at TMEM[0]. TILE1 = I8 load view (RDP's 4bpp
-    // load constraint). MASK_BYTES is the max row pitch we ever load.
+    // load constraint). MASK_BYTES is the max row pitch we ever load on
+    // the mask path. TILE2/TILE3 are the matching CI4/I8 views used by
+    // DRAW_DIRECT_R0 — they read roads_ci4 directly, where misaligned
+    // 8-byte loads can extend the source by up to 15 CI4 pixels (≈8 bytes)
+    // beyond the active span. Wider pitch + size accommodate that.
+    constexpr int CI4_DIRECT_BYTES =
+        ((((MAX_SPAN_PX + 15 + 1) >> 1) + 7) & ~7);  // 168
     rdpq_set_tile(TILE0, FMT_CI4, 0, MASK_BYTES, NULL);
     rdpq_set_tile_size(TILE0, 0, 0, MAX_SPAN_PX, 1);
     rdpq_set_tile(TILE1, FMT_I8,  0, MASK_BYTES, NULL);
+    rdpq_set_tile(TILE2, FMT_CI4, 0, CI4_DIRECT_BYTES, NULL);
+    rdpq_set_tile_size(TILE2, 0, 0, MAX_SPAN_PX + 15, 1);
+    rdpq_set_tile(TILE3, FMT_I8,  0, CI4_DIRECT_BYTES, NULL);
 
     for (int y = 0; y < MAX_LINES; y++)
     {
-        if (line[y].kind != DRAW) continue;
+        const uint8_t kind = line[y].kind;
+        if (kind != DRAW && kind != DRAW_DIRECT_R0) continue;
 
-        const int span       = line[y].s_end - line[y].s_start;
-        const int span_bytes = (span + 1) >> 1;
+        const int span = line[y].s_end - line[y].s_start;
         const int x0 = x_off + line[y].s_start;
         const int x1 = x_off + line[y].s_end;
 
         rdpq_tex_upload_tlut(tlut_ptr(y), 0, TLUT_ENTRIES);
 
-        rdpq_set_texture_image_raw(0, PhysicalAddr(mask_ptr(y)),
-                                   FMT_I8, span_bytes, 1);
-        rdpq_load_tile(TILE1, 0, 0, span_bytes, 1);
-
-        rdpq_texture_rectangle(TILE0,
-                               x0, y_off + y,
-                               x1, y_off + y + 1,
-                               0, 0);
+        if (kind == DRAW_DIRECT_R0)
+        {
+            const int s_off = line[y].src_s_offset;  // CI4 pixels
+            const int load_bytes = ((((s_off + span + 1) >> 1) + 7) & ~7);
+            rdpq_set_texture_image_raw(0, line[y].src_phys,
+                                       FMT_I8, load_bytes, 1);
+            rdpq_load_tile(TILE3, 0, 0, load_bytes, 1);
+            rdpq_texture_rectangle(TILE2,
+                                   x0, y_off + y,
+                                   x1, y_off + y + 1,
+                                   s_off, 0);
+        }
+        else
+        {
+            const int span_bytes = (span + 1) >> 1;
+            rdpq_set_texture_image_raw(0, PhysicalAddr(mask_ptr(y)),
+                                       FMT_I8, span_bytes, 1);
+            rdpq_load_tile(TILE1, 0, 0, span_bytes, 1);
+            rdpq_texture_rectangle(TILE0,
+                                   x0, y_off + y,
+                                   x1, y_off + y + 1,
+                                   0, 0);
+        }
     }
 
     uint64_t tC = get_ticks_us();

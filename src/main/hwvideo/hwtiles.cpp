@@ -205,40 +205,48 @@ void hwtiles::render_all_tiles(uint16_t* buf)
 // attached framebuffer at (x_offset, y_offset). Mirrors render_tile_layer's
 // page/scroll/priority/code decode.
 //
-// Bypasses rdpq_tex_blit (which emits ~5 RDP commands per tile via the
-// tex_loader strip machinery). Instead we set up two tile descriptors once
-// per layer and emit only 3 commands per tile:
-//   TILE0 (draw): CI4 view of TMEM[0..63], pitch=8, palette slot 0
-//   TILE1 (load): I8 view of the same TMEM (RDP's 4bpp loads must go
-//                 through an 8bpp view — same trick libdragon's
-//                 texload_tile_4bpp uses internally)
-// Per-tile sequence: set_texture_image_raw + load_tile(TILE1) +
-// texture_rectangle(TILE0). TLUT uploads (which rebind TILE7) don't touch
-// TILE0/TILE1, so the per-layer setup survives the whole loop.
+// Two-pass atlas variant: walk tile_ram once to collect the visible tiles
+// and their unique codes; copy each unique code's 32-byte CI4 row block
+// into a scratch atlas; upload the whole atlas to TMEM with one LOAD_TILE;
+// then draw all visible tiles via texture_rectangle indexing into that
+// atlas (s=0, t=slot*8). This collapses ~50–80 per-tile LOAD_TILE pairs
+// into a single LOAD per page — both on the rspq command stream (less
+// queue pressure) and on the RDP itself (one DMA, longer drawing run).
+//
+// TMEM budget: bank 0 is 2 KB. We use one CI4 8x8 tile per 8-byte TMEM
+// line (only the left 8 of 16 CI4 px are used), giving 32 tiles × 8 rows
+// × 8 B = 2 KB exactly. A denser pair-per-line layout (16 CI4 px wide)
+// is unusable because the RDP's odd-line dword swap during TMEM read
+// crosses each pair's left/right halves on odd rows, producing
+// per-other-row banding whenever the paired tiles differ. Neither
+// LOAD_TILE, LOAD_BLOCK, nor a pre-swap of the source data corrects it;
+// stick with one tile per line.
 void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
                                     uint8_t page_index, uint8_t priority_draw,
                                     int x_offset, int y_offset)
 {
-    // TEMP diagnostic counters — bg-vs-fg tile cost discrepancy. Per-call
-    // totals dumped every 60 calls (so once per second per page at 30 Hz).
-    static uint32_t s_calls[2]   = {0, 0};
-    static uint32_t s_visit[2]   = {0, 0};
-    static uint32_t s_emit[2]    = {0, 0};
-    static uint32_t s_pri_skip[2]  = {0, 0};
-    static uint32_t s_code0[2]     = {0, 0};
-    static uint32_t s_offscr[2]    = {0, 0};
-    static uint32_t s_tlut_up[2]   = {0, 0};
-    static uint32_t s_code_load[2] = {0, 0};
-    uint32_t c_visit = 0, c_emit = 0, c_pri = 0, c_c0 = 0, c_off = 0;
-    uint32_t c_tlut = 0, c_load = 0;
+    constexpr int ATLAS_MAX = 32;
+    constexpr int ATLAS_PITCH = 8;          // bytes per atlas row (TMEM line)
+    constexpr int ATLAS_TILE_H = 8;         // rows per tile
+    constexpr int ATLAS_TILE_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
 
-    rdpq_set_mode_standard();
-    rdpq_mode_tlut(TLUT_RGBA16);
-    rdpq_mode_alphacompare(1);
-    rdpq_set_tile(TILE0, FMT_CI4, 0, 8, NULL);
-    rdpq_set_tile_size(TILE0, 0, 0, 8, 8);
-    rdpq_set_tile(TILE1, FMT_I8,  0, 8, NULL);
+    struct Visible { int16_t x, y; uint16_t slot; uint8_t colour; };
 
+    // Scratch state lives across calls — both pages share it. n_visible is
+    // bounded by 64*128 grid traversal, but only emit slots matter.
+    static Visible  s_visible[8192];
+    static uint16_t s_used_codes[ATLAS_MAX];
+    // 8192-entry slot map; reset to 0xffff only for the codes we touched.
+    // Static-init zero-fill happens once; we restore slots to 0xffff after
+    // every call so the next call sees a clean map.
+    static uint16_t s_code_to_slot[NUM_TILES];
+    static bool     s_slot_map_initted = false;
+    if (!s_slot_map_initted) {
+        for (int i = 0; i < NUM_TILES; i++) s_code_to_slot[i] = 0xffff;
+        s_slot_map_initted = true;
+    }
+    // 32 tiles × 64 B = 2 KB. Aligned to 8 for raw texture image source.
+    alignas(8) static uint8_t s_atlas[ATLAS_MAX * ATLAS_TILE_BYTES];
     const uint16_t EffPage = page[page_index];
     uint16_t xScroll = scroll_x[page_index];
     uint16_t yScroll = scroll_y[page_index];
@@ -250,32 +258,13 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
         yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
                 | text_ram[0xf16 + (0x40 * page_index) + 1];
 
-    // Precompute the visible mx/my window. The CPU path tested every tile
-    // in the 64x128 grid; only ~40x28 are actually on screen, so we narrow
-    // the outer loops to just the visible tiles. The x/y wrap math below
-    // mirrors what the per-tile path does inside the loop.
     const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
     const int oy = yScroll & 0x1ff;             // 0..511
 
-    // y(my) = 8*my - oy, with `+= 512` if < -288. Visible range is
-    // -7..S16_HEIGHT-1. Each my produces exactly one y; just walk all 64
-    // rows but bail fast — y math is cheap and 64 iters is negligible.
-    // (Doing a full closed-form solve here is fragile for the wrap edge.)
-
-    // x(mx) similarly. We loop all 128 mx values inside the row loop but
-    // *early-exit* on tile_ram priority/code misses cheaply, and skip the
-    // expensive rdpq calls on out-of-window tiles.
-
-    // TLUT-upload cache: adjacent tiles often share a palette (sky bands,
-    // text strips). Skipping redundant 3-cmd uploads is the main win here.
-    int last_colour = -1;
-
-    // Tile-data cache: long horizontal runs of the same graphic (sky fills,
-    // repeated ground rows) are common in the bg page. set_texture_image_raw
-    // and load_tile both target TILE0/TILE1 TMEM; TLUT uploads only touch
-    // TILE7, so the cached pixel data stays valid even when last_colour
-    // changes. Saves 2 of the 3 per-tile RDP commands on consecutive matches.
-    int last_code = -1;
+    // ---- Pass 1: collect visible tiles + build atlas ----------------------
+    int n_visible = 0;
+    int n_unique  = 0;
+    bool overflow = false;
 
     for (int my = 0; my < 64; my++)
     {
@@ -285,7 +274,6 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
 
         for (int mx = 0; mx < 128; mx++)
         {
-            c_visit++;
             uint16_t ActPage = 0;
             if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
             if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
@@ -297,77 +285,153 @@ void hwtiles::render_rdp_tile_layer(const uint16_t* tile_tlut,
             const uint16_t Data =
                 (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
 
-            if (((Data >> 15) & 1) != priority_draw)
-            { c_pri++; continue; }
+            if (((Data >> 15) & 1) != priority_draw) continue;
 
             uint32_t Code = Data & 0x1fff;
             Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
             Code &= (NUM_TILES - 1);
-            if (Code == 0)
-            { c_c0++; continue; }
+            if (Code == 0) continue;
 
             int x = 8 * mx - ox;
             if (x < -x_clamp) x += 1024;
-            if (x <= -8 || x >= s16_width_noscale)
-            { c_off++; continue; }
+            if (x <= -8 || x >= s16_width_noscale) continue;
 
             const int Colour = (Data >> 6) & 0x7f;
 
-            // Refresh the 16-entry TLUT for this tile palette into TMEM
-            // before drawing — only when the palette actually changes from
-            // the prior tile. The frame-level cache writeback that gates
-            // tile_tlut[] is done once per frame by the renderer.
-            if (Colour != last_colour)
-            {
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
-                last_colour = Colour;
-                c_tlut++;
+            uint16_t slot = s_code_to_slot[Code];
+            if (slot == 0xffff) {
+                if (n_unique >= ATLAS_MAX) { overflow = true; break; }
+                slot = (uint16_t)n_unique;
+                s_code_to_slot[Code] = slot;
+                s_used_codes[n_unique] = (uint16_t)Code;
+                // One tile per 8-byte TMEM line. Source rows are 4 B
+                // each (CI4 8x8 = 32 B), padded to 8 B per line — the
+                // upper 4 B are unused but cost no extra memcpy.
+                uint32_t* dst =
+                    (uint32_t*)&s_atlas[n_unique * ATLAS_TILE_BYTES];
+                const uint32_t* src = &tiles[Code * 8];
+                for (int r = 0; r < 8; r++)
+                    dst[r * 2] = src[r];
+                n_unique++;
             }
 
-            // Raw 3-command tile blit. 8x8 CI4 = 32 bytes contiguous in
-            // tiles[Code*8]; we view it as 4x8 I8 to satisfy RDP's 4bpp
-            // load constraint, then draw via the CI4 tile descriptor.
-            // set+load go to TILE0/TILE1 TMEM; skip when Code is unchanged
-            // (TLUT uploads target TILE7 only, so the pixel data stays good).
-            if ((int)Code != last_code)
-            {
-                rdpq_set_texture_image_raw(
-                    0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
-                rdpq_load_tile(TILE1, 0, 0, 4, 8);
-                last_code = (int)Code;
-                c_load++;
+            s_visible[n_visible].x      = (int16_t)(x + x_offset);
+            s_visible[n_visible].y      = (int16_t)(y + y_offset);
+            s_visible[n_visible].slot   = slot;
+            s_visible[n_visible].colour = (uint8_t)Colour;
+            n_visible++;
+        }
+        if (overflow) break;
+    }
+
+    // Reset the sparse slot map before any fallback decision so the next
+    // call sees a clean state regardless of which path we take here.
+    for (int i = 0; i < n_unique; i++)
+        s_code_to_slot[s_used_codes[i]] = 0xffff;
+
+    // ---- Pass 2: upload atlas + draw --------------------------------------
+    rdpq_set_mode_standard();
+    rdpq_mode_tlut(TLUT_RGBA16);
+    rdpq_mode_alphacompare(1);
+
+    if (!overflow && n_unique > 0)
+    {
+        // Single LOAD_TILE covering the whole atlas. CI4 width=8,
+        // height=n_unique*8, source pitch = ATLAS_PITCH so each row
+        // lands on a fresh TMEM line.
+        const int atlas_h     = n_unique * ATLAS_TILE_H;
+        const int atlas_bytes = n_unique * ATLAS_TILE_BYTES;
+        data_cache_hit_writeback(s_atlas, atlas_bytes);
+        rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, NULL);
+        rdpq_set_tile_size(TILE0, 0, 0, 8, atlas_h);
+        rdpq_set_tile(TILE1, FMT_I8,  0, ATLAS_PITCH, NULL);
+        rdpq_set_texture_image_raw(0, PhysicalAddr(s_atlas),
+                                   FMT_I8, ATLAS_PITCH, atlas_h);
+        rdpq_load_tile(TILE1, 0, 0, ATLAS_PITCH / 2, atlas_h);
+
+        int last_colour = -1;
+        for (int i = 0; i < n_visible; i++)
+        {
+            const Visible& v = s_visible[i];
+            if (v.colour != last_colour) {
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[v.colour * 16], 0, 16);
+                last_colour = v.colour;
             }
+            const int t0 = v.slot * ATLAS_TILE_H;
             rdpq_texture_rectangle(TILE0,
-                x + x_offset,     y + y_offset,
-                x + x_offset + 8, y + y_offset + 8,
-                0, 0);
-            c_emit++;
+                v.x, v.y, v.x + 8, v.y + 8,
+                0, t0);
+        }
+    }
+    else
+    {
+        // Fallback: atlas overflowed. Emit per-tile in the same order as
+        // before. n_visible covers everything collected up to the overflow
+        // tile; the rest we re-walk from tile_ram to keep correctness.
+        rdpq_set_tile(TILE0, FMT_CI4, 0, 8, NULL);
+        rdpq_set_tile_size(TILE0, 0, 0, 8, 8);
+        rdpq_set_tile(TILE1, FMT_I8,  0, 8, NULL);
+
+        int last_colour = -1;
+        int last_code   = -1;
+        for (int my = 0; my < 64; my++)
+        {
+            int y = 8 * my - oy;
+            if (y < -288) y += 512;
+            if (y <= -8 || y >= S16_HEIGHT) continue;
+
+            for (int mx = 0; mx < 128; mx++)
+            {
+                uint16_t ActPage = 0;
+                if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
+                if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
+                if (my >= 32 && mx < 64)   ActPage = (EffPage >>  8) & 0x0f;
+                if (my >= 32 && mx >= 64)  ActPage = (EffPage >> 12) & 0x0f;
+
+                const uint32_t TileIndex =
+                    64 * 32 * 2 * ActPage + ((2 * 64 * my) & 0xfff) + ((2 * mx) & 0x7f);
+                const uint16_t Data =
+                    (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
+
+                if (((Data >> 15) & 1) != priority_draw) continue;
+
+                uint32_t Code = Data & 0x1fff;
+                Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
+                Code &= (NUM_TILES - 1);
+                if (Code == 0) continue;
+
+                int x = 8 * mx - ox;
+                if (x < -x_clamp) x += 1024;
+                if (x <= -8 || x >= s16_width_noscale) continue;
+
+                const int Colour = (Data >> 6) & 0x7f;
+                if (Colour != last_colour) {
+                    rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[Colour * 16], 0, 16);
+                    last_colour = Colour;
+                }
+                if ((int)Code != last_code) {
+                    rdpq_set_texture_image_raw(
+                        0, PhysicalAddr(&tiles[Code * 8]), FMT_I8, 4, 8);
+                    rdpq_load_tile(TILE1, 0, 0, 4, 8);
+                    last_code = (int)Code;
+                }
+                rdpq_texture_rectangle(TILE0,
+                    x + x_offset,     y + y_offset,
+                    x + x_offset + 8, y + y_offset + 8,
+                    0, 0);
+            }
         }
     }
 
+    // Once-per-second sanity log: how many unique codes per page, did we
+    // overflow? Helps decide whether batching is worth implementing.
+    static uint32_t s_calls[2] = {0, 0};
     const int pi = (page_index < 2) ? page_index : 0;
     s_calls[pi]++;
-    s_visit[pi]    += c_visit;
-    s_emit[pi]     += c_emit;
-    s_pri_skip[pi] += c_pri;
-    s_code0[pi]    += c_c0;
-    s_offscr[pi]   += c_off;
-    s_tlut_up[pi]  += c_tlut;
-    s_code_load[pi]+= c_load;
     if ((s_calls[pi] % 60) == 0) {
         const char* tag = (pi == 0) ? "fg" : "bg";
-        debugf("tile %s avg/call: visit=%lu emit=%lu pri=%lu code0=%lu off=%lu tlut=%lu load=%lu\n",
-               tag,
-               (unsigned long)(s_visit[pi]    / s_calls[pi]),
-               (unsigned long)(s_emit[pi]     / s_calls[pi]),
-               (unsigned long)(s_pri_skip[pi] / s_calls[pi]),
-               (unsigned long)(s_code0[pi]    / s_calls[pi]),
-               (unsigned long)(s_offscr[pi]   / s_calls[pi]),
-               (unsigned long)(s_tlut_up[pi]  / s_calls[pi]),
-               (unsigned long)(s_code_load[pi]/ s_calls[pi]));
-        s_calls[pi] = 0;
-        s_visit[pi] = s_emit[pi] = s_pri_skip[pi] = s_code0[pi] = 0;
-        s_offscr[pi] = s_tlut_up[pi] = s_code_load[pi] = 0;
+        debugf("tile %s atlas: visible=%d unique=%d overflow=%d\n",
+               tag, n_visible, n_unique, overflow ? 1 : 0);
     }
 }
 

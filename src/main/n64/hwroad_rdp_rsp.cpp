@@ -394,14 +394,6 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     uint64_t t_kick_end = get_ticks_us();
     rsp::last_us = (rsp::last_us * 7 + (uint32_t)(t_kick_end - t0)) >> 3;
 
-    // TEMP — diagnostic for tbg regression. Wait synchronously for the RSP
-    // here so its DMA traffic doesn't overlap with render_frame's tile bg
-    // emit. If tbg falls back to the CPU-baseline (~8 ms), the regression
-    // is RDRAM bus contention; otherwise it's something else.
-    rspq_wait();
-    uint64_t t_wait_end = get_ticks_us();
-    (void)t_wait_end;
-
     // ---- Validation path -------------------------------------------------
     // Snapshot the RSP-produced mask, re-run the CPU build into mask_buf,
     // and diff. The emit phase ends up reading the CPU's output, so visuals
