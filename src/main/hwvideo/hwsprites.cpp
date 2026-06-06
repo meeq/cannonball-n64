@@ -394,16 +394,28 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     int pipeline = 0;
     shadow_body_ring_idx = 0;
 
-    // TLUT-upload cache. Each rdpq_tex_upload_tlut emits ~3 RDP commands
-    // (set_texture_image_raw + set_tile + load_tile) and writes to TILE7
-    // (RDPQ_TILE_INTERNAL). Many consecutive sprites in OutRun share a
-    // palette slot (crowd extras, banner pixels, smoke); skipping a repeat
-    // upload is the same win that PF4 got on the tile layer. We key off the
-    // source pointer because each unique palette (color_tlut[color*16],
-    // shadow_mask_tlut, or a fresh shadow-body scratch slot) has a distinct
-    // address. Scratch slots come from a ring, so identity-comparison is
-    // safe — pass-2 shadow uploads never alias prior slots within a frame.
-    const uint16_t* last_tlut = NULL;
+    // Multi-slot CI4 TLUT cache mirrored in TMEM. CI4 has 16 palette slots
+    // and TILE.palette is a 4-bit field, so we can hold up to 16 simultaneous
+    // 16-entry palettes in the high half of TMEM and pick one per draw via
+    // set_tile (1 RDP command) instead of re-uploading a full TLUT each draw
+    // (3 RDP commands: set_texture_image_raw + set_tile + load_tile). Layout:
+    //   slot 0      : shadow_mask_tlut (pinned, uploaded once per render call)
+    //   slot 1      : shadow body scratch (always re-uploaded — contents vary
+    //                 per sprite, so no point caching by tag)
+    //   slot 2..15  : LRU cache of opaque color_tlut palettes, keyed by the
+    //                 sprite_tlut+color*16 pointer (stable across the render
+    //                 call). Per OutRun profile only a handful of distinct
+    //                 sprite colours appear per frame, so 14 slots covers the
+    //                 working set with near-100% hit rate after warm-up.
+    constexpr int TLUT_SLOT_SHADOW_MASK = 0;
+    constexpr int TLUT_SLOT_SHADOW_BODY = 1;
+    constexpr int TLUT_SLOT_OPAQUE_BASE = 2;
+    constexpr int TLUT_N_OPAQUE_SLOTS   = 14;
+    const uint16_t* opaque_tag[TLUT_N_OPAQUE_SLOTS] = {};
+    uint32_t        opaque_seq[TLUT_N_OPAQUE_SLOTS] = {};
+    uint32_t        next_seq = 1;
+    bool            shadow_mask_loaded = false;
+    int             cur_tile_palette = -1;  // last palette bound to TILE0
 
     // Pixel-load cache. The bypass path below configures TILE0 (CI4 draw
     // view) + TILE1 (RGBA16 LOAD_BLOCK view) and runs LOAD_BLOCK once per
@@ -519,24 +531,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 
         if (ci4_bytes <= 2048u)
         {
-            // (Re)configure the load/draw tile pair when the atlas changes.
-            // TILE1 is the LOAD_BLOCK alias (FMT_RGBA16 view of the CI4 data,
-            // pitch=0 per LOAD_BLOCK conventions); TILE0 is the draw view
-            // (FMT_CI4, tmem_pitch = row stride in bytes).
-            if (e->ci4 != last_atlas_ci4 || e->w != last_atlas_w || e->h != last_atlas_h)
-            {
-                rdpq_set_texture_image_raw(0, PhysicalAddr(e->ci4),
-                                           FMT_RGBA16, (e->w + 1) / 4, e->h);
-                rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0, NULL);
-                rdpq_set_tile(TILE0, FMT_CI4, 0, (uint16_t)ci4_stride, NULL);
-                rdpq_load_block(TILE1, 0, 0,
-                                (uint16_t)(ci4_bytes / 2),  // RGBA16 texels = w*h/4
-                                (uint16_t)ci4_stride);
-                rdpq_set_tile_size(TILE0, 0, 0, e->w, e->h);
-                last_atlas_ci4 = e->ci4;
-                last_atlas_w   = e->w;
-                last_atlas_h   = e->h;
-            }
+            bool atlas_changed =
+                (e->ci4 != last_atlas_ci4) || (e->w != last_atlas_w) || (e->h != last_atlas_h);
 
             // Flip via swapped dst extents (matches the convention rdpq_tex_blit
             // uses internally — see tex_xblit_norotate in rdpq_tex.c).
@@ -546,6 +542,37 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             float y1 = dst_y + zoomed_h;
             if (mirror_x) { float t = x0; x0 = x1; x1 = t; }
             if (mirror_y) { float t = y0; y0 = y1; y1 = t; }
+
+            // Helper: bind a palette slot to TILE0 (and emit the LOAD_BLOCK
+            // + tile pair if the atlas changed). Folds the palette change
+            // into the atlas-change set_tile when both happen at once.
+            auto bind_tile0 = [&](int slot) {
+                if (atlas_changed)
+                {
+                    rdpq_set_texture_image_raw(0, PhysicalAddr(e->ci4),
+                                               FMT_RGBA16, (e->w + 1) / 4, e->h);
+                    rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0, NULL);
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    rdpq_set_tile(TILE0, FMT_CI4, 0, (uint16_t)ci4_stride, &parms);
+                    rdpq_load_block(TILE1, 0, 0,
+                                    (uint16_t)(ci4_bytes / 2),  // RGBA16 texels = w*h/4
+                                    (uint16_t)ci4_stride);
+                    rdpq_set_tile_size(TILE0, 0, 0, e->w, e->h);
+                    last_atlas_ci4 = e->ci4;
+                    last_atlas_w   = e->w;
+                    last_atlas_h   = e->h;
+                    cur_tile_palette = slot;
+                    atlas_changed = false;  // shadow pass 2 sees same atlas
+                }
+                else if (slot != cur_tile_palette)
+                {
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    rdpq_set_tile(TILE0, FMT_CI4, 0, (uint16_t)ci4_stride, &parms);
+                    cur_tile_palette = slot;
+                }
+            };
 
             if (shadow)
             {
@@ -558,11 +585,13 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                     rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY_CONST);
                     pipeline = 1;
                 }
-                if (last_tlut != shadow_mask_tlut)
+                if (!shadow_mask_loaded)
                 {
-                    rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
-                    last_tlut = shadow_mask_tlut;
+                    rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut,
+                                         TLUT_SLOT_SHADOW_MASK, 16);
+                    shadow_mask_loaded = true;
                 }
+                bind_tile0(TLUT_SLOT_SHADOW_MASK);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
 
@@ -583,8 +612,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
                 for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
                 scratch_uc[10] = 0;
-                rdpq_tex_upload_tlut(scratch, 0, 16);
-                last_tlut = scratch;
+                rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY, 16);
+                bind_tile0(TLUT_SLOT_SHADOW_BODY);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
             }
@@ -596,11 +625,29 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                     rdpq_mode_blender(0);
                     pipeline = 0;
                 }
-                if (last_tlut != color_tlut)
+                // Look up color_tlut in the 14-slot LRU. The tag is the
+                // sprite_tlut+color*16 pointer — stable across the call.
+                int slot = -1;
+                uint32_t best_seq = ~0u;
+                int best_i = 0;
+                for (int i = 0; i < TLUT_N_OPAQUE_SLOTS; i++)
                 {
-                    rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
-                    last_tlut = color_tlut;
+                    if (opaque_tag[i] == color_tlut) { slot = i; break; }
+                    if (opaque_seq[i] < best_seq)
+                    {
+                        best_seq = opaque_seq[i];
+                        best_i = i;
+                    }
                 }
+                if (slot < 0)
+                {
+                    slot = best_i;
+                    rdpq_tex_upload_tlut((uint16_t*)color_tlut,
+                                         TLUT_SLOT_OPAQUE_BASE + slot, 16);
+                    opaque_tag[slot] = color_tlut;
+                }
+                opaque_seq[slot] = ++next_seq;
+                bind_tile0(TLUT_SLOT_OPAQUE_BASE + slot);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
             }
@@ -628,11 +675,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY_CONST);
                 pipeline = 1;
             }
-            if (last_tlut != shadow_mask_tlut)
-            {
-                rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
-                last_tlut = shadow_mask_tlut;
-            }
+            rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
 
             if (pipeline != 0)
@@ -649,7 +692,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
             scratch_uc[10] = 0;
             rdpq_tex_upload_tlut(scratch, 0, 16);
-            last_tlut = scratch;
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
         }
         else
@@ -660,14 +702,15 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(0);
                 pipeline = 0;
             }
-            if (last_tlut != color_tlut)
-            {
-                rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
-                last_tlut = color_tlut;
-            }
+            rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
         }
-        last_atlas_ci4 = NULL;  // tex_blit clobbered TILE0/TILE1
+        // tex_blit clobbers TILE0/TILE1 and uploads its TLUT to palette
+        // slot 0, so invalidate the bypass cache for slots 0/TILE0. Slots
+        // 2..15 (opaque LRU) are untouched, so we leave those tags intact.
+        last_atlas_ci4    = NULL;
+        cur_tile_palette  = -1;
+        shadow_mask_loaded = false;
     }
 
 #if HWSPR_PROFILE
