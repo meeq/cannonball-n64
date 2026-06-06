@@ -42,6 +42,12 @@ namespace hwroad_rdp_rsp
     // Default false — flip to A/B against the CPU-build path.
     extern bool enabled;
 
+    // Wait for the kicked overlay to finish and copy the RSP-written
+    // per-row n_runs back into line[y].n_runs so the emit phase can
+    // walk runs[][]. Must be called between build_foreground_lores_rdp_rsp
+    // and emit_foreground_lores_rdp. Cheap no-op if already drained.
+    void sync_runs();
+
     // Last frame's RSP-side cost (EMA µs). Tracks RSP execution + the
     // CPU descriptor-build phase that has to run before kicking.
     extern uint32_t last_us;

@@ -169,6 +169,19 @@ void init()
     initialised = true;
 }
 
+void sync_runs()
+{
+    using namespace n64::hwroad_rdp;
+    using namespace n64::hwroad_rdp::detail;
+
+    if (!initialised) return;
+    rspq_wait();
+    for (int y = 0; y < MAX_LINES; y++) {
+        if (line[y].kind == DRAW)
+            line[y].n_runs = n_runs_uc[y];
+    }
+}
+
 void shutdown()
 {
     if (!initialised) return;
@@ -396,11 +409,11 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     uint64_t t_cpu_end = get_ticks_us();
     rsp::cpu_us = (rsp::cpu_us * 7 + (uint32_t)(t_cpu_end - t0)) >> 3;
 
-    // Kick the overlay. RSP processes all MAX_LINES descriptors and DMAs
-    // its packed mask bytes back to mask_buf. We do NOT wait here — the
-    // CPU continues with the rest of prepare_frame; emit_foreground_lores_rdp
-    // will see the RSP work draining naturally (rspq command stream is
-    // serial: the overlay must finish before any subsequent rdpq command).
+    // Kick the overlay. RSP processes all MAX_LINES descriptors and writes
+    // runs[] + per-row n_runs back to RDRAM via DMA. We do NOT wait here —
+    // the caller is responsible for calling sync_runs() before invoking
+    // emit_foreground_lores_rdp. This lets the RSP grind in parallel with
+    // CPU work that queues road_bg + tile_layer rdpq commands.
     rspq_write(rsp::overlay_id, 0,
                MAX_LINES,
                PhysicalAddr(rsp::desc_cached),
