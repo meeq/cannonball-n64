@@ -416,6 +416,11 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     uint32_t        next_seq = 1;
     bool            shadow_mask_loaded = false;
     int             cur_tile_palette = -1;  // last palette bound to TILE0
+    // Single-element tag→slot cache in front of the 14-slot LRU. OutRun
+    // sprite batches frequently share a palette (e.g. tree clusters), so this
+    // skips the linear scan on repeat hits.
+    const uint16_t* prev_opaque_tag = NULL;
+    int             prev_opaque_slot = 0;
 
     // Pixel-load cache. The bypass path below configures TILE0 (CI4 draw
     // view) + TILE1 (RGBA16 LOAD_BLOCK view) and runs LOAD_BLOCK once per
@@ -627,24 +632,34 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 }
                 // Look up color_tlut in the 14-slot LRU. The tag is the
                 // sprite_tlut+color*16 pointer — stable across the call.
-                int slot = -1;
-                uint32_t best_seq = ~0u;
-                int best_i = 0;
-                for (int i = 0; i < TLUT_N_OPAQUE_SLOTS; i++)
+                int slot;
+                if (color_tlut == prev_opaque_tag)
                 {
-                    if (opaque_tag[i] == color_tlut) { slot = i; break; }
-                    if (opaque_seq[i] < best_seq)
-                    {
-                        best_seq = opaque_seq[i];
-                        best_i = i;
-                    }
+                    slot = prev_opaque_slot;
                 }
-                if (slot < 0)
+                else
                 {
-                    slot = best_i;
-                    rdpq_tex_upload_tlut((uint16_t*)color_tlut,
-                                         (TLUT_SLOT_OPAQUE_BASE + slot) * 16, 16);
-                    opaque_tag[slot] = color_tlut;
+                    slot = -1;
+                    uint32_t best_seq = ~0u;
+                    int best_i = 0;
+                    for (int i = 0; i < TLUT_N_OPAQUE_SLOTS; i++)
+                    {
+                        if (opaque_tag[i] == color_tlut) { slot = i; break; }
+                        if (opaque_seq[i] < best_seq)
+                        {
+                            best_seq = opaque_seq[i];
+                            best_i = i;
+                        }
+                    }
+                    if (slot < 0)
+                    {
+                        slot = best_i;
+                        rdpq_tex_upload_tlut((uint16_t*)color_tlut,
+                                             (TLUT_SLOT_OPAQUE_BASE + slot) * 16, 16);
+                        opaque_tag[slot] = color_tlut;
+                    }
+                    prev_opaque_tag  = color_tlut;
+                    prev_opaque_slot = slot;
                 }
                 opaque_seq[slot] = ++next_seq;
                 bind_tile0(TLUT_SLOT_OPAQUE_BASE + slot);

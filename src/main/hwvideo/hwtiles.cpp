@@ -287,22 +287,34 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
         const int oy = yScroll & 0x1ff;             // 0..511
 
-        for (int my = 0; my < 64; my++)
+        // Counter-walk only the visible window. y = 8*cy - oy and x = 8*cx -
+        // ox are monotonic; actual_my = cy & 63 and actual_mx = cx & 127 fold
+        // in the original wrap-around (+= 512 / += 1024). This iterates ~29
+        // rows × ~41 cols ≈ 1200 cells per pass instead of 8192. Per-row
+        // ActPage halves are hoisted so the inner loop is one branch + one
+        // ALU op for the tilemap index.
+        const int first_cy = oy >> 3;
+        const int last_cy  = (oy + S16_HEIGHT - 1) >> 3;
+        const int first_cx = ox >> 3;
+        const int last_cx  = (ox + s16_width_noscale - 1) >> 3;
+
+        for (int cy = first_cy; cy <= last_cy; cy++)
         {
-            int y = 8 * my - oy;
-            if (y < -288) y += 512;
-            if (y <= -8 || y >= S16_HEIGHT) continue;
+            const int y  = 8 * cy - oy;
+            const int my = cy & 63;
+            const uint32_t my_offset = (2 * 64 * my) & 0xfff;
+            const bool my_top = my < 32;
+            const uint32_t base_L =
+                64 * 32 * 2 * ((EffPage >> (my_top ? 0 : 8))  & 0x0f) + my_offset;
+            const uint32_t base_R =
+                64 * 32 * 2 * ((EffPage >> (my_top ? 4 : 12)) & 0x0f) + my_offset;
 
-            for (int mx = 0; mx < 128; mx++)
+            for (int cx = first_cx; cx <= last_cx; cx++)
             {
-                uint16_t ActPage = 0;
-                if (my < 32 && mx < 64)    ActPage = (EffPage >>  0) & 0x0f;
-                if (my < 32 && mx >= 64)   ActPage = (EffPage >>  4) & 0x0f;
-                if (my >= 32 && mx < 64)   ActPage = (EffPage >>  8) & 0x0f;
-                if (my >= 32 && mx >= 64)  ActPage = (EffPage >> 12) & 0x0f;
-
-                const uint32_t TileIndex =
-                    64 * 32 * 2 * ActPage + ((2 * 64 * my) & 0xfff) + ((2 * mx) & 0x7f);
+                const int x  = 8 * cx - ox;
+                const int mx = cx & 127;
+                const uint32_t base = (mx < 64) ? base_L : base_R;
+                const uint32_t TileIndex = base + ((2 * mx) & 0x7f);
                 const uint16_t Data =
                     (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
 
@@ -312,10 +324,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
                 Code &= (NUM_TILES - 1);
                 if (Code == 0) continue;
-
-                int x = 8 * mx - ox;
-                if (x < -x_clamp) x += 1024;
-                if (x <= -8 || x >= s16_width_noscale) continue;
 
                 const int Colour = (Data >> 6) & 0x7f;
 
@@ -392,6 +400,11 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     for (int i = 0; i < N_TLUT_SLOTS; i++) tlut_colour[i] = -1;
     uint32_t next_seq = 1;
     int      cur_tile_palette = 0;  // matches the parms=NULL set_tile above
+    // Single-element colour→slot cache. With 18 palette switches over 289
+    // visibles the average run length is ~16 cells; this skips the 16-slot
+    // LRU scan on the cache hit path.
+    int      prev_colour = -1;
+    int      prev_slot   = 0;
 
     int vis_start = 0;
     for (int c = 0; c < n_chunks; c++)
@@ -415,18 +428,25 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
             const Visible& v = s_visible[i];
             const int colour = v.colour;
 
-            // Locate (or evict an LRU entry for) this colour's palette slot.
-            int slot = -1;
-            uint32_t best_seq = ~0u;
-            int best_i = 0;
-            for (int s = 0; s < N_TLUT_SLOTS; s++) {
-                if (tlut_colour[s] == colour) { slot = s; break; }
-                if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
-            }
-            if (slot < 0) {
-                slot = best_i;
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
-                tlut_colour[slot] = colour;
+            int slot;
+            if (colour == prev_colour) {
+                slot = prev_slot;
+            } else {
+                // Locate (or evict an LRU entry for) this colour's palette slot.
+                slot = -1;
+                uint32_t best_seq = ~0u;
+                int best_i = 0;
+                for (int s = 0; s < N_TLUT_SLOTS; s++) {
+                    if (tlut_colour[s] == colour) { slot = s; break; }
+                    if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
+                }
+                if (slot < 0) {
+                    slot = best_i;
+                    rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
+                    tlut_colour[slot] = colour;
+                }
+                prev_colour = colour;
+                prev_slot   = slot;
             }
             tlut_seq[slot] = ++next_seq;
             if (slot != cur_tile_palette) {
