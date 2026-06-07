@@ -306,7 +306,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     // Pass 2: decode pixels into CI4. Leftmost pixel of a byte sits in the
     // high nibble — matches the layout the RDP expects on N64. Pixels are
     // emitted in canonical left-to-right screen order regardless of flip, so
-    // mirror_x at blit time depends only on xdelta.
+    // mirror_x at blit time depends only on xdelta. Tracks whether any pixel
+    // resolves to slot 0xa (shadow slot) so the render path can elide the
+    // 2-cycle shadow darken pass for sprites that carry no shadow silhouette.
+    uint8_t has_shadow = 0;
     {
         uint32_t row_base = addr;
         for (int row = 0; row < (int)h; row++)
@@ -325,6 +328,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                         ? ((pixels >> (4 * n)) & 0xf)
                         : ((pixels >> (28 - 4 * n)) & 0xf);
                     if (pix == 0xf) pix = 0;  // EOR sentinel collapses to transparent
+                    if (pix == 0xa) has_shadow = 1;
                     uint8_t* bp = row_dst + (col >> 1);
                     if (col & 1) *bp = (uint8_t)((*bp & 0xf0) | pix);
                     else         *bp = (uint8_t)(pix << 4);
@@ -342,10 +346,11 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     data_cache_hit_writeback(dst, bytes);
 
     AtlasEntry& e = atlas_entries[idx];
-    e.key = key;
-    e.ci4 = dst;
-    e.w   = w;
-    e.h   = h;
+    e.key        = key;
+    e.ci4        = dst;
+    e.w          = w;
+    e.h          = h;
+    e.has_shadow = has_shadow;
     atlas_extracts++;
     return &e;
 }
@@ -366,7 +371,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     if (!atlas_pool) atlas_init();
     if (!atlas_pool) return;
 
-#define HWSPR_PROFILE 0
+#define HWSPR_PROFILE 1
 #if HWSPR_PROFILE
     uint64_t prof_t0 = get_ticks_us();
     uint32_t prof_total = 0;
@@ -375,7 +380,16 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     uint32_t prof_tlut_skipped = 0;   // last_tlut hit (upload elided)
     uint32_t prof_tlut_uploaded = 0;  // last_tlut miss (upload emitted)
     uint32_t prof_pix_total = 0;      // sum of e->w * e->h (pre-zoom)
+    uint32_t prof_pix_zoomed = 0;     // sum of zoomed_w * zoomed_h (RDP fill)
     uint32_t prof_size_le2k = 0;      // sprites whose CI4 fits one TMEM strip
+    uint32_t prof_atlas_loads = 0;    // # sprites that triggered LOAD_BLOCK
+    uint32_t prof_palette_only = 0;   // # sprites that only rebound palette
+    uint32_t prof_no_setup = 0;       // # sprites that reused atlas+palette
+    uint32_t prof_shadow_demoted = 0; // # shadow-flagged sprites with no slot-0xa pixels
+    uint32_t prof_pix_zoomed_max = 0; // largest single sprite (px)
+    uint32_t prof_bucket_huge = 0;    // sprites with zoom_pix > 4000
+    uint32_t prof_bucket_mid  = 0;    // sprites with 1000 < zoom_pix <= 4000
+    uint32_t prof_bucket_small= 0;    // sprites with zoom_pix <= 1000
 #endif
 
     // Shadow-mask TLUT: only slot 0xa carries alpha=1 (RGBA5551 LSB), all
@@ -447,8 +461,11 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 
         // All visible pri=8 sprites flow through RDP so sprite-RAM slot order
         // (truck behind tree, etc.) is preserved across the shadow/non-shadow
-        // split. Shadow sprites switch into a 50%-darken pipeline below.
-        const bool shadow = ((ramBuff[data+3] >> 14) & 1) != 0;
+        // split. Shadow sprites switch into a 50%-darken pipeline below — but
+        // sprites whose CI4 has no slot-0xa pixels (detected at extract time)
+        // would render the shadow pass as a no-op, so we collapse to the
+        // single-pass body path even when the engine flagged shadow=1.
+        bool shadow = ((ramBuff[data+3] >> 14) & 1) != 0;
 
         int16_t  bank   = (ramBuff[data+0] >> 9) & 7;
         int32_t  top    = (ramBuff[data+0] & 0x1ff) - 0x100;
@@ -485,6 +502,17 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             (uint16_t)height, (int16_t)pitch, flip != 0,
             (uint16_t)vzoom);
         if (!e) continue;
+
+        // Shadow pass is a 2-cycle RDP operation (darken blender). If this
+        // sprite carries no shadow silhouette in its CI4 data, the pass
+        // produces zero visible writes — skip it.
+        if (shadow && !e->has_shadow)
+        {
+            shadow = false;
+#if HWSPR_PROFILE
+            prof_shadow_demoted++;
+#endif
+        }
 #if HWSPR_PROFILE
         prof_total++;
         prof_pix_total += (uint32_t)e->w * (uint32_t)e->h;
@@ -498,6 +526,17 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         const float scale_y  = 512.0f / (float)vzoom;
         const float zoomed_w = (float)e->w * scale_x;
         const float zoomed_h = (float)e->h * scale_y;
+#if HWSPR_PROFILE
+        {
+            uint32_t zpx = (uint32_t)(zoomed_w * zoomed_h);
+            prof_pix_zoomed += zpx;
+            if (zpx > prof_pix_zoomed_max) prof_pix_zoomed_max = zpx;
+            if (zpx > 4000)      prof_bucket_huge++;
+            else if (zpx > 1000) prof_bucket_mid++;
+            else                 prof_bucket_small++;
+            if (shadow) prof_shadow++; else prof_opaque++;
+        }
+#endif
 
         // The atlas is always extracted in canonical left-to-right order, so
         // mirror axes depend purely on xdelta/ydelta sign.
@@ -596,6 +635,15 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                                          TLUT_SLOT_SHADOW_MASK * 16, 16);
                     shadow_mask_loaded = true;
                 }
+#if HWSPR_PROFILE
+                {
+                    bool ach = atlas_changed;
+                    int  cp  = cur_tile_palette;
+                    if      (ach) prof_atlas_loads++;
+                    else if (TLUT_SLOT_SHADOW_MASK != cp) prof_palette_only++;
+                    else          prof_no_setup++;
+                }
+#endif
                 bind_tile0(TLUT_SLOT_SHADOW_MASK);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
@@ -618,6 +666,15 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
                 scratch_uc[10] = 0;
                 rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY * 16, 16);
+#if HWSPR_PROFILE
+                {
+                    bool ach = atlas_changed;
+                    int  cp  = cur_tile_palette;
+                    if      (ach) prof_atlas_loads++;
+                    else if (TLUT_SLOT_SHADOW_BODY != cp) prof_palette_only++;
+                    else          prof_no_setup++;
+                }
+#endif
                 bind_tile0(TLUT_SLOT_SHADOW_BODY);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
@@ -662,6 +719,16 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                     prev_opaque_slot = slot;
                 }
                 opaque_seq[slot] = ++next_seq;
+#if HWSPR_PROFILE
+                {
+                    bool ach = atlas_changed;
+                    int  cp  = cur_tile_palette;
+                    int  ns  = TLUT_SLOT_OPAQUE_BASE + slot;
+                    if      (ach)        prof_atlas_loads++;
+                    else if (ns != cp)   prof_palette_only++;
+                    else                 prof_no_setup++;
+                }
+#endif
                 bind_tile0(TLUT_SLOT_OPAQUE_BASE + slot);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
@@ -733,16 +800,29 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     uint64_t prof_t1 = get_ticks_us();
     if ((prof_frame++ % 60) == 0)
     {
-        debugf("spr[%5lu] total=%3lu (op=%3lu sh=%3lu) tlut up=%3lu skip=%3lu "
-               "pix=%6lu fitstrip=%3lu us=%5lu\n",
+        static uint32_t prev_extracts = 0;
+        static uint32_t prev_hits = 0;
+        uint32_t dx = atlas_extracts - prev_extracts;
+        uint32_t dh = atlas_hits - prev_hits;
+        prev_extracts = atlas_extracts;
+        prev_hits     = atlas_hits;
+        debugf("spr[%5lu] n=%3lu(o=%2lu,s=%2lu,demo=%2lu) zoom=%6lu(max=%5lu H=%2lu M=%2lu S=%2lu) "
+               "load=%2lu palOnly=%2lu noSet=%2lu atl(h=%3lu,m=%2lu) us=%5lu\n",
                (unsigned long)prof_frame,
                (unsigned long)prof_total,
                (unsigned long)prof_opaque,
                (unsigned long)prof_shadow,
-               (unsigned long)prof_tlut_uploaded,
-               (unsigned long)prof_tlut_skipped,
-               (unsigned long)prof_pix_total,
-               (unsigned long)prof_size_le2k,
+               (unsigned long)prof_shadow_demoted,
+               (unsigned long)prof_pix_zoomed,
+               (unsigned long)prof_pix_zoomed_max,
+               (unsigned long)prof_bucket_huge,
+               (unsigned long)prof_bucket_mid,
+               (unsigned long)prof_bucket_small,
+               (unsigned long)prof_atlas_loads,
+               (unsigned long)prof_palette_only,
+               (unsigned long)prof_no_setup,
+               (unsigned long)dh,
+               (unsigned long)dx,
                (unsigned long)(prof_t1 - prof_t0));
     }
 #endif

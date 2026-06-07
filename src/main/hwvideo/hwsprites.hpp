@@ -65,6 +65,7 @@ private:
         uint8_t* ci4;     // 8-byte aligned, ci4_stride * h bytes
         uint16_t w;       // native pixel width (multiple of 8)
         uint16_t h;       // native pixel height
+        uint8_t  has_shadow; // 1 if any pixel uses slot 0xa, else 0
     };
     AtlasEntry atlas_entries[ATLAS_CAPACITY];
     uint8_t*   atlas_pool;
