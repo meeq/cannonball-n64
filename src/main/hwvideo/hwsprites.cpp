@@ -588,7 +588,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 if (!shadow_mask_loaded)
                 {
                     rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut,
-                                         TLUT_SLOT_SHADOW_MASK, 16);
+                                         TLUT_SLOT_SHADOW_MASK * 16, 16);
                     shadow_mask_loaded = true;
                 }
                 bind_tile0(TLUT_SLOT_SHADOW_MASK);
@@ -612,7 +612,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
                 for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
                 scratch_uc[10] = 0;
-                rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY, 16);
+                rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY * 16, 16);
                 bind_tile0(TLUT_SLOT_SHADOW_BODY);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
@@ -643,7 +643,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 {
                     slot = best_i;
                     rdpq_tex_upload_tlut((uint16_t*)color_tlut,
-                                         TLUT_SLOT_OPAQUE_BASE + slot, 16);
+                                         (TLUT_SLOT_OPAQUE_BASE + slot) * 16, 16);
                     opaque_tag[slot] = color_tlut;
                 }
                 opaque_seq[slot] = ++next_seq;

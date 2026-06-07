@@ -232,10 +232,16 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     constexpr int ATLAS_PAIR_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
     constexpr int ATLAS_BYTES = (ATLAS_MAX / 2) * ATLAS_PAIR_BYTES; // 2048
     // Atlas ring: each chunk packs into one of K_RING buffers and rotates.
-    // BG+FG share the ring across one call. K=8 leaves no in-flight buffer
+    // BG+FG share the ring across one call. K leaves no in-flight buffer
     // exposed to clobbering. See [[rdp-deferred-dma-static-source]].
-    constexpr int K_ATLAS_RING = 8;
-    constexpr int MAX_CHUNKS_PER_CALL = 8;
+    //
+    // Music-select uses fg_psel=bg_psel=0xFFFF (all four quadrants map to the
+    // music-select tilemap in page F) so the renderer walks page F in both
+    // passes — up to 2x more visibles than in-game, which exhausted the prior
+    // 8-chunk cap and silently dropped the dashboard tiles via the safety
+    // break below. 16 leaves comfortable headroom.
+    constexpr int K_ATLAS_RING = 16;
+    constexpr int MAX_CHUNKS_PER_CALL = 16;
 
     struct Visible { int16_t x, y; uint16_t slot; uint8_t colour; };
 
@@ -374,8 +380,20 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
     rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
 
-    int last_colour    = -1;
-    int vis_start      = 0;
+    // 16-slot CI4 palette LRU cache in TMEM. TILE.palette is a 4-bit index
+    // so we can keep up to 16 distinct 16-entry tile_tlut[] palettes resident
+    // and switch via rdpq_set_tile (1 RDP cmd) instead of re-uploading via
+    // rdpq_tex_upload_tlut (3 RDP cmds) per draw. tile colours are 7-bit
+    // (0..127) but only a handful appear per frame — 16 slots covers OutRun's
+    // tile-layer working set with near-100% hit rate.
+    constexpr int N_TLUT_SLOTS = 16;
+    int      tlut_colour[N_TLUT_SLOTS];
+    uint32_t tlut_seq   [N_TLUT_SLOTS] = {};
+    for (int i = 0; i < N_TLUT_SLOTS; i++) tlut_colour[i] = -1;
+    uint32_t next_seq = 1;
+    int      cur_tile_palette = 0;  // matches the parms=NULL set_tile above
+
+    int vis_start = 0;
     for (int c = 0; c < n_chunks; c++)
     {
         const int n_uniq_c       = chunk_uniq[c];
@@ -395,9 +413,27 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         for (int i = vis_start; i < vis_end; i++)
         {
             const Visible& v = s_visible[i];
-            if (v.colour != last_colour) {
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[v.colour * 16], 0, 16);
-                last_colour = v.colour;
+            const int colour = v.colour;
+
+            // Locate (or evict an LRU entry for) this colour's palette slot.
+            int slot = -1;
+            uint32_t best_seq = ~0u;
+            int best_i = 0;
+            for (int s = 0; s < N_TLUT_SLOTS; s++) {
+                if (tlut_colour[s] == colour) { slot = s; break; }
+                if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
+            }
+            if (slot < 0) {
+                slot = best_i;
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
+                tlut_colour[slot] = colour;
+            }
+            tlut_seq[slot] = ++next_seq;
+            if (slot != cur_tile_palette) {
+                rdpq_tileparms_t parms = {};
+                parms.palette = (uint8_t)slot;
+                rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                cur_tile_palette = slot;
             }
             const int pair_idx = v.slot >> 1;
             const int in_pair  = v.slot & 1;
@@ -531,8 +567,17 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
     rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
 
-    int last_colour = -1;
-    int vis_start   = 0;
+    // 16-slot CI4 palette LRU cache (same pattern as render_rdp_tile_layers).
+    // Text uses only Colour 0..7, so the cache reaches a steady state where
+    // each colour occupies a fixed slot and only first-use uploads happen.
+    constexpr int N_TLUT_SLOTS = 16;
+    int      tlut_colour[N_TLUT_SLOTS];
+    uint32_t tlut_seq   [N_TLUT_SLOTS] = {};
+    for (int i = 0; i < N_TLUT_SLOTS; i++) tlut_colour[i] = -1;
+    uint32_t next_seq = 1;
+    int      cur_tile_palette = 0;
+
+    int vis_start = 0;
     for (int c = 0; c < n_chunks; c++)
     {
         const int n_uniq_c       = chunk_uniq[c];
@@ -552,9 +597,26 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
         for (int i = vis_start; i < vis_end; i++)
         {
             const Visible& v = s_visible[i];
-            if (v.colour != last_colour) {
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[v.colour * 16], 0, 16);
-                last_colour = v.colour;
+            const int colour = v.colour;
+
+            int slot = -1;
+            uint32_t best_seq = ~0u;
+            int best_i = 0;
+            for (int s = 0; s < N_TLUT_SLOTS; s++) {
+                if (tlut_colour[s] == colour) { slot = s; break; }
+                if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
+            }
+            if (slot < 0) {
+                slot = best_i;
+                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
+                tlut_colour[slot] = colour;
+            }
+            tlut_seq[slot] = ++next_seq;
+            if (slot != cur_tile_palette) {
+                rdpq_tileparms_t parms = {};
+                parms.palette = (uint8_t)slot;
+                rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                cur_tile_palette = slot;
             }
             const int pair_idx = v.slot >> 1;
             const int in_pair  = v.slot & 1;

@@ -206,7 +206,7 @@ int main(int /*argc*/, char* /*argv*/[])
     // ~1800 lands the AI near the stage-1 road split (case 0) for testing
     // the hwroad_rdp prototype without watching a minute of demo.
 #ifndef CANNONBALL_WARMUP_TICKS
-#define CANNONBALL_WARMUP_TICKS 4400  // TEMP — land just before stage-1 road split
+#define CANNONBALL_WARMUP_TICKS 8
 #endif
 #define CANNONBALL_LOG_PROFILE 1     // TEMP — dump profile to debugf
     for (int i = 0; i < CANNONBALL_WARMUP_TICKS; i++)
