@@ -6,7 +6,11 @@
 #include "frontend/config.hpp"
 #include <cstring>
 
-namespace n64_profile { extern uint32_t prim_count; }
+namespace n64_profile {
+    extern uint32_t prim_count;
+    extern uint32_t tile_tlut_uploads;
+    extern uint32_t text_tlut_uploads;
+}
 
 /***************************************************************************
     Video Emulation: OutRun Tilemap Hardware.
@@ -246,11 +250,14 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     //
     // Music-select uses fg_psel=bg_psel=0xFFFF (all four quadrants map to the
     // music-select tilemap in page F) so the renderer walks page F in both
-    // passes — up to 2x more visibles than in-game, which exhausted the prior
-    // 8-chunk cap and silently dropped the dashboard tiles via the safety
-    // break below. 16 leaves comfortable headroom.
-    constexpr int K_ATLAS_RING = 16;
-    constexpr int MAX_CHUNKS_PER_CALL = 16;
+    // passes — up to 2x more visibles than in-game. Combined with the
+    // per-tile pack above halving ATLAS_MAX from 64 → 32, the worst-case
+    // unique-code count per call doubled vs the paired layout. 32 chunks
+    // restores the headroom 16 had at 64 tiles/chunk. The overflow path
+    // below now counts + reports drops so a future ATLAS_MAX change won't
+    // silently re-bite (see [[feedback-silent-overflow-break]]).
+    constexpr int K_ATLAS_RING = 32;
+    constexpr int MAX_CHUNKS_PER_CALL = 32;
 
     struct Visible { int16_t x, y; uint16_t slot; uint8_t colour; };
 
@@ -466,6 +473,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                     slot = best_i;
                     rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
                     tlut_colour[slot] = colour;
+                    n64_profile::tile_tlut_uploads++;
                 }
                 prev_colour = colour;
                 prev_slot   = slot;
@@ -705,6 +713,7 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                     slot = best_i;
                     rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
                     tlut_colour[slot] = colour;
+                    n64_profile::text_tlut_uploads++;
                 }
                 prev_colour = colour;
                 prev_slot   = slot;

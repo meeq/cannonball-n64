@@ -25,6 +25,27 @@ namespace n64_profile
     extern uint32_t aud_pcm_us;   // reconcile_pcm
     extern uint32_t aud_mix_us;   // mixer_poll loop
 
+    // Health window — accumulated over the gap between two dip-log emissions
+    // (the dip log resets them after printing). Captures regressions like the
+    // off-frame-skip rdpq backpressure case, which collapsed fps without any
+    // single per-phase EMA crossing a visible threshold.
+    extern uint32_t dropped_frames; // frames where total wall > FRAME_BUDGET_US
+    extern uint32_t min_wait_us;    // floor of wait_us in window — low = RDP-bound
+    extern uint32_t max_total_us;   // peak un-smoothed frame total in window
+    extern uint32_t window_frames;  // frames the window spans (for ratios)
+
+    // Cache-pressure snapshots — cumulative counters captured at dip-log emit
+    // so the next line can show per-window deltas (working-set thrash signal).
+    extern uint32_t snap_spr_extracts;
+    extern uint32_t snap_spr_hits;
+    extern uint32_t snap_spr_overflows;
+    extern uint32_t snap_tile_tlut_uploads;
+    extern uint32_t snap_text_tlut_uploads;
+    // Cumulative cache counters incremented at the call sites (hwtiles).
+    // hwsprites exposes equivalents through public methods.
+    extern uint32_t tile_tlut_uploads;
+    extern uint32_t text_tlut_uploads;
+
     enum {
         SUB_ROAD_BG,
         SUB_TILE_BG,

@@ -15,6 +15,7 @@
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
 #include "hwroad_rdp_rsp.hpp"
+#include "../hwvideo/hwsprites.hpp"
 
 #include "../main.hpp"
 #include "../video.hpp"
@@ -222,6 +223,12 @@ int main(int /*argc*/, char* /*argv*/[])
         acc = (uint32_t)((acc * 7 + sample) >> 3);
     };
 
+    // 60Hz NTSC vsync interval is ~16683 us. Anything past one interval +
+    // jitter slack means we missed a vblank — i.e. dropped a frame. Keeping
+    // the threshold a bit above the nominal interval avoids false positives
+    // from get_ticks_us granularity and the loop's own measurement overhead.
+    constexpr uint32_t FRAME_BUDGET_US = 17000;
+
     while (state != STATE_QUIT)
     {
         uint64_t t0 = get_ticks_us();
@@ -239,25 +246,51 @@ int main(int /*argc*/, char* /*argv*/[])
         smooth(n64_profile::render_us,  t3 - t2);
         smooth(n64_profile::audio_us,   t4 - t3);
 
+        // Un-smoothed per-frame total — drop detection works on raw values so
+        // a single missed vblank isn't averaged away. EMAs are good for level
+        // tracking but blind to discrete events like vsync misses.
+        const uint32_t frame_total_us = (uint32_t)(t4 - t0);
+        if (frame_total_us > FRAME_BUDGET_US) n64_profile::dropped_frames++;
+        if (frame_total_us > n64_profile::max_total_us)
+            n64_profile::max_total_us = frame_total_us;
+        n64_profile::window_frames++;
+
 #ifdef CANNONBALL_LOG_PROFILE
-        // Only emit when fps drops below 30 (post-warmup) so the log stays
-        // quiet during normal play and only captures genuine dips. The
-        // display_get_fps() smoothed counter ramps from 0 during startup, so
-        // gate on >10 to ignore the initial spin-up. `wait` is the time
-        // display_get() blocked on vsync; subtracting it from `total` yields
-        // the active work per iteration — the 16667 us budget number.
+        // Emit a profile line on two triggers:
+        //   * DIP   — fps under 30, sampled every 8 frames so the log captures
+        //             prolonged peak-scene dips at high resolution.
+        //   * PULSE — once every ~5 seconds regardless of fps. Catches
+        //             regressions that hold fps near-target while collapsing
+        //             headroom (the off-frame-skip case dropped wait_us to ~0
+        //             without crossing the 30 fps threshold for a while).
+        // display_get_fps() ramps from 0 during startup; gate >10 to ignore
+        // the initial spin-up. `wait` is the time display_get() blocked on
+        // vsync; subtracting it from `total` yields the active work per
+        // iteration. `min_wait` and `max_total` are window aggregates of the
+        // un-smoothed per-frame values — the EMA `wait_us` hides single-frame
+        // backpressure events that `min_wait` catches.
         {
             static int log_n = 0;
+            static int pulse_n = 0;
             float fps = display_get_fps();
-            if (fps > 10.0f && fps < 30.0f && ((++log_n & 7) == 0))
+            const bool dip   = (fps > 10.0f && fps < 30.0f
+                                && ((++log_n & 7) == 0));
+            const bool pulse = (++pulse_n >= 300);  // ~5s at 60fps
+            if (dip || pulse)
             {
+                pulse_n = 0;
                 uint32_t total = n64_profile::tick_us + n64_profile::prepare_us
                                + n64_profile::render_us + n64_profile::audio_us;
                 uint32_t active = (total > n64_profile::wait_us)
                                 ? total - n64_profile::wait_us : 0;
-                debugf("DIP fps=%4.1f active=%5lu total=%5lu  "
+                const char* tag = dip ? "DIP" : "PLS";
+                const uint32_t mw = (n64_profile::min_wait_us == 0xFFFFFFFFu)
+                                    ? 0 : n64_profile::min_wait_us;
+                const uint32_t wf = n64_profile::window_frames ?
+                                    n64_profile::window_frames : 1;
+                debugf("%s fps=%4.1f active=%5lu total=%5lu  "
                        "tick=%4lu prep=%5lu rend=%5lu aud=%5lu wait=%5lu\n",
-                       fps, (unsigned long)active, (unsigned long)total,
+                       tag, fps, (unsigned long)active, (unsigned long)total,
                        (unsigned long)n64_profile::tick_us,
                        (unsigned long)n64_profile::prepare_us,
                        (unsigned long)n64_profile::render_us,
@@ -273,6 +306,41 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::aud_z80_us,
                        (unsigned long)n64_profile::aud_pcm_us,
                        (unsigned long)n64_profile::aud_mix_us);
+                // Health window: dropped/window frame ratio, min_wait floor
+                // (low while fps holds = rdpq backpressure), max raw total.
+                // Cache deltas — high spr.ext or tile.upl rate = working-set
+                // thrash; spr.ovf going non-zero means the atlas bump-pool hit
+                // capacity and reset (cold restart of the entire cache).
+                const uint32_t cur_spr_ext = video.sprite_layer
+                                             ->atlas_extract_count();
+                const uint32_t cur_spr_hit = video.sprite_layer
+                                             ->atlas_hit_count();
+                const uint32_t cur_spr_ovf = video.sprite_layer
+                                             ->atlas_overflow_count();
+                const uint32_t cur_tile_upl = n64_profile::tile_tlut_uploads;
+                const uint32_t cur_text_upl = n64_profile::text_tlut_uploads;
+                debugf("    drop=%3lu/%3lu min_wait=%5lu max_total=%5lu  "
+                       "spr.ext=%4lu hit=%5lu ovf=%2lu  tile.upl=%4lu txt.upl=%3lu\n",
+                       (unsigned long)n64_profile::dropped_frames,
+                       (unsigned long)wf,
+                       (unsigned long)mw,
+                       (unsigned long)n64_profile::max_total_us,
+                       (unsigned long)(cur_spr_ext - n64_profile::snap_spr_extracts),
+                       (unsigned long)(cur_spr_hit - n64_profile::snap_spr_hits),
+                       (unsigned long)(cur_spr_ovf - n64_profile::snap_spr_overflows),
+                       (unsigned long)(cur_tile_upl - n64_profile::snap_tile_tlut_uploads),
+                       (unsigned long)(cur_text_upl - n64_profile::snap_text_tlut_uploads));
+                // Reset window aggregates after each emit so the next line
+                // describes the next window, not the run-to-date.
+                n64_profile::dropped_frames = 0;
+                n64_profile::min_wait_us    = 0xFFFFFFFF;
+                n64_profile::max_total_us   = 0;
+                n64_profile::window_frames  = 0;
+                n64_profile::snap_spr_extracts      = cur_spr_ext;
+                n64_profile::snap_spr_hits          = cur_spr_hit;
+                n64_profile::snap_spr_overflows     = cur_spr_ovf;
+                n64_profile::snap_tile_tlut_uploads = cur_tile_upl;
+                n64_profile::snap_text_tlut_uploads = cur_text_upl;
             }
         }
 #endif

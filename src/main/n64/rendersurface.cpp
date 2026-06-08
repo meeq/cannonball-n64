@@ -41,6 +41,19 @@ namespace n64_profile
     uint32_t aud_mix_us = 0;
     uint32_t sub_us[SUB_COUNT] = {0};
     uint32_t prim_count = 0;
+
+    uint32_t dropped_frames = 0;
+    uint32_t min_wait_us    = 0xFFFFFFFF;
+    uint32_t max_total_us   = 0;
+    uint32_t window_frames  = 0;
+
+    uint32_t snap_spr_extracts      = 0;
+    uint32_t snap_spr_hits          = 0;
+    uint32_t snap_spr_overflows     = 0;
+    uint32_t snap_tile_tlut_uploads = 0;
+    uint32_t snap_text_tlut_uploads = 0;
+    uint32_t tile_tlut_uploads      = 0;
+    uint32_t text_tlut_uploads      = 0;
 }
 
 Render::Render()
@@ -226,8 +239,13 @@ bool Render::finalize_frame()
     uint64_t t0 = get_ticks_us();
     surface_t* disp = display_get();
     uint64_t t1 = get_ticks_us();
-    n64_profile::wait_us =
-        (n64_profile::wait_us * 7 + (uint32_t)(t1 - t0)) >> 3;
+    const uint32_t raw_wait = (uint32_t)(t1 - t0);
+    n64_profile::wait_us = (n64_profile::wait_us * 7 + raw_wait) >> 3;
+    // Track the *floor* of wait_us across the window — a near-zero floor while
+    // fps drops indicates rdpq backpressure: display_get returns instantly
+    // because the previous frame is still draining the RDP queue. EMA on
+    // wait_us hides this; we need the raw minimum.
+    if (raw_wait < n64_profile::min_wait_us) n64_profile::min_wait_us = raw_wait;
 
     rdpq_attach(disp, NULL);
 
