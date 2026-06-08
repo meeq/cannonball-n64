@@ -288,7 +288,7 @@ bool Render::finalize_frame()
 #if N64_PROFILE_RDP_DRAIN
     uint32_t rbg_emit = 0, rbg_drain = 0, rbg_prims = 0;
     uint32_t tbg_emit = 0, tbg_drain = 0, tbg_prims = 0;
-    uint32_t rfg_prims = 0;
+    uint32_t rfg_emit = 0, rfg_drain = 0, rfg_prims = 0;
     uint32_t spr_emit = 0, spr_drain = 0, spr_prims = 0;
     uint32_t txt_emit = 0, txt_drain = 0, txt_prims = 0;
     uint32_t prim_mark = 0;
@@ -392,9 +392,15 @@ bool Render::finalize_frame()
             n64::hwroad_rdp_rsp::sync_runs();
 #if N64_PROFILE_RDP_DRAIN
         prim_mark = n64_profile::prim_count;
+        uint64_t rfg_t0 = get_ticks_us();
 #endif
         hwroad.emit_foreground_lores_rdp(x, y_offset);
 #if N64_PROFILE_RDP_DRAIN
+        uint64_t rfg_t1 = get_ticks_us();
+        rspq_wait();
+        uint64_t rfg_t2 = get_ticks_us();
+        rfg_emit  = (uint32_t)(rfg_t1 - rfg_t0);
+        rfg_drain = (uint32_t)(rfg_t2 - rfg_t1);
         rfg_prims = n64_profile::prim_count - prim_mark;
 #endif
     }
@@ -446,14 +452,15 @@ bool Render::finalize_frame()
     static uint32_t drain_log_frame = 0;
     if ((drain_log_frame++ % 60) == 0)
     {
-        debugf("rdp[%5lu] rbg %3lup e=%4lu d=%4lu  tbg %4lup e=%4lu d=%4lu  "
-               "rfg %4lup  spr %3lup e=%4lu d=%4lu  txt %3lup e=%4lu d=%4lu\n",
+        debugf("rdp[%5lu] rbg %3lup e=%4lu d=%5lu  tbg %4lup e=%4lu d=%4lu  "
+               "rfg %4lup e=%4lu d=%5lu  spr %3lup e=%4lu d=%4lu  txt %3lup e=%4lu d=%4lu\n",
                (unsigned long)drain_log_frame,
                (unsigned long)rbg_prims,
                (unsigned long)rbg_emit, (unsigned long)rbg_drain,
                (unsigned long)tbg_prims,
                (unsigned long)tbg_emit, (unsigned long)tbg_drain,
                (unsigned long)rfg_prims,
+               (unsigned long)rfg_emit, (unsigned long)rfg_drain,
                (unsigned long)spr_prims,
                (unsigned long)spr_emit, (unsigned long)spr_drain,
                (unsigned long)txt_prims,

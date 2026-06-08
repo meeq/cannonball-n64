@@ -54,11 +54,14 @@ private:
     // whole cache is reset (data is re-extracted on next miss) so we never
     // need a true LRU walk.
     static constexpr uint32_t ATLAS_CAPACITY   = 1024;       // power of 2
-    // 512 KiB. Per-scene unique-sprite working set in OutRun is ~50 sprites
-    // × ~1 KiB CI4 ≈ 50 KiB, so 512 KiB gives ~10x headroom before the cache
-    // resets on overflow. Anything larger gets squeezed by heap fragmentation
-    // at boot (ROM source + 1 MiB sprites[] are both live when we allocate).
-    static constexpr uint32_t ATLAS_POOL_BYTES = 512u << 10;
+    // 1 MiB. Boot heap reports ~3 MiB free but the heap is fragmented at
+    // atlas_init time (ROM + sprites[] + rspq + audio + framebuffers all
+    // allocated first), so memalign returns NULL for sizes >1 MiB while
+    // 1 MiB succeeds reliably. Each ovf event costs a ~20ms frame to
+    // re-extract every visible sprite — see
+    // project_spr_spike_atlas_overflow. 1 MiB cuts the ovf rate ~6x vs
+    // the original 512 KiB pool.
+    static constexpr uint32_t ATLAS_POOL_BYTES = 1024u << 10;
     struct AtlasEntry
     {
         uint64_t key;     // 0 = empty
