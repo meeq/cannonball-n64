@@ -1,0 +1,4 @@
+[submodule "libdragon"]
+	path = libdragon
+	url = git@github.com:meeq/libdragon.git
+	branch = preview
