@@ -246,12 +246,17 @@ int main(int /*argc*/, char* /*argv*/[])
         smooth(n64_profile::audio_us,   t4 - t3);
 
 #ifdef CANNONBALL_LOG_PROFILE
+        // Only emit when fps drops below 30 (post-warmup) so the log stays
+        // quiet during normal play and only captures genuine dips. The
+        // display_get_fps() smoothed counter ramps from 0 during startup, so
+        // gate on >10 to ignore the initial spin-up.
         {
             static int log_n = 0;
-            if ((++log_n % 60) == 0)
-                debugf("prof fps=%4.1f ras=%5lu wait=%5lu "
+            float fps = display_get_fps();
+            if (fps > 10.0f && fps < 30.0f && ((++log_n & 7) == 0))
+                debugf("DIP fps=%4.1f ras=%5lu wait=%5lu "
                        "rbg=%4lu tbg=%5lu tfg=%5lu rfg=%5lu spr=%5lu txt=%5lu\n",
-                       display_get_fps(),
+                       fps,
                        (unsigned long)n64_profile::prepare_us,
                        (unsigned long)n64_profile::wait_us,
                        (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],

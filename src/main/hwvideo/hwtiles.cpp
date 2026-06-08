@@ -6,6 +6,10 @@
 #include "frontend/config.hpp"
 #include <cstring>
 
+// TEMP — enable run-coalesce-potential probe in render_rdp_tile_layers.
+// Logs once every 60 calls (≈ once per second at 60fps render cadence).
+#define HWTILES_COALESCE_PROBE 0
+
 /***************************************************************************
     Video Emulation: OutRun Tilemap Hardware.
     Based on MAME source code.
@@ -226,11 +230,18 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                                      uint8_t priority_draw,
                                      int x_offset, int y_offset)
 {
-    constexpr int ATLAS_MAX = 64;           // tiles per atlas chunk (fills bank 0)
-    constexpr int ATLAS_PITCH = 8;          // bytes per atlas row (TMEM line)
-    constexpr int ATLAS_TILE_H = 8;         // rows per tile
-    constexpr int ATLAS_PAIR_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
-    constexpr int ATLAS_BYTES = (ATLAS_MAX / 2) * ATLAS_PAIR_BYTES; // 2048
+    // Per-tile pack: each tile owns its own 8 TMEM lines so any slot starts
+    // at s=0 and a mask=3 wrap can horizontally repeat it. RDP requires
+    // tmem_pitch >= 8, so each line still costs 8 bytes (16 CI4 texels) even
+    // though only the first 4 bytes hold tile data — the right half is
+    // padding and never sampled (set_tile_size caps s at 8). That halves
+    // tiles-per-chunk vs. the old paired layout but every adjacent same-slot
+    // visible (not just in_pair=0) can now be coalesced.
+    constexpr int ATLAS_MAX        = 32;
+    constexpr int ATLAS_PITCH      = 8;     // bytes per TMEM line (RDP min)
+    constexpr int ATLAS_TILE_H     = 8;     // rows per tile
+    constexpr int ATLAS_TILE_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
+    constexpr int ATLAS_BYTES      = ATLAS_MAX * ATLAS_TILE_BYTES; // 2048
     // Atlas ring: each chunk packs into one of K_RING buffers and rotates.
     // BG+FG share the ring across one call. K leaves no in-flight buffer
     // exposed to clobbering. See [[rdp-deferred-dma-static-source]].
@@ -267,11 +278,17 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
     int n_unique  = 0;
+#ifdef HWTILES_COALESCE_PROBE
+    int n_visible_bg_end = 0;   // n_visible at end of BG pass
+#endif
 
     // Walk BG (page=1) first, then FG (page=0). BG must draw under FG.
     for (int pass = 0; pass < 2; pass++)
     {
         const uint8_t page_index = (pass == 0) ? 1 : 0;
+#ifdef HWTILES_COALESCE_PROBE
+        if (pass == 1) n_visible_bg_end = n_visible;
+#endif
 
         const uint16_t EffPage = page[page_index];
         uint16_t xScroll = scroll_x[page_index];
@@ -348,14 +365,14 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                     slot = (uint16_t)n_unique;
                     s_code_to_slot[Code] = slot;
                     s_used_codes[n_unique] = (uint16_t)Code;
-                    // Paired pack: left half = in_pair 0, right half = in_pair 1.
-                    const int pair_idx = n_unique >> 1;
-                    const int in_pair  = n_unique & 1;
+                    // Pack tile into left half of its 8 TMEM lines (right
+                    // half is padding; never sampled since set_tile_size
+                    // caps s at 8). Padding is left uninitialized.
                     uint32_t* dst =
-                        (uint32_t*)&atlas_cur[pair_idx * ATLAS_PAIR_BYTES];
+                        (uint32_t*)&atlas_cur[n_unique * ATLAS_TILE_BYTES];
                     const uint32_t* src = &tiles[Code * 8];
                     for (int r = 0; r < 8; r++)
-                        dst[r * 2 + in_pair] = src[r];
+                        dst[r * 2] = src[r];
                     n_unique++;
                 }
 
@@ -387,6 +404,17 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     rdpq_mode_alphacompare(1);
     rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
     rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
+    // TILE2 mirrors TILE0's TMEM region but with s.mask=3 so the 8-pixel
+    // tile texture wraps every 8 texels. Lets a horizontal run of K identical
+    // (slot, colour, y) tiles draw as one rect of width 8*K instead of K
+    // separate texture_rectangles. Only valid for in_pair=0 tiles — in_pair=1
+    // would need s to start at 8 and wrap to 8 (not 0), which mask=3 can't
+    // express; those runs fall back to the single-emit path.
+    {
+        rdpq_tileparms_t parms2 = {};
+        parms2.s.mask = 3;
+        rdpq_set_tile(TILE2, FMT_CI4, 0, ATLAS_PITCH, &parms2);
+    }
 
     // 16-slot CI4 palette LRU cache in TMEM. TILE.palette is a 4-bit index
     // so we can keep up to 16 distinct 16-entry tile_tlut[] palettes resident
@@ -399,7 +427,8 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     uint32_t tlut_seq   [N_TLUT_SLOTS] = {};
     for (int i = 0; i < N_TLUT_SLOTS; i++) tlut_colour[i] = -1;
     uint32_t next_seq = 1;
-    int      cur_tile_palette = 0;  // matches the parms=NULL set_tile above
+    int      cur_tile_palette  = 0;  // matches the parms=NULL set_tile above
+    int      cur_tile2_palette = 0;  // matches the mask-3 init above
     // Single-element colour→slot cache. With 18 palette switches over 289
     // visibles the average run length is ~16 cells; this skips the 16-slot
     // LRU scan on the cache hit path.
@@ -411,19 +440,20 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     {
         const int n_uniq_c       = chunk_uniq[c];
         const int vis_end        = chunk_vis_end[c];
-        const int n_pairs_c      = (n_uniq_c + 1) >> 1;
-        const int atlas_h_c      = n_pairs_c * ATLAS_TILE_H;
-        const int atlas_bytes_c  = n_pairs_c * ATLAS_PAIR_BYTES;
+        const int atlas_h_c      = n_uniq_c * ATLAS_TILE_H;   // one tile per 8 lines
+        const int atlas_bytes_c  = n_uniq_c * ATLAS_TILE_BYTES;
         const int rgba16_texels  = atlas_bytes_c >> 1;
         uint8_t* atlas_c         = s_atlas_ring[chunk_ring_ix[c]];
 
         data_cache_hit_writeback(atlas_c, atlas_bytes_c);
-        rdpq_set_tile_size(TILE0, 0, 0, 16, atlas_h_c);
+        rdpq_set_tile_size(TILE0, 0, 0, 8, atlas_h_c);
+        rdpq_set_tile_size(TILE2, 0, 0, 8, atlas_h_c);
         rdpq_set_texture_image_raw(0, PhysicalAddr(atlas_c),
                                    FMT_RGBA16, ATLAS_PITCH / 2, atlas_h_c);
         rdpq_load_block(TILE1, 0, 0, rgba16_texels, ATLAS_PITCH);
 
-        for (int i = vis_start; i < vis_end; i++)
+        int i = vis_start;
+        while (i < vis_end)
         {
             const Visible& v = s_visible[i];
             const int colour = v.colour;
@@ -449,20 +479,79 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 prev_slot   = slot;
             }
             tlut_seq[slot] = ++next_seq;
-            if (slot != cur_tile_palette) {
-                rdpq_tileparms_t parms = {};
-                parms.palette = (uint8_t)slot;
-                rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
-                cur_tile_palette = slot;
+
+            const int t_base = v.slot * ATLAS_TILE_H;
+
+            // Look for a horizontal run of identical (atlas slot, colour, y)
+            // tiles at x+8, x+16, ... — with the per-tile pack every slot
+            // starts at s=0 so any run can be coalesced via TILE2 (s.mask=3).
+            int run_end = i + 1;
+            int next_x  = v.x + 8;
+            while (run_end < vis_end) {
+                const Visible& n = s_visible[run_end];
+                if (n.slot != v.slot || n.colour != colour
+                    || n.y != v.y || n.x != next_x)
+                    break;
+                run_end++;
+                next_x += 8;
             }
-            const int pair_idx = v.slot >> 1;
-            const int in_pair  = v.slot & 1;
-            rdpq_texture_rectangle(TILE0,
-                v.x, v.y, v.x + 8, v.y + 8,
-                in_pair * 8, pair_idx * ATLAS_TILE_H);
+            const int run_len = run_end - i;
+
+            if (run_len > 1) {
+                if (slot != cur_tile2_palette) {
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    parms.s.mask  = 3;
+                    rdpq_set_tile(TILE2, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                    cur_tile2_palette = slot;
+                }
+                rdpq_texture_rectangle(TILE2,
+                    v.x, v.y, v.x + 8 * run_len, v.y + 8,
+                    0, t_base);
+            } else {
+                if (slot != cur_tile_palette) {
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                    cur_tile_palette = slot;
+                }
+                rdpq_texture_rectangle(TILE0,
+                    v.x, v.y, v.x + 8, v.y + 8,
+                    0, t_base);
+            }
+
+            i = run_end;
         }
         vis_start = vis_end;
     }
+
+#ifdef HWTILES_COALESCE_PROBE
+    // TEMP — coal = number of adjacent same-(slot,colour,y) pairs across the
+    // current visible list. With the per-tile pack every such pair is now
+    // collapsible into one wider rect, so coal equals primitives saved.
+    {
+        int coal = 0;
+        int s0 = 0;
+        for (int c = 0; c < n_chunks; c++) {
+            const int s1 = chunk_vis_end[c];
+            for (int i = s0 + 1; i < s1; i++) {
+                const Visible& a = s_visible[i - 1];
+                const Visible& b = s_visible[i];
+                if (a.slot == b.slot && a.colour == b.colour
+                    && a.y == b.y && b.x == a.x + 8)
+                    coal++;
+            }
+            s0 = s1;
+        }
+        static int probe_n = 0;
+        float fps = display_get_fps();
+        if (fps > 10.0f && fps < 30.0f && ((++probe_n & 7) == 0))
+            debugf("DIP tile p=%d vis=%4d (bg=%4d fg=%4d) chunks=%2d coal=%3d\n",
+                   (int)priority_draw, n_visible,
+                   n_visible_bg_end, n_visible - n_visible_bg_end,
+                   n_chunks, coal);
+    }
+#endif
 }
 
 // RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as

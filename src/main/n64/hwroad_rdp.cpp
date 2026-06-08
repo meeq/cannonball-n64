@@ -713,11 +713,14 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
 
     uint64_t tC = get_ticks_us();
 
-    if ((s_frame % 60) == 0) {
-        debugf("hwroad_rdp emit: fill=%lu runs=%lu rects=%lu total=%lu\n",
-               (unsigned long)(tB - t0),
-               (unsigned long)(tC - tB),
-               (unsigned long)rects,
-               (unsigned long)(tC - t0));
+    {
+        float fps = display_get_fps();
+        if (fps > 10.0f && fps < 30.0f && (s_frame & 7) == 0) {
+            debugf("DIP hwroad_rdp emit: fill=%lu runs=%lu rects=%lu total=%lu\n",
+                   (unsigned long)(tB - t0),
+                   (unsigned long)(tC - tB),
+                   (unsigned long)rects,
+                   (unsigned long)(tC - t0));
+        }
     }
 }

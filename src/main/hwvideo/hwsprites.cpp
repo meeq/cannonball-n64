@@ -540,6 +540,20 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         const float scale_y  = 512.0f / (float)vzoom;
         const float zoomed_w = (float)e->w * scale_x;
         const float zoomed_h = (float)e->h * scale_y;
+
+        // Skip the shadow pass on distant scenery: when the zoomed sprite is
+        // small the shadow contributes only a few darkened pixels but still
+        // costs a full mask+body draw (2 RDP primitives + TLUT setup).
+        // Starting-line / stage-2 rock scenes draw ~80 shadow sprites per
+        // frame, most of them tiny — this cuts the shadow draw count
+        // substantially with no visible difference at this zoom level.
+        if (shadow && (zoomed_w * zoomed_h) < 256.0f)
+        {
+            shadow = false;
+#if HWSPR_PROFILE
+            prof_shadow_demoted++;
+#endif
+        }
 #if HWSPR_PROFILE
         {
             uint32_t zpx = (uint32_t)(zoomed_w * zoomed_h);
@@ -841,7 +855,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 #if HWSPR_PROFILE
     static uint32_t prof_frame = 0;
     uint64_t prof_t1 = get_ticks_us();
-    if ((prof_frame++ % 60) == 0)
+    float prof_fps = display_get_fps();
+    if (prof_fps > 10.0f && prof_fps < 30.0f && ((prof_frame++ & 7) == 0))
     {
         static uint32_t prev_extracts = 0;
         static uint32_t prev_hits = 0;
