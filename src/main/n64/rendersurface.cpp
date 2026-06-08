@@ -65,6 +65,19 @@ namespace n64_profile
     uint32_t tile_call_uniq_total   = 0;
     uint32_t tile_call_chunks       = 0;
     uint32_t tile_call_tlut_evicts  = 0;
+    uint32_t tile_call_prims        = 0;
+    uint32_t tile_call_pass1_us     = 0;
+    uint32_t tile_call_pass2_us     = 0;
+
+    uint32_t spr_call_vis           = 0;
+    uint32_t spr_call_prims         = 0;
+    uint32_t spr_call_loads         = 0;
+    uint32_t spr_call_tlut_uploads  = 0;
+    uint32_t spr_call_us            = 0;
+
+    uint32_t composite_us           = 0;
+    uint32_t raw_composite_us       = 0;
+    uint32_t composite_skipped_frames = 0;
 }
 
 Render::Render()
@@ -333,15 +346,37 @@ bool Render::finalize_frame()
     // from overwriting the road background and tile layers underneath. The
     // scratch holds road_fg pixels in their final RGBA5551 form — hwroad
     // wrote them directly during prepare_frame.
-    rdpq_set_mode_standard();
-    rdpq_mode_alphacompare(1);
-    rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
+    //
+    // SKIP the blit when CPU road_fg didn't run: either the RDP hwroad path
+    // owns the road (should_skip_cpu) or road_fg is entirely suppressed
+    // (!should_render_road_fg). In both cases, scratch is still all alpha=0
+    // from start_frame()'s memset — blitting it is ~71680 pixels of RDP
+    // fillrate that all get dropped by alpha-compare. CPU-side rdpq emit
+    // measures ~22us per frame (raw_composite_us); RDP fillrate savings
+    // (~71680 alpha-compare reads of zero alpha) come on top but are hidden
+    // by the upstream tile_bg backpressure (see [[project-tbg-chunks-bound]]).
+    const bool cpu_wrote_scratch =
+        n64::hwroad_rdp::should_render_road_fg() &&
+        !n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control());
+    const uint64_t comp_t0 = get_ticks_us();
+    if (cpu_wrote_scratch)
+    {
+        rdpq_set_mode_standard();
+        rdpq_mode_alphacompare(1);
+        rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
+    }
+    else
+    {
+        n64_profile::composite_skipped_frames++;
+    }
+    const uint32_t comp_us = (uint32_t)(get_ticks_us() - comp_t0);
+    n64_profile::raw_composite_us = comp_us;
+    n64_profile::composite_us = (n64_profile::composite_us * 7 + comp_us) >> 3;
 
     // RDP road_fg overlay. When the runtime flag is on, prepare_frame ran
-    // build_foreground_lores_rdp instead of the CPU scratch pass — the
-    // scratch is all alpha=0 in the road area, so the blit above contributed
-    // nothing here and we paint into a clean framebuffer. This just emits
-    // the prebuilt CI4 mask + per-line TLUTs into rdpq.
+    // build_foreground_lores_rdp instead of the CPU scratch pass; we paint
+    // straight into the now-uncomposited framebuffer. This just emits the
+    // prebuilt CI4 mask + per-line TLUTs into rdpq.
     //
     // should_render_road_fg() mirrors the build-side predicate at
     // video.cpp's prepare_frame: when the engine suppresses road_fg (e.g.

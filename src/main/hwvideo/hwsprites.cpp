@@ -7,7 +7,14 @@
 #include <cstring>
 #include <malloc.h>
 
-namespace n64_profile { extern uint32_t prim_count; }
+namespace n64_profile {
+    extern uint32_t prim_count;
+    extern uint32_t spr_call_vis;
+    extern uint32_t spr_call_prims;
+    extern uint32_t spr_call_loads;
+    extern uint32_t spr_call_tlut_uploads;
+    extern uint32_t spr_call_us;
+}
 
 /***************************************************************************
     Video Emulation: OutRun Sprite Rendering Hardware.
@@ -385,6 +392,16 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     if (!atlas_pool) atlas_init();
     if (!atlas_pool) return;
 
+    // Per-call telemetry — mirrors hwtiles::render_rdp_tile_layers. Locals
+    // are incremented at the relevant sites and flushed to n64_profile at
+    // function exit so the OUT/PLS logger can correlate spr= cost against
+    // sprite count, LOAD_BLOCK count, and TLUT cache miss count.
+    const uint32_t spr_pre_prim_count = n64_profile::prim_count;
+    const uint64_t spr_t0_us = get_ticks_us();
+    uint32_t spr_vis = 0;
+    uint32_t spr_loads = 0;
+    uint32_t spr_tlut_uploads = 0;
+
 // Set to 1 to enable per-sprite counters (atlas loads, shadow tight-bbox %,
 // palette-cache hit rate). Adds ~10 counter ops per sprite × ~80-150 sprites/
 // frame, so leave off in steady-state measurement.
@@ -588,6 +605,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         if (screen_y + zoomed_h <= 0.0f) continue;
         if (screen_y >= (float)config.s16_height) continue;
 
+        spr_vis++;
+
         const float dst_x = screen_x + (float)x_offset;
         const float dst_y = screen_y + (float)y_offset;
 
@@ -636,6 +655,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                                     (uint16_t)(ci4_bytes / 2),  // RGBA16 texels = w*h/4
                                     (uint16_t)ci4_stride);
                     rdpq_set_tile_size(TILE0, 0, 0, e->w, e->h);
+                    spr_loads++;
                     last_atlas_ci4 = e->ci4;
                     last_atlas_w   = e->w;
                     last_atlas_h   = e->h;
@@ -667,6 +687,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                     rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut,
                                          TLUT_SLOT_SHADOW_MASK * 16, 16);
                     shadow_mask_loaded = true;
+                    spr_tlut_uploads++;
                 }
 #if HWSPR_PROFILE
                 {
@@ -729,6 +750,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
                 scratch_uc[10] = 0;
                 rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY * 16, 16);
+                spr_tlut_uploads++;
 #if HWSPR_PROFILE
                 {
                     bool ach = atlas_changed;
@@ -778,6 +800,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                         rdpq_tex_upload_tlut((uint16_t*)color_tlut,
                                              (TLUT_SLOT_OPAQUE_BASE + slot) * 16, 16);
                         opaque_tag[slot] = color_tlut;
+                        spr_tlut_uploads++;
                     }
                     prev_opaque_tag  = color_tlut;
                     prev_opaque_slot = slot;
@@ -825,6 +848,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
             n64_profile::prim_count++;
+            spr_tlut_uploads++;
+            spr_loads++;
 
             if (pipeline != 0)
             {
@@ -842,6 +867,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             rdpq_tex_upload_tlut(scratch, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
             n64_profile::prim_count++;
+            spr_tlut_uploads++;
+            spr_loads++;
         }
         else
         {
@@ -854,6 +881,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
             n64_profile::prim_count++;
+            spr_tlut_uploads++;
+            spr_loads++;
         }
         // tex_blit clobbers TILE0/TILE1 and uploads its TLUT to palette
         // slot 0, so invalidate the bypass cache for slots 0/TILE0. Slots
@@ -894,4 +923,10 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         (void)dh; (void)dx;
     }
 #endif
+
+    n64_profile::spr_call_vis          = spr_vis;
+    n64_profile::spr_call_loads        = spr_loads;
+    n64_profile::spr_call_tlut_uploads = spr_tlut_uploads;
+    n64_profile::spr_call_prims        = n64_profile::prim_count - spr_pre_prim_count;
+    n64_profile::spr_call_us           = (uint32_t)(get_ticks_us() - spr_t0_us);
 }

@@ -54,6 +54,31 @@ namespace n64_profile
     extern uint32_t tile_call_uniq_total;   // sum of chunk_uniq[] (atlas LOAD work)
     extern uint32_t tile_call_chunks;       // n_chunks (atlas rebuilds)
     extern uint32_t tile_call_tlut_evicts;  // TLUT LRU evictions this call
+    extern uint32_t tile_call_prims;        // rdpq_texture_rectangle calls (post-coalesce)
+    extern uint32_t tile_call_pass1_us;     // pass 1 (walk tilemap + build atlas) us
+    extern uint32_t tile_call_pass2_us;     // pass 2 (chunk setup + emit) us
+
+    // Per-call telemetry for hwsprites::render_rdp. Set at end of call,
+    // consumed by the outlier logger to diagnose why spr peaks at ~6.5 ms
+    // (down from ~5-6 ms baseline after the 14-slot TLUT cache landed —
+    // [[project-hwsprites-tlut-cache]]). vis is the post-filter sprite count
+    // that actually emitted; prims includes shadow's mask+body second rect
+    // so prims > vis on shadow-heavy frames. loads is LOAD_BLOCK count
+    // (atlas surface change); tlut_uploads is rdpq_tex_upload_tlut count
+    // (palette cache miss + shadow scratch refresh).
+    extern uint32_t spr_call_vis;
+    extern uint32_t spr_call_prims;
+    extern uint32_t spr_call_loads;
+    extern uint32_t spr_call_tlut_uploads;
+    extern uint32_t spr_call_us;
+
+    // Scratch composite blit (320×224 RGBA5551 with alpha-compare). Skipped
+    // when CPU road_fg path didn't run; instrumented to confirm that's a real
+    // RDP fillrate saving and not just a wash. raw_composite_us is the per-
+    // frame value; composite_us is the EMA.
+    extern uint32_t composite_us;
+    extern uint32_t raw_composite_us;
+    extern uint32_t composite_skipped_frames;   // count of skipped blits in window
 
     enum {
         SUB_ROAD_BG,

@@ -14,6 +14,9 @@ namespace n64_profile {
     extern uint32_t tile_call_uniq_total;
     extern uint32_t tile_call_chunks;
     extern uint32_t tile_call_tlut_evicts;
+    extern uint32_t tile_call_prims;
+    extern uint32_t tile_call_pass1_us;
+    extern uint32_t tile_call_pass2_us;
 }
 
 /***************************************************************************
@@ -294,8 +297,11 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
 
     // Snapshot the global TLUT upload counter so we can derive *this call's*
     // eviction count as a delta at function exit. Cheaper than threading a
-    // local through every upload site.
+    // local through every upload site. Same trick for prim_count to measure
+    // how effective the horizontal run coalesce is (vis vs. emitted rects).
     const uint32_t pre_tlut_uploads = n64_profile::tile_tlut_uploads;
+    const uint32_t pre_prim_count   = n64_profile::prim_count;
+    const uint64_t pass1_t0 = get_ticks_us();
 
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
@@ -434,7 +440,17 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     }
 
     // ---- Pass 2: upload + draw each chunk ---------------------------------
-    if (n_chunks == 0) return;
+    const uint64_t pass2_t0 = get_ticks_us();
+    n64_profile::tile_call_pass1_us = (uint32_t)(pass2_t0 - pass1_t0);
+    if (n_chunks == 0) {
+        n64_profile::tile_call_pass2_us    = 0;
+        n64_profile::tile_call_vis         = (uint32_t)n_visible;
+        n64_profile::tile_call_uniq_total  = 0;
+        n64_profile::tile_call_chunks      = 0;
+        n64_profile::tile_call_tlut_evicts = 0;
+        n64_profile::tile_call_prims       = 0;
+        return;
+    }
 
     rdpq_set_mode_standard();
     rdpq_mode_tlut(TLUT_RGBA16);
@@ -575,6 +591,8 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     n64_profile::tile_call_chunks      = (uint32_t)n_chunks;
     n64_profile::tile_call_tlut_evicts =
         n64_profile::tile_tlut_uploads - pre_tlut_uploads;
+    n64_profile::tile_call_prims = n64_profile::prim_count - pre_prim_count;
+    n64_profile::tile_call_pass2_us = (uint32_t)(get_ticks_us() - pass2_t0);
 }
 
 // RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as
