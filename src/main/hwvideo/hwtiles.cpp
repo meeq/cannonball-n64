@@ -565,13 +565,17 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                                     uint8_t priority_draw,
                                     int x_offset, int y_offset)
 {
-    constexpr int ATLAS_MAX        = 64;
+    // Per-tile pack + TILE2 horizontal coalesce, mirroring
+    // render_rdp_tile_layers. Score digit runs (e.g. "0000000") collapse to
+    // one wider rect via TILE2's s.mask=3 wrap. HUD has well under 32 unique
+    // chars; steady-state is a single chunk.
+    constexpr int ATLAS_MAX        = 32;
     constexpr int ATLAS_PITCH      = 8;
     constexpr int ATLAS_TILE_H     = 8;
-    constexpr int ATLAS_PAIR_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
-    constexpr int ATLAS_BYTES      = (ATLAS_MAX / 2) * ATLAS_PAIR_BYTES; // 2048
+    constexpr int ATLAS_TILE_BYTES = ATLAS_TILE_H * ATLAS_PITCH; // 64
+    constexpr int ATLAS_BYTES      = ATLAS_MAX * ATLAS_TILE_BYTES; // 2048
     constexpr int K_ATLAS_RING     = 8;
-    constexpr int MAX_CHUNKS_PER_CALL = 4;
+    constexpr int MAX_CHUNKS_PER_CALL = 8;
 
     struct Visible { int16_t x, y; uint16_t slot; uint8_t colour; };
 
@@ -597,11 +601,14 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     int n_visible = 0;
     int n_unique  = 0;
 
+    // Walk only the on-screen rows. Text grid is 32 rows of 8px but
+    // S16_HEIGHT (224) caps usable text to my=0..27. Past that the cells
+    // would be culled anyway; early-break saves the per-row text_ram scan.
+    const int last_my = (S16_HEIGHT - 1) >> 3;
     uint32_t TileIndex = 0;
-    for (int my = 0; my < 32; my++)
+    for (int my = 0; my <= last_my; my++)
     {
         const int y = 8 * my;
-        if (y < 0 || y >= S16_HEIGHT) { TileIndex += 64 * 2; continue; }
 
         for (int mx = 0; mx < 64; mx++, TileIndex += 2)
         {
@@ -638,13 +645,13 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                 slot = (uint16_t)n_unique;
                 s_code_to_slot[Code] = slot;
                 s_used_codes[n_unique] = (uint16_t)Code;
-                const int pair_idx = n_unique >> 1;
-                const int in_pair  = n_unique & 1;
+                // Per-tile pack: tile data in left half of 8 TMEM lines;
+                // right half is padding (set_tile_size caps s at 8).
                 uint32_t* dst =
-                    (uint32_t*)&atlas_cur[pair_idx * ATLAS_PAIR_BYTES];
+                    (uint32_t*)&atlas_cur[n_unique * ATLAS_TILE_BYTES];
                 const uint32_t* src = &tiles[Code * 8];
                 for (int r = 0; r < 8; r++)
-                    dst[r * 2 + in_pair] = src[r];
+                    dst[r * 2] = src[r];
                 n_unique++;
             }
 
@@ -675,6 +682,11 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     rdpq_mode_alphacompare(1);
     rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
     rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
+    {
+        rdpq_tileparms_t parms2 = {};
+        parms2.s.mask = 3;
+        rdpq_set_tile(TILE2, FMT_CI4, 0, ATLAS_PITCH, &parms2);
+    }
 
     // 16-slot CI4 palette LRU cache (same pattern as render_rdp_tile_layers).
     // Text uses only Colour 0..7, so the cache reaches a steady state where
@@ -684,54 +696,96 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
     uint32_t tlut_seq   [N_TLUT_SLOTS] = {};
     for (int i = 0; i < N_TLUT_SLOTS; i++) tlut_colour[i] = -1;
     uint32_t next_seq = 1;
-    int      cur_tile_palette = 0;
+    int      cur_tile_palette  = 0;
+    int      cur_tile2_palette = 0;
+    int      prev_colour = -1;
+    int      prev_slot   = 0;
 
     int vis_start = 0;
     for (int c = 0; c < n_chunks; c++)
     {
         const int n_uniq_c       = chunk_uniq[c];
         const int vis_end        = chunk_vis_end[c];
-        const int n_pairs_c      = (n_uniq_c + 1) >> 1;
-        const int atlas_h_c      = n_pairs_c * ATLAS_TILE_H;
-        const int atlas_bytes_c  = n_pairs_c * ATLAS_PAIR_BYTES;
+        const int atlas_h_c      = n_uniq_c * ATLAS_TILE_H;
+        const int atlas_bytes_c  = n_uniq_c * ATLAS_TILE_BYTES;
         const int rgba16_texels  = atlas_bytes_c >> 1;
         uint8_t* atlas_c         = s_atlas_ring[chunk_ring_ix[c]];
 
         data_cache_hit_writeback(atlas_c, atlas_bytes_c);
-        rdpq_set_tile_size(TILE0, 0, 0, 16, atlas_h_c);
+        rdpq_set_tile_size(TILE0, 0, 0, 8, atlas_h_c);
+        rdpq_set_tile_size(TILE2, 0, 0, 8, atlas_h_c);
         rdpq_set_texture_image_raw(0, PhysicalAddr(atlas_c),
                                    FMT_RGBA16, ATLAS_PITCH / 2, atlas_h_c);
         rdpq_load_block(TILE1, 0, 0, rgba16_texels, ATLAS_PITCH);
 
-        for (int i = vis_start; i < vis_end; i++)
+        int i = vis_start;
+        while (i < vis_end)
         {
             const Visible& v = s_visible[i];
             const int colour = v.colour;
 
-            int slot = -1;
-            uint32_t best_seq = ~0u;
-            int best_i = 0;
-            for (int s = 0; s < N_TLUT_SLOTS; s++) {
-                if (tlut_colour[s] == colour) { slot = s; break; }
-                if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
-            }
-            if (slot < 0) {
-                slot = best_i;
-                rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
-                tlut_colour[slot] = colour;
+            int slot;
+            if (colour == prev_colour) {
+                slot = prev_slot;
+            } else {
+                slot = -1;
+                uint32_t best_seq = ~0u;
+                int best_i = 0;
+                for (int s = 0; s < N_TLUT_SLOTS; s++) {
+                    if (tlut_colour[s] == colour) { slot = s; break; }
+                    if (tlut_seq[s] < best_seq) { best_seq = tlut_seq[s]; best_i = s; }
+                }
+                if (slot < 0) {
+                    slot = best_i;
+                    rdpq_tex_upload_tlut((uint16_t*)&tile_tlut[colour * 16], slot * 16, 16);
+                    tlut_colour[slot] = colour;
+                }
+                prev_colour = colour;
+                prev_slot   = slot;
             }
             tlut_seq[slot] = ++next_seq;
-            if (slot != cur_tile_palette) {
-                rdpq_tileparms_t parms = {};
-                parms.palette = (uint8_t)slot;
-                rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
-                cur_tile_palette = slot;
+
+            const int t_base = v.slot * ATLAS_TILE_H;
+
+            // Horizontal coalesce: collapse runs of identical (slot, colour,
+            // y) chars at x+8, x+16, ... into one wider rect via TILE2's
+            // s.mask=3 wrap. Common in score digit runs.
+            int run_end = i + 1;
+            int next_x  = v.x + 8;
+            while (run_end < vis_end) {
+                const Visible& n = s_visible[run_end];
+                if (n.slot != v.slot || n.colour != colour
+                    || n.y != v.y || n.x != next_x)
+                    break;
+                run_end++;
+                next_x += 8;
             }
-            const int pair_idx = v.slot >> 1;
-            const int in_pair  = v.slot & 1;
-            rdpq_texture_rectangle(TILE0,
-                v.x, v.y, v.x + 8, v.y + 8,
-                in_pair * 8, pair_idx * ATLAS_TILE_H);
+            const int run_len = run_end - i;
+
+            if (run_len > 1) {
+                if (slot != cur_tile2_palette) {
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    parms.s.mask  = 3;
+                    rdpq_set_tile(TILE2, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                    cur_tile2_palette = slot;
+                }
+                rdpq_texture_rectangle(TILE2,
+                    v.x, v.y, v.x + 8 * run_len, v.y + 8,
+                    0, t_base);
+            } else {
+                if (slot != cur_tile_palette) {
+                    rdpq_tileparms_t parms = {};
+                    parms.palette = (uint8_t)slot;
+                    rdpq_set_tile(TILE0, FMT_CI4, 0, ATLAS_PITCH, &parms);
+                    cur_tile_palette = slot;
+                }
+                rdpq_texture_rectangle(TILE0,
+                    v.x, v.y, v.x + 8, v.y + 8,
+                    0, t_base);
+            }
+
+            i = run_end;
         }
         vis_start = vis_end;
     }
