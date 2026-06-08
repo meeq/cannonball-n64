@@ -42,6 +42,12 @@ namespace n64_profile
     uint32_t sub_us[SUB_COUNT] = {0};
     uint32_t prim_count = 0;
 
+    uint32_t raw_sub_us[SUB_COUNT] = {0};
+    uint32_t raw_wait_us    = 0;
+    uint32_t raw_aud_z80_us = 0;
+    uint32_t raw_aud_pcm_us = 0;
+    uint32_t raw_aud_mix_us = 0;
+
     uint32_t dropped_frames = 0;
     uint32_t min_wait_us    = 0xFFFFFFFF;
     uint32_t max_total_us   = 0;
@@ -54,6 +60,11 @@ namespace n64_profile
     uint32_t snap_text_tlut_uploads = 0;
     uint32_t tile_tlut_uploads      = 0;
     uint32_t text_tlut_uploads      = 0;
+
+    uint32_t tile_call_vis          = 0;
+    uint32_t tile_call_uniq_total   = 0;
+    uint32_t tile_call_chunks       = 0;
+    uint32_t tile_call_tlut_evicts  = 0;
 }
 
 Render::Render()
@@ -241,6 +252,7 @@ bool Render::finalize_frame()
     uint64_t t1 = get_ticks_us();
     const uint32_t raw_wait = (uint32_t)(t1 - t0);
     n64_profile::wait_us = (n64_profile::wait_us * 7 + raw_wait) >> 3;
+    n64_profile::raw_wait_us = raw_wait;
     // Track the *floor* of wait_us across the window — a near-zero floor while
     // fps drops indicates rdpq backpressure: display_get returns instantly
     // because the previous frame is still draining the RDP queue. EMA on
@@ -277,6 +289,7 @@ bool Render::finalize_frame()
     uint64_t rbg_t0 = get_ticks_us();
     hwroad.render_rdp_background(rgb, x, y_offset, src_width);
     uint64_t rbg_t1 = get_ticks_us();
+    n64_profile::raw_sub_us[n64_profile::SUB_ROAD_BG] = (uint32_t)(rbg_t1 - rbg_t0);
 #if N64_PROFILE_RDP_DRAIN
     rspq_wait();
     uint64_t rbg_t2 = get_ticks_us();
@@ -303,6 +316,7 @@ bool Render::finalize_frame()
     uint64_t tbg_t0 = get_ticks_us();
     video.tile_layer->render_rdp_tile_layers(tile_tlut, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
+    n64_profile::raw_sub_us[n64_profile::SUB_TILE_BG] = (uint32_t)(tbg_t1 - tbg_t0);
 #if N64_PROFILE_RDP_DRAIN
     rspq_wait();
     uint64_t tbg_t2 = get_ticks_us();
@@ -353,6 +367,7 @@ bool Render::finalize_frame()
     uint64_t spr_t0 = get_ticks_us();
     video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
     uint64_t spr_t1 = get_ticks_us();
+    n64_profile::raw_sub_us[n64_profile::SUB_SPRITE] = (uint32_t)(spr_t1 - spr_t0);
 #if N64_PROFILE_RDP_DRAIN
     rspq_wait();
     uint64_t spr_t2 = get_ticks_us();
@@ -372,6 +387,7 @@ bool Render::finalize_frame()
     uint64_t txt_t0 = get_ticks_us();
     video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
     uint64_t txt_t1 = get_ticks_us();
+    n64_profile::raw_sub_us[n64_profile::SUB_TEXT] = (uint32_t)(txt_t1 - txt_t0);
 #if N64_PROFILE_RDP_DRAIN
     rspq_wait();
     uint64_t txt_t2 = get_ticks_us();

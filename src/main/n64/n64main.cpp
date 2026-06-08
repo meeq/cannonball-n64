@@ -255,6 +255,68 @@ int main(int /*argc*/, char* /*argv*/[])
             n64_profile::max_total_us = frame_total_us;
         n64_profile::window_frames++;
 
+        // Outlier capture: log the raw per-pass breakdown of any frame whose
+        // total wall exceeds the OUTLIER_THRESHOLD_US. The dip log shows EMAs
+        // which dilute single-frame spikes — the actual cause of a 50 ms frame
+        // gets smoothed away. This logs *that* frame as it happened.
+        //
+        // Rate-limited to OUTLIER_LOG_MIN_GAP_US between emissions so a
+        // sustained 22 fps dip can't flood the USB log; the rare bad frame
+        // still gets through but a stuck-at-22 stretch only emits once a
+        // second. Floor on snapshot delta uses the raw per-pass counters
+        // (raw_sub_us, raw_aud_*_us, raw_wait_us) updated in finalize_frame /
+        // audio.tick — *not* the EMAs.
+        constexpr uint32_t OUTLIER_THRESHOLD_US  = 40000;
+        constexpr uint64_t OUTLIER_LOG_MIN_GAP_US = 1000000;
+        if (frame_total_us > OUTLIER_THRESHOLD_US)
+        {
+            static uint64_t last_outlier_us = 0;
+            if (t4 - last_outlier_us >= OUTLIER_LOG_MIN_GAP_US)
+            {
+                last_outlier_us = t4;
+                const uint32_t tick_us    = (uint32_t)(t1 - t0);
+                const uint32_t prepare_us = (uint32_t)(t2 - t1);
+                const uint32_t render_us  = (uint32_t)(t3 - t2);
+                const uint32_t audio_us   = (uint32_t)(t4 - t3);
+                debugf("OUT total=%5lu  tick=%4lu prep=%5lu rend=%5lu "
+                       "aud=%5lu wait=%5lu  "
+                       "rbg=%4lu tbg=%5lu rfg=%5lu spr=%5lu txt=%5lu  "
+                       "z80=%4lu pcm=%4lu mix=%4lu\n",
+                       (unsigned long)frame_total_us,
+                       (unsigned long)tick_us,
+                       (unsigned long)prepare_us,
+                       (unsigned long)render_us,
+                       (unsigned long)audio_us,
+                       (unsigned long)n64_profile::raw_wait_us,
+                       (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_ROAD_BG],
+                       (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_TILE_BG],
+                       (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_ROAD_FG],
+                       (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_SPRITE],
+                       (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_TEXT],
+                       (unsigned long)n64_profile::raw_aud_z80_us,
+                       (unsigned long)n64_profile::raw_aud_pcm_us,
+                       (unsigned long)n64_profile::raw_aud_mix_us);
+                // Sprite-cache state at the outlier — flagging an atlas reset
+                // (ovf bumped vs the prior outlier) immediately tells us the
+                // spike came from cache cold-start instead of normal load.
+                debugf("    spr.cache: ext=%4lu hit=%4lu ovf=%lu used=%lu\n",
+                       (unsigned long)video.sprite_layer->atlas_extract_count(),
+                       (unsigned long)video.sprite_layer->atlas_hit_count(),
+                       (unsigned long)video.sprite_layer->atlas_overflow_count(),
+                       (unsigned long)video.sprite_layer->atlas_used_bytes());
+                // Per-call tbg state — if tbg is 3.4× normal but vis/uniq/
+                // chunks/evicts look typical, the cost isn't in the obvious
+                // counters (then suspect RDP backpressure or DMA stalls).
+                // If chunks > 1 or evicts spike, the atlas/TLUT working set
+                // overflowed for this scene's tile diversity.
+                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu\n",
+                       (unsigned long)n64_profile::tile_call_vis,
+                       (unsigned long)n64_profile::tile_call_uniq_total,
+                       (unsigned long)n64_profile::tile_call_chunks,
+                       (unsigned long)n64_profile::tile_call_tlut_evicts);
+            }
+        }
+
 #ifdef CANNONBALL_LOG_PROFILE
         // Emit a profile line on two triggers:
         //   * DIP   — fps under 30, sampled every 8 frames so the log captures
@@ -330,6 +392,14 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)(cur_spr_ovf - n64_profile::snap_spr_overflows),
                        (unsigned long)(cur_tile_upl - n64_profile::snap_tile_tlut_uploads),
                        (unsigned long)(cur_text_upl - n64_profile::snap_text_tlut_uploads));
+                // Last-call tile.call values — baseline reference when fps is
+                // healthy. Compare against the OUT log to see how vis/uniq/
+                // chunks/evicts move on slow frames.
+                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu\n",
+                       (unsigned long)n64_profile::tile_call_vis,
+                       (unsigned long)n64_profile::tile_call_uniq_total,
+                       (unsigned long)n64_profile::tile_call_chunks,
+                       (unsigned long)n64_profile::tile_call_tlut_evicts);
                 // Reset window aggregates after each emit so the next line
                 // describes the next window, not the run-to-date.
                 n64_profile::dropped_frames = 0;

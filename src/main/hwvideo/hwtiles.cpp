@@ -10,6 +10,10 @@ namespace n64_profile {
     extern uint32_t prim_count;
     extern uint32_t tile_tlut_uploads;
     extern uint32_t text_tlut_uploads;
+    extern uint32_t tile_call_vis;
+    extern uint32_t tile_call_uniq_total;
+    extern uint32_t tile_call_chunks;
+    extern uint32_t tile_call_tlut_evicts;
 }
 
 /***************************************************************************
@@ -280,6 +284,19 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     int n_chunks = 0;
     uint8_t* atlas_cur = s_atlas_ring[s_ring_ix];
 
+    // Drop counter for the chunk-cap safety break. Counted per-call (not
+    // per-row) and reported via a periodic debugf below. Non-zero in steady
+    // state means MAX_CHUNKS_PER_CALL is too low for the current scene and
+    // tiles are being silently dropped — see music-select regression
+    // history in [[project-music-select-dashboard-missing]].
+    static uint32_t s_overflow_drops = 0;
+    bool overflow_hit = false;
+
+    // Snapshot the global TLUT upload counter so we can derive *this call's*
+    // eviction count as a delta at function exit. Cheaper than threading a
+    // local through every upload site.
+    const uint32_t pre_tlut_uploads = n64_profile::tile_tlut_uploads;
+
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
     int n_unique  = 0;
@@ -350,7 +367,10 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                     // the new chunk's slot 0. Code itself re-enters as a fresh
                     // unique in the new chunk's atlas.
                     if (n_unique >= ATLAS_MAX) {
-                        if (n_chunks >= MAX_CHUNKS_PER_CALL) break; // safety
+                        if (n_chunks >= MAX_CHUNKS_PER_CALL) {
+                            if (!overflow_hit) { s_overflow_drops++; overflow_hit = true; }
+                            break; // cap exceeded — see s_overflow_drops debugf below
+                        }
                         chunk_vis_end[n_chunks] = n_visible;
                         chunk_uniq   [n_chunks] = n_unique;
                         chunk_ring_ix[n_chunks] = s_ring_ix;
@@ -381,6 +401,24 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 s_visible[n_visible].colour = (uint8_t)Colour;
                 n_visible++;
             }
+            if (overflow_hit) break;
+        }
+        if (overflow_hit) break;
+    }
+
+    // Periodic report when the cap is being exceeded. Cadence (every 32nd
+    // call seen with non-zero drops) keeps the debugf out of the per-frame
+    // hot path; non-zero output means MAX_CHUNKS_PER_CALL needs bumping
+    // again. See [[feedback-silent-overflow-break]].
+    if (overflow_hit) {
+        static uint32_t s_overflow_probe = 0;
+        if ((++s_overflow_probe & 31) == 0) {
+            debugf("hwtiles: chunk cap %d hit %lu times — tiles dropped "
+                   "(prio=%d vis=%d chunks=%d/%d uniq=%d)\n",
+                   MAX_CHUNKS_PER_CALL, (unsigned long)s_overflow_drops,
+                   (int)priority_draw, n_visible, n_chunks,
+                   MAX_CHUNKS_PER_CALL, n_unique);
+            s_overflow_drops = 0;
         }
     }
 
@@ -526,6 +564,17 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         }
         vis_start = vis_end;
     }
+
+    // Per-call telemetry — consumed by the outlier logger in n64main to
+    // diagnose tbg cost variance. Sum chunk uniques (atlas LOAD work) and
+    // derive eviction count from the tlut_uploads delta.
+    uint32_t uniq_total = 0;
+    for (int c = 0; c < n_chunks; c++) uniq_total += (uint32_t)chunk_uniq[c];
+    n64_profile::tile_call_vis         = (uint32_t)n_visible;
+    n64_profile::tile_call_uniq_total  = uniq_total;
+    n64_profile::tile_call_chunks      = (uint32_t)n_chunks;
+    n64_profile::tile_call_tlut_evicts =
+        n64_profile::tile_tlut_uploads - pre_tlut_uploads;
 }
 
 // RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as

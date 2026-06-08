@@ -27,6 +27,7 @@
         uint32_t _us = (uint32_t)(_phase_t1 - _phase_t0);                 \
         n64_profile::sub_us[SLOT] =                                       \
             (n64_profile::sub_us[SLOT] * 7 + _us) >> 3;                   \
+        n64_profile::raw_sub_us[SLOT] = _us;                              \
         _phase_t0 = _phase_t1;                                            \
     } while (0)
 

@@ -436,6 +436,7 @@ void Audio::tick()
     advance_z80_audio();
     uint64_t t_z80_1 = get_ticks_us();
     smooth(n64_profile::aud_z80_us, t_z80_1 - t_z80_0);
+    n64_profile::raw_aud_z80_us = (uint32_t)(t_z80_1 - t_z80_0);
 
     if (!sound_enabled) return;
 
@@ -443,6 +444,7 @@ void Audio::tick()
     reconcile_pcm();
     uint64_t t_pcm_1 = get_ticks_us();
     smooth(n64_profile::aud_pcm_us, t_pcm_1 - t_pcm_0);
+    n64_profile::raw_aud_pcm_us = (uint32_t)(t_pcm_1 - t_pcm_0);
 
     const int blen = audio_get_buffer_length();
     if (blen <= 0) return;
@@ -463,4 +465,5 @@ void Audio::tick()
     }
     uint64_t t_mix_1 = get_ticks_us();
     smooth(n64_profile::aud_mix_us, t_mix_1 - t_mix_0);
+    n64_profile::raw_aud_mix_us = (uint32_t)(t_mix_1 - t_mix_0);
 }

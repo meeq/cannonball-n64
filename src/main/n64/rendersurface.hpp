@@ -46,6 +46,15 @@ namespace n64_profile
     extern uint32_t tile_tlut_uploads;
     extern uint32_t text_tlut_uploads;
 
+    // Per-call telemetry for render_rdp_tile_layers — set at the end of the
+    // call and read by the outlier logger. Used to diagnose why tbg cost
+    // varies 3.4× (~6.5ms → ~22ms) in tile-heavy, low-sprite scenes. Single
+    // call per frame, so the value at end-of-call == frame value.
+    extern uint32_t tile_call_vis;          // n_visible (tiles drawn)
+    extern uint32_t tile_call_uniq_total;   // sum of chunk_uniq[] (atlas LOAD work)
+    extern uint32_t tile_call_chunks;       // n_chunks (atlas rebuilds)
+    extern uint32_t tile_call_tlut_evicts;  // TLUT LRU evictions this call
+
     enum {
         SUB_ROAD_BG,
         SUB_TILE_BG,
@@ -55,6 +64,16 @@ namespace n64_profile
         SUB_COUNT
     };
     extern uint32_t sub_us[SUB_COUNT];
+
+    // Raw (un-smoothed) per-frame copies of the same buckets, written every
+    // render iter alongside the EMAs. The outlier logger in n64main needs to
+    // print what *this* frame cost — EMAs would dilute a 50 ms spike with
+    // surrounding normal frames and the breakdown wouldn't add up to total.
+    extern uint32_t raw_sub_us[SUB_COUNT];
+    extern uint32_t raw_wait_us;
+    extern uint32_t raw_aud_z80_us;
+    extern uint32_t raw_aud_pcm_us;
+    extern uint32_t raw_aud_mix_us;
 
     // Per-frame RDP primitive counter. Each rasterizer increments this at
     // every rdpq_*_rectangle / rdpq_tex_blit site (~1500/frame at peak,
