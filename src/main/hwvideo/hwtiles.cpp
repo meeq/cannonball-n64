@@ -6,9 +6,7 @@
 #include "frontend/config.hpp"
 #include <cstring>
 
-// TEMP — enable run-coalesce-potential probe in render_rdp_tile_layers.
-// Logs once every 60 calls (≈ once per second at 60fps render cadence).
-#define HWTILES_COALESCE_PROBE 0
+namespace n64_profile { extern uint32_t prim_count; }
 
 /***************************************************************************
     Video Emulation: OutRun Tilemap Hardware.
@@ -278,17 +276,11 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
     int n_unique  = 0;
-#ifdef HWTILES_COALESCE_PROBE
-    int n_visible_bg_end = 0;   // n_visible at end of BG pass
-#endif
 
     // Walk BG (page=1) first, then FG (page=0). BG must draw under FG.
     for (int pass = 0; pass < 2; pass++)
     {
         const uint8_t page_index = (pass == 0) ? 1 : 0;
-#ifdef HWTILES_COALESCE_PROBE
-        if (pass == 1) n_visible_bg_end = n_visible;
-#endif
 
         const uint16_t EffPage = page[page_index];
         uint16_t xScroll = scroll_x[page_index];
@@ -508,6 +500,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 rdpq_texture_rectangle(TILE2,
                     v.x, v.y, v.x + 8 * run_len, v.y + 8,
                     0, t_base);
+                n64_profile::prim_count++;
             } else {
                 if (slot != cur_tile_palette) {
                     rdpq_tileparms_t parms = {};
@@ -518,40 +511,13 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 rdpq_texture_rectangle(TILE0,
                     v.x, v.y, v.x + 8, v.y + 8,
                     0, t_base);
+                n64_profile::prim_count++;
             }
 
             i = run_end;
         }
         vis_start = vis_end;
     }
-
-#ifdef HWTILES_COALESCE_PROBE
-    // TEMP — coal = number of adjacent same-(slot,colour,y) pairs across the
-    // current visible list. With the per-tile pack every such pair is now
-    // collapsible into one wider rect, so coal equals primitives saved.
-    {
-        int coal = 0;
-        int s0 = 0;
-        for (int c = 0; c < n_chunks; c++) {
-            const int s1 = chunk_vis_end[c];
-            for (int i = s0 + 1; i < s1; i++) {
-                const Visible& a = s_visible[i - 1];
-                const Visible& b = s_visible[i];
-                if (a.slot == b.slot && a.colour == b.colour
-                    && a.y == b.y && b.x == a.x + 8)
-                    coal++;
-            }
-            s0 = s1;
-        }
-        static int probe_n = 0;
-        float fps = display_get_fps();
-        if (fps > 10.0f && fps < 30.0f && ((++probe_n & 7) == 0))
-            debugf("DIP tile p=%d vis=%4d (bg=%4d fg=%4d) chunks=%2d coal=%3d\n",
-                   (int)priority_draw, n_visible,
-                   n_visible_bg_end, n_visible - n_visible_bg_end,
-                   n_chunks, coal);
-    }
-#endif
 }
 
 // RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as
@@ -773,6 +739,7 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                 rdpq_texture_rectangle(TILE2,
                     v.x, v.y, v.x + 8 * run_len, v.y + 8,
                     0, t_base);
+                n64_profile::prim_count++;
             } else {
                 if (slot != cur_tile_palette) {
                     rdpq_tileparms_t parms = {};
@@ -783,6 +750,7 @@ void hwtiles::render_rdp_text_layer(const uint16_t* tile_tlut,
                 rdpq_texture_rectangle(TILE0,
                     v.x, v.y, v.x + 8, v.y + 8,
                     0, t_base);
+                n64_profile::prim_count++;
             }
 
             i = run_end;

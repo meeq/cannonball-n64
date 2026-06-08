@@ -40,13 +40,14 @@ namespace n64_profile
     uint32_t aud_pcm_us = 0;
     uint32_t aud_mix_us = 0;
     uint32_t sub_us[SUB_COUNT] = {0};
+    uint32_t prim_count = 0;
 }
 
 Render::Render()
     : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
       video_mode(0), scanlines(0), scale(1), shadow_multi(0),
       scratch_pixels(nullptr), scratch_uc_ptr(nullptr), scratch_surface{},
-      y_offset(0), fps_font(nullptr), initialized(false)
+      y_offset(0), initialized(false)
 {
 }
 
@@ -157,9 +158,6 @@ bool Render::init(int src_w, int src_h,
                      GAMMA_NONE, FILTERS_DISABLED);
         rdpq_init();
 
-        fps_font = rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_MONO);
-        rdpq_text_register_font(FPS_FONT_ID, fps_font);
-
         initialized = true;
     }
 
@@ -202,12 +200,6 @@ void Render::disable()
     }
     if (initialized)
     {
-        if (fps_font)
-        {
-            rdpq_text_unregister_font(FPS_FONT_ID);
-            rdpq_font_free(fps_font);
-            fps_font = nullptr;
-        }
         rdpq_close();
         display_close();
         initialized = false;
@@ -251,14 +243,19 @@ bool Render::finalize_frame()
     rdpq_set_scissor(x, y_offset, x + src_width, y_offset + src_height);
 
 #if N64_PROFILE_RDP_DRAIN
-    uint32_t rbg_emit = 0, rbg_drain = 0;
-    uint32_t tbg_emit = 0, tbg_drain = 0;
-    uint32_t spr_emit = 0, spr_drain = 0;
-    uint32_t txt_emit = 0, txt_drain = 0;
+    uint32_t rbg_emit = 0, rbg_drain = 0, rbg_prims = 0;
+    uint32_t tbg_emit = 0, tbg_drain = 0, tbg_prims = 0;
+    uint32_t rfg_prims = 0;
+    uint32_t spr_emit = 0, spr_drain = 0, spr_prims = 0;
+    uint32_t txt_emit = 0, txt_drain = 0, txt_prims = 0;
+    uint32_t prim_mark = 0;
 #endif
 
     // Road background: emit one rdpq_fill_rectangle per same-color band.
     // Configures fill mode internally; safe to call before the composite blit.
+#if N64_PROFILE_RDP_DRAIN
+    prim_mark = n64_profile::prim_count;
+#endif
     uint64_t rbg_t0 = get_ticks_us();
     hwroad.render_rdp_background(rgb, x, y_offset, src_width);
     uint64_t rbg_t1 = get_ticks_us();
@@ -267,6 +264,7 @@ bool Render::finalize_frame()
     uint64_t rbg_t2 = get_ticks_us();
     rbg_emit  = (uint32_t)(rbg_t1 - rbg_t0);
     rbg_drain = (uint32_t)(rbg_t2 - rbg_t1);
+    rbg_prims = n64_profile::prim_count - prim_mark;
 #endif
     n64_profile::sub_us[n64_profile::SUB_ROAD_BG] =
         (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
@@ -281,6 +279,9 @@ bool Render::finalize_frame()
     // at engine layer-5).
     data_cache_hit_writeback(tile_tlut, sizeof(tile_tlut));
 
+#if N64_PROFILE_RDP_DRAIN
+    prim_mark = n64_profile::prim_count;
+#endif
     uint64_t tbg_t0 = get_ticks_us();
     video.tile_layer->render_rdp_tile_layers(tile_tlut, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
@@ -289,13 +290,11 @@ bool Render::finalize_frame()
     uint64_t tbg_t2 = get_ticks_us();
     tbg_emit  = (uint32_t)(tbg_t1 - tbg_t0);
     tbg_drain = (uint32_t)(tbg_t2 - tbg_t1);
+    tbg_prims = n64_profile::prim_count - prim_mark;
 #endif
     n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
-    // tfg is now folded into tbg; keep the slot but report 0 so the overlay
-    // makes it visible at a glance that the merge happened.
-    n64_profile::sub_us[n64_profile::SUB_TILE_FG] = 0;
 
     // Composite the engine scratch surface on top. Standard mode + alpha
     // compare keeps RGBA5551 alpha=0 texels (untouched scratch background)
@@ -317,13 +316,22 @@ bool Render::finalize_frame()
         // RSP path is disabled or when RSP has already drained.
         if (n64::hwroad_rdp_rsp::enabled)
             n64::hwroad_rdp_rsp::sync_runs();
+#if N64_PROFILE_RDP_DRAIN
+        prim_mark = n64_profile::prim_count;
+#endif
         hwroad.emit_foreground_lores_rdp(x, y_offset);
+#if N64_PROFILE_RDP_DRAIN
+        rfg_prims = n64_profile::prim_count - prim_mark;
+#endif
     }
 
     // Sprite layer via RDP: opaque sprites are one blit each, shadow-flagged
     // sprites get a darken pass + body pass. Lives above the composite (so it
     // occludes road_fg) and below text.
     data_cache_hit_writeback(sprite_tlut, sizeof(sprite_tlut));
+#if N64_PROFILE_RDP_DRAIN
+    prim_mark = n64_profile::prim_count;
+#endif
     uint64_t spr_t0 = get_ticks_us();
     video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
     uint64_t spr_t1 = get_ticks_us();
@@ -332,6 +340,7 @@ bool Render::finalize_frame()
     uint64_t spr_t2 = get_ticks_us();
     spr_emit  = (uint32_t)(spr_t1 - spr_t0);
     spr_drain = (uint32_t)(spr_t2 - spr_t1);
+    spr_prims = n64_profile::prim_count - prim_mark;
 #endif
     n64_profile::sub_us[n64_profile::SUB_SPRITE] =
         (n64_profile::sub_us[n64_profile::SUB_SPRITE] * 7
@@ -339,6 +348,9 @@ bool Render::finalize_frame()
 
     // Text layer sits on top of everything. Uses the same TLUT cache as the
     // tile layers (Colour is 3-bit here, only slots 0..7 are touched).
+#if N64_PROFILE_RDP_DRAIN
+    prim_mark = n64_profile::prim_count;
+#endif
     uint64_t txt_t0 = get_ticks_us();
     video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
     uint64_t txt_t1 = get_ticks_us();
@@ -347,52 +359,31 @@ bool Render::finalize_frame()
     uint64_t txt_t2 = get_ticks_us();
     txt_emit  = (uint32_t)(txt_t1 - txt_t0);
     txt_drain = (uint32_t)(txt_t2 - txt_t1);
+    txt_prims = n64_profile::prim_count - prim_mark;
 #endif
     n64_profile::sub_us[n64_profile::SUB_TEXT] =
         (n64_profile::sub_us[n64_profile::SUB_TEXT] * 7
          + (uint32_t)(txt_t1 - txt_t0)) >> 3;
 
 #if N64_PROFILE_RDP_DRAIN
-    // Print one line per second so the USB log stays scannable. Pass widths
-    // are aligned with the on-screen overlay for easy cross-reference.
+    // Print one line per second so the USB log stays scannable.
     static uint32_t drain_log_frame = 0;
     if ((drain_log_frame++ % 60) == 0)
     {
-        debugf("rdp[%5lu] rbg e=%4lu d=%4lu  tbg e=%4lu d=%4lu  "
-               "spr e=%4lu d=%4lu  txt e=%4lu d=%4lu\n",
+        debugf("rdp[%5lu] rbg %3lup e=%4lu d=%4lu  tbg %4lup e=%4lu d=%4lu  "
+               "rfg %4lup  spr %3lup e=%4lu d=%4lu  txt %3lup e=%4lu d=%4lu\n",
                (unsigned long)drain_log_frame,
+               (unsigned long)rbg_prims,
                (unsigned long)rbg_emit, (unsigned long)rbg_drain,
+               (unsigned long)tbg_prims,
                (unsigned long)tbg_emit, (unsigned long)tbg_drain,
+               (unsigned long)rfg_prims,
+               (unsigned long)spr_prims,
                (unsigned long)spr_emit, (unsigned long)spr_drain,
+               (unsigned long)txt_prims,
                (unsigned long)txt_emit, (unsigned long)txt_drain);
     }
 #endif
-
-    // FPS + per-phase profile overlay via RDP. rdpq_text_printf submits its
-    // own mode setup, so the preceding copy-mode blit is fine to leave as-is.
-    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 20,
-                     "FPS %4.1f ras %5lu wait %5lu aud %5lu",
-                     display_get_fps(),
-                     (unsigned long)n64_profile::prepare_us,
-                     (unsigned long)n64_profile::wait_us,
-                     (unsigned long)n64_profile::audio_us);
-    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 30,
-                     "rbg%5lu tbg%5lu tfg%5lu rfg%5lu spr%5lu txt%5lu",
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_BG],
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_FG],
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_FG],
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_SPRITE],
-                     (unsigned long)n64_profile::sub_us[n64_profile::SUB_TEXT]);
-
-    // Audio cost breakdown: z80 catchup, segapcm reconcile, mixer_poll.
-    // YM2151 sample generation has been retired (wav64 dispatch covers
-    // all music + FM SFX) so there's no separate ym counter to track.
-    rdpq_text_printf(NULL, FPS_FONT_ID, 4, 40,
-                     "z80%5lu pcm%5lu mix%5lu",
-                     (unsigned long)n64_profile::aud_z80_us,
-                     (unsigned long)n64_profile::aud_pcm_us,
-                     (unsigned long)n64_profile::aud_mix_us);
 
     rdpq_detach_show();
     return true;

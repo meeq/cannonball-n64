@@ -208,11 +208,15 @@ int main(int /*argc*/, char* /*argv*/[])
 #ifndef CANNONBALL_WARMUP_TICKS
 #define CANNONBALL_WARMUP_TICKS 8
 #endif
-#define CANNONBALL_LOG_PROFILE 1     // TEMP — dump profile to debugf
+// CANNONBALL_LOG_PROFILE: dump per-frame timing breakdown to debugf on every
+// FPS dip below 30 (post-warmup). Set to 0 to silence the USB log during
+// extended play sessions. Cost is one display_get_fps() + a branch per frame.
+#define CANNONBALL_LOG_PROFILE 1
     for (int i = 0; i < CANNONBALL_WARMUP_TICKS; i++)
         tick_engine();
 
-    // EMA smoothing for on-screen profile counters so they don't strobe.
+    // EMA smoothing for the n64_profile counters so the dip log doesn't
+    // strobe on single-frame spikes.
     auto smooth = [](uint32_t& acc, uint64_t sample)
     {
         acc = (uint32_t)((acc * 7 + sample) >> 3);
@@ -223,25 +227,15 @@ int main(int /*argc*/, char* /*argv*/[])
         uint64_t t0 = get_ticks_us();
         tick_engine();
         uint64_t t1 = get_ticks_us();
-
-        // The rasterizers (hwroad/hwtiles/hwsprites) are by far the most
-        // expensive CPU work each frame. With config.video.fps = 1 tick_frame
-        // alternates 1/0, and engine state only advances on tick frames — so
-        // the scratch surface is bit-identical on the off-frames. Skip the
-        // CPU prepare pass in that case; render_frame() still runs every
-        // loop so display_get() continues to pace us.
-        if (tick_frame)
-            video.prepare_frame();
+        video.prepare_frame();
         uint64_t t2 = get_ticks_us();
-
         video.render_frame();
         uint64_t t3 = get_ticks_us();
-
         audio.tick();
         uint64_t t4 = get_ticks_us();
 
         smooth(n64_profile::tick_us,    t1 - t0);
-        if (tick_frame) smooth(n64_profile::prepare_us, t2 - t1);
+        smooth(n64_profile::prepare_us, t2 - t1);
         smooth(n64_profile::render_us,  t3 - t2);
         smooth(n64_profile::audio_us,   t4 - t3);
 
@@ -249,22 +243,37 @@ int main(int /*argc*/, char* /*argv*/[])
         // Only emit when fps drops below 30 (post-warmup) so the log stays
         // quiet during normal play and only captures genuine dips. The
         // display_get_fps() smoothed counter ramps from 0 during startup, so
-        // gate on >10 to ignore the initial spin-up.
+        // gate on >10 to ignore the initial spin-up. `wait` is the time
+        // display_get() blocked on vsync; subtracting it from `total` yields
+        // the active work per iteration — the 16667 us budget number.
         {
             static int log_n = 0;
             float fps = display_get_fps();
             if (fps > 10.0f && fps < 30.0f && ((++log_n & 7) == 0))
-                debugf("DIP fps=%4.1f ras=%5lu wait=%5lu "
-                       "rbg=%4lu tbg=%5lu tfg=%5lu rfg=%5lu spr=%5lu txt=%5lu\n",
-                       fps,
+            {
+                uint32_t total = n64_profile::tick_us + n64_profile::prepare_us
+                               + n64_profile::render_us + n64_profile::audio_us;
+                uint32_t active = (total > n64_profile::wait_us)
+                                ? total - n64_profile::wait_us : 0;
+                debugf("DIP fps=%4.1f active=%5lu total=%5lu  "
+                       "tick=%4lu prep=%5lu rend=%5lu aud=%5lu wait=%5lu\n",
+                       fps, (unsigned long)active, (unsigned long)total,
+                       (unsigned long)n64_profile::tick_us,
                        (unsigned long)n64_profile::prepare_us,
-                       (unsigned long)n64_profile::wait_us,
+                       (unsigned long)n64_profile::render_us,
+                       (unsigned long)n64_profile::audio_us,
+                       (unsigned long)n64_profile::wait_us);
+                debugf("    rbg=%4lu tbg=%5lu rfg=%5lu spr=%5lu txt=%5lu  "
+                       "z80=%4lu pcm=%4lu mix=%4lu\n",
                        (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_BG],
                        (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_BG],
-                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TILE_FG],
                        (unsigned long)n64_profile::sub_us[n64_profile::SUB_ROAD_FG],
                        (unsigned long)n64_profile::sub_us[n64_profile::SUB_SPRITE],
-                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TEXT]);
+                       (unsigned long)n64_profile::sub_us[n64_profile::SUB_TEXT],
+                       (unsigned long)n64_profile::aud_z80_us,
+                       (unsigned long)n64_profile::aud_pcm_us,
+                       (unsigned long)n64_profile::aud_mix_us);
+            }
         }
 #endif
     }

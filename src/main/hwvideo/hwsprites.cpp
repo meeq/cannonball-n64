@@ -7,6 +7,8 @@
 #include <cstring>
 #include <malloc.h>
 
+namespace n64_profile { extern uint32_t prim_count; }
+
 /***************************************************************************
     Video Emulation: OutRun Sprite Rendering Hardware.
     Based on MAME source code.
@@ -383,7 +385,10 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     if (!atlas_pool) atlas_init();
     if (!atlas_pool) return;
 
-#define HWSPR_PROFILE 1
+// Set to 1 to enable per-sprite counters (atlas loads, shadow tight-bbox %,
+// palette-cache hit rate). Adds ~10 counter ops per sprite × ~80-150 sprites/
+// frame, so leave off in steady-state measurement.
+#define HWSPR_PROFILE 0
 #if HWSPR_PROFILE
     uint64_t prof_t0 = get_ticks_us();
     uint32_t prof_total = 0;
@@ -695,6 +700,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                         : (dst_y + (float)sy1 * scale_y);
                     rdpq_texture_rectangle_scaled(TILE0, sdx0, sdy0, sdx1, sdy1,
                                                   sx0, sy0, sx1, sy1);
+                    n64_profile::prim_count++;
 #if HWSPR_PROFILE
                     prof_pix_shadow_full  += (uint32_t)(zoomed_w * zoomed_h);
                     {
@@ -735,6 +741,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 bind_tile0(TLUT_SLOT_SHADOW_BODY);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
+                n64_profile::prim_count++;
             }
             else
             {
@@ -789,6 +796,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 bind_tile0(TLUT_SLOT_OPAQUE_BASE + slot);
                 rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
                                               0, 0, e->w, e->h);
+                n64_profile::prim_count++;
             }
             continue;
         }
@@ -816,6 +824,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             }
             rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
+            n64_profile::prim_count++;
 
             if (pipeline != 0)
             {
@@ -832,6 +841,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             scratch_uc[10] = 0;
             rdpq_tex_upload_tlut(scratch, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
+            n64_profile::prim_count++;
         }
         else
         {
@@ -843,6 +853,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             }
             rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
             rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
+            n64_profile::prim_count++;
         }
         // tex_blit clobbers TILE0/TILE1 and uploads its TLUT to palette
         // slot 0, so invalidate the bypass cache for slots 0/TILE0. Slots

@@ -11,10 +11,9 @@
 #include "../stdint.hpp"
 #include "../globals.hpp"
 #include <libdragon.h>
-#include <rdpq_font.h>
 
-// Per-phase timings (microseconds, EMA-smoothed). Updated by n64main /
-// video.cpp and consumed by the FPS overlay.
+// Per-phase timings (microseconds, EMA-smoothed). Updated by n64main and
+// finalize_frame; consumed by the CANNONBALL_LOG_PROFILE dip log in n64main.
 namespace n64_profile
 {
     extern uint32_t prepare_us;   // total prepare_frame
@@ -29,13 +28,20 @@ namespace n64_profile
     enum {
         SUB_ROAD_BG,
         SUB_TILE_BG,
-        SUB_TILE_FG,
         SUB_ROAD_FG,
         SUB_SPRITE,
         SUB_TEXT,
         SUB_COUNT
     };
     extern uint32_t sub_us[SUB_COUNT];
+
+    // Per-frame RDP primitive counter. Each rasterizer increments this at
+    // every rdpq_*_rectangle / rdpq_tex_blit site (~1500/frame at peak,
+    // ~30us of L1 store traffic — kept alive even when N64_PROFILE_RDP_DRAIN
+    // is off so flipping that flag immediately produces a per-pass prim
+    // breakdown). rendersurface snapshots it before/after each phase only
+    // when DRAIN is enabled.
+    extern uint32_t prim_count;
 }
 
 class Render
@@ -114,10 +120,6 @@ private:
     uint16_t*  scratch_uc_ptr;
     surface_t  scratch_surface;
     int        y_offset;          // letterbox top (pixels)
-
-    // RDP-drawn FPS overlay (builtin libdragon debug font).
-    rdpq_font_t* fps_font;
-    static constexpr uint8_t FPS_FONT_ID = 1;
 
     bool       initialized;
 };

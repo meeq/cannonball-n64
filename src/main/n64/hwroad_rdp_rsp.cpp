@@ -478,7 +478,7 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         }
     }
 
-    if ((rsp::s_frame % 60) == 0) {
+    if ((rsp::s_frame % 60) == 0 && display_get_fps() < 30.0f) {
         debugf("hwroad_rdp_rsp: wait=%lu cpu=%lu kick=%lu\n",
                (unsigned long)sub_wait,
                (unsigned long)(t_cpu_end - t0),

@@ -4,6 +4,8 @@
 #include "globals.hpp"
 #include "frontend/config.hpp"
 
+namespace n64_profile { extern uint32_t prim_count; }
+
 /***************************************************************************
     Video Emulation: OutRun Road Rendering Hardware.
     Based on MAME source code.
@@ -292,6 +294,7 @@ void HWRoad::render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_
                                     y_offset + band_start,
                                     x_offset + s16_width,
                                     y_offset + y);
+                n64_profile::prim_count++;
             }
             band_start = y;
             prev_color = color;

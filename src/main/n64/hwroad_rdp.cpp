@@ -38,6 +38,8 @@
 #include <cstddef>
 #include <cstring>
 
+namespace n64_profile { extern uint32_t prim_count; }
+
 namespace n64
 {
 namespace hwroad_rdp
@@ -218,7 +220,7 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
     const uint8_t ctrl = road_control & 3;
     s_frame++;
 
-    if ((s_frame % 60) == 0)
+    if ((s_frame % 60) == 0 && display_get_fps() < 30.0f)
         debugf("hwroad_rdp: ctrl=%u last_us=%lu\n",
                (unsigned)ctrl, (unsigned long)last_us);
 
@@ -536,7 +538,7 @@ void HWRoad::build_foreground_lores_rdp(const uint16_t* rgb_lut)
     uint64_t tA = get_ticks_us();
     last_us = (last_us * 7 + (uint32_t)(tA - t0)) >> 3;
 
-    if ((s_frame % 60) == 0) {
+    if ((s_frame % 60) == 0 && display_get_fps() < 30.0f) {
         debugf("hwroad_rdp build: wait=%lu tlut=%lu spans=%lu fill=%lu rows=%lu runs=%lu ovf=%lu total=%lu\n",
                (unsigned long)sub_wait,
                (unsigned long)sub_tlut,
@@ -581,6 +583,7 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     // multi-row rectangle. Tunnel rows have long stretches of identical
     // OOB colour, so a worst-case 224 single-pixel fills collapses to a
     // few dozen taller rects.
+    uint32_t phase_a_rects = 0;
     {
         int      run_start = -1;
         uint16_t run_color = 0;
@@ -597,6 +600,8 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
                 }
                 rdpq_fill_rectangle(x_off, y_off + run_start,
                                     x_off + W, y_off + y);
+                n64_profile::prim_count++;
+                phase_a_rects++;
                 run_start = -1;
             }
             if (active && run_start < 0) {
@@ -642,6 +647,7 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
         }
         rdpq_fill_rectangle(x_off + o.x0, y_off + o.y_start,
                             x_off + o.x1, y_off + y_end);
+        n64_profile::prim_count++;
         rects++;
     };
 
@@ -716,8 +722,9 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     {
         float fps = display_get_fps();
         if (fps > 10.0f && fps < 30.0f && (s_frame & 7) == 0) {
-            debugf("DIP hwroad_rdp emit: fill=%lu runs=%lu rects=%lu total=%lu\n",
+            debugf("DIP hwroad_rdp emit: fill=%lu (%lup) runs=%lu (%lup) total=%lu\n",
                    (unsigned long)(tB - t0),
+                   (unsigned long)phase_a_rects,
                    (unsigned long)(tC - tB),
                    (unsigned long)rects,
                    (unsigned long)(tC - t0));
