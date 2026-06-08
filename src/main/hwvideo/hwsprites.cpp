@@ -307,9 +307,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     // high nibble — matches the layout the RDP expects on N64. Pixels are
     // emitted in canonical left-to-right screen order regardless of flip, so
     // mirror_x at blit time depends only on xdelta. Tracks whether any pixel
-    // resolves to slot 0xa (shadow slot) so the render path can elide the
-    // 2-cycle shadow darken pass for sprites that carry no shadow silhouette.
-    uint8_t has_shadow = 0;
+    // resolves to slot 0xa (shadow slot) plus its tight bounding box, so the
+    // render path can elide or shrink the 2-cycle shadow darken pass.
+    uint8_t  has_shadow = 0;
+    uint16_t sh_x0 = 0xFFFF, sh_y0 = 0xFFFF, sh_x1 = 0, sh_y1 = 0;
     {
         uint32_t row_base = addr;
         for (int row = 0; row < (int)h; row++)
@@ -328,7 +329,14 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                         ? ((pixels >> (4 * n)) & 0xf)
                         : ((pixels >> (28 - 4 * n)) & 0xf);
                     if (pix == 0xf) pix = 0;  // EOR sentinel collapses to transparent
-                    if (pix == 0xa) has_shadow = 1;
+                    if (pix == 0xa)
+                    {
+                        has_shadow = 1;
+                        if ((uint16_t)col < sh_x0) sh_x0 = (uint16_t)col;
+                        if ((uint16_t)col >= sh_x1) sh_x1 = (uint16_t)(col + 1);
+                        if ((uint16_t)row < sh_y0) sh_y0 = (uint16_t)row;
+                        if ((uint16_t)row >= sh_y1) sh_y1 = (uint16_t)(row + 1);
+                    }
                     uint8_t* bp = row_dst + (col >> 1);
                     if (col & 1) *bp = (uint8_t)((*bp & 0xf0) | pix);
                     else         *bp = (uint8_t)(pix << 4);
@@ -351,6 +359,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     e.w          = w;
     e.h          = h;
     e.has_shadow = has_shadow;
+    e.shadow_x0  = sh_x0;
+    e.shadow_y0  = sh_y0;
+    e.shadow_x1  = sh_x1;
+    e.shadow_y1  = sh_y1;
     atlas_extracts++;
     return &e;
 }
@@ -386,6 +398,8 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     uint32_t prof_palette_only = 0;   // # sprites that only rebound palette
     uint32_t prof_no_setup = 0;       // # sprites that reused atlas+palette
     uint32_t prof_shadow_demoted = 0; // # shadow-flagged sprites with no slot-0xa pixels
+    uint32_t prof_pix_shadow_full = 0;  // shadow zoom_pix if rect was full sprite
+    uint32_t prof_pix_shadow_tight = 0; // shadow zoom_pix using tight bbox
     uint32_t prof_pix_zoomed_max = 0; // largest single sprite (px)
     uint32_t prof_bucket_huge = 0;    // sprites with zoom_pix > 4000
     uint32_t prof_bucket_mid  = 0;    // sprites with 1000 < zoom_pix <= 4000
@@ -645,8 +659,37 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 }
 #endif
                 bind_tile0(TLUT_SLOT_SHADOW_MASK);
-                rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1,
-                                              0, 0, e->w, e->h);
+                // Tight shadow rect — the darken pass uses a 2-cycle blender,
+                // so trimming the rasterised area to the slot-0xa bounding box
+                // is roughly twice as valuable per pixel as the body pass.
+                {
+                    const uint16_t sx0 = e->shadow_x0;
+                    const uint16_t sy0 = e->shadow_y0;
+                    const uint16_t sx1 = e->shadow_x1;
+                    const uint16_t sy1 = e->shadow_y1;
+                    const float sdx0 = mirror_x
+                        ? (dst_x + zoomed_w - (float)sx0 * scale_x)
+                        : (dst_x + (float)sx0 * scale_x);
+                    const float sdx1 = mirror_x
+                        ? (dst_x + zoomed_w - (float)sx1 * scale_x)
+                        : (dst_x + (float)sx1 * scale_x);
+                    const float sdy0 = mirror_y
+                        ? (dst_y + zoomed_h - (float)sy0 * scale_y)
+                        : (dst_y + (float)sy0 * scale_y);
+                    const float sdy1 = mirror_y
+                        ? (dst_y + zoomed_h - (float)sy1 * scale_y)
+                        : (dst_y + (float)sy1 * scale_y);
+                    rdpq_texture_rectangle_scaled(TILE0, sdx0, sdy0, sdx1, sdy1,
+                                                  sx0, sy0, sx1, sy1);
+#if HWSPR_PROFILE
+                    prof_pix_shadow_full  += (uint32_t)(zoomed_w * zoomed_h);
+                    {
+                        float tw = (sdx1 > sdx0) ? (sdx1 - sdx0) : (sdx0 - sdx1);
+                        float th = (sdy1 > sdy0) ? (sdy1 - sdy0) : (sdy0 - sdy1);
+                        prof_pix_shadow_tight += (uint32_t)(tw * th);
+                    }
+#endif
+                }
 
                 // Pass 2 — opaque body. Pixel data already in TMEM from the
                 // mask pass, so only the TLUT and combiner/blender need to
@@ -806,24 +849,23 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         uint32_t dh = atlas_hits - prev_hits;
         prev_extracts = atlas_extracts;
         prev_hits     = atlas_hits;
-        debugf("spr[%5lu] n=%3lu(o=%2lu,s=%2lu,demo=%2lu) zoom=%6lu(max=%5lu H=%2lu M=%2lu S=%2lu) "
-               "load=%2lu palOnly=%2lu noSet=%2lu atl(h=%3lu,m=%2lu) us=%5lu\n",
+        debugf("spr[%5lu] n=%3lu(o=%2lu,s=%2lu,demo=%2lu) zoom=%6lu "
+               "shFull=%6lu shTight=%6lu (%2lu%%) load=%2lu palOnly=%2lu noSet=%2lu us=%5lu\n",
                (unsigned long)prof_frame,
                (unsigned long)prof_total,
                (unsigned long)prof_opaque,
                (unsigned long)prof_shadow,
                (unsigned long)prof_shadow_demoted,
                (unsigned long)prof_pix_zoomed,
-               (unsigned long)prof_pix_zoomed_max,
-               (unsigned long)prof_bucket_huge,
-               (unsigned long)prof_bucket_mid,
-               (unsigned long)prof_bucket_small,
+               (unsigned long)prof_pix_shadow_full,
+               (unsigned long)prof_pix_shadow_tight,
+               (unsigned long)(prof_pix_shadow_full
+                   ? (prof_pix_shadow_tight * 100UL / prof_pix_shadow_full) : 0),
                (unsigned long)prof_atlas_loads,
                (unsigned long)prof_palette_only,
                (unsigned long)prof_no_setup,
-               (unsigned long)dh,
-               (unsigned long)dx,
                (unsigned long)(prof_t1 - prof_t0));
+        (void)dh; (void)dx;
     }
 #endif
 }

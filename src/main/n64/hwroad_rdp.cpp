@@ -567,45 +567,149 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     uint64_t t0 = get_ticks_us();
     const int W = config.s16_width;
 
-    // ---- Phase 2a: per-line c_oob fill ------------------------------------
-
+    // Track the last colour we pushed to the RDP across both phases so we can
+    // skip redundant set_fill_color emits. In tunnel scenes typical row
+    // sequences share their OOB colour and many adjacent runs repeat the same
+    // body colour, so dedup cuts both CPU emit work and RDP command bandwidth.
     rdpq_set_mode_fill(RGBA32(0, 0, 0, 0));
-    for (int y = 0; y < MAX_LINES; y++)
+    uint16_t last_color5551 = 0;
+    bool     color_valid    = false;
+
+    // ---- Phase 2a: per-line c_oob fill ------------------------------------
+    //
+    // Coalesce adjacent non-SKIP rows sharing the same c_oob into one
+    // multi-row rectangle. Tunnel rows have long stretches of identical
+    // OOB colour, so a worst-case 224 single-pixel fills collapses to a
+    // few dozen taller rects.
     {
-        if (line[y].kind == SKIP) continue;
-        rdpq_set_fill_color(rgba32_from_5551(line[y].c_oob));
-        rdpq_fill_rectangle(x_off, y_off + y,
-                            x_off + W, y_off + y + 1);
+        int      run_start = -1;
+        uint16_t run_color = 0;
+        for (int y = 0; y <= MAX_LINES; y++)
+        {
+            const bool active = (y < MAX_LINES) && (line[y].kind != SKIP);
+            const uint16_t c  = active ? line[y].c_oob : 0;
+            const bool ends   = (run_start >= 0) && (!active || c != run_color);
+            if (ends) {
+                if (!color_valid || run_color != last_color5551) {
+                    rdpq_set_fill_color(rgba32_from_5551(run_color));
+                    last_color5551 = run_color;
+                    color_valid    = true;
+                }
+                rdpq_fill_rectangle(x_off, y_off + run_start,
+                                    x_off + W, y_off + y);
+                run_start = -1;
+            }
+            if (active && run_start < 0) {
+                run_start = y;
+                run_color = c;
+            }
+        }
     }
 
     uint64_t tB = get_ticks_us();
 
     // ---- Phase 2b: per-run fill rectangles --------------------------------
+    //
+    // Single-pass vertical coalesce: keep a list of "open" rects from the
+    // previous row. For each visible run in row y, find a matching open rect
+    // (same x0/x1/color) — if found, extend the open rect's y range; if not,
+    // start a new open. Open rects that didn't continue are emitted at the
+    // top of the next row's pass. Tunnel scenes have many short vertical
+    // bars (overpass beams, sky strips) that collapse from N 1-pixel rects
+    // into one taller rect, cutting both CPU emit work and RDP command
+    // bandwidth roughly in half.
+    //
+    // x0/x1 perspective-shift between rows in the road body kills matching
+    // for most road runs, so the gains come from the static-x regions
+    // (above-horizon sky bands, tunnel-wall strips) where x0/x1 are constant
+    // across many rows.
 
-    // Still in fill mode from Phase 2a. Walk each DRAW row's run list and
-    // emit one rdpq_fill_rectangle per visible run (colour != c_oob).
-    // Transparent slots (tlut value 0) also skip the emit, matching what
-    // the old alphacompare path did.
+    struct OpenRect { uint16_t x0, x1, color; uint16_t y_start; };
+    // Bound: at most one open per visible run per row, capped by
+    // MAX_RUNS_PER_ROW. Double-buffer for "current row about to open" vs
+    // "carried from prior row".
+    OpenRect open[MAX_RUNS_PER_ROW];
+    OpenRect next_open[MAX_RUNS_PER_ROW];
+    int n_open = 0;
+
     uint32_t rects = 0;
+
+    auto emit_open = [&](const OpenRect& o, int y_end) {
+        if (!color_valid || o.color != last_color5551) {
+            rdpq_set_fill_color(rgba32_from_5551(o.color));
+            last_color5551 = o.color;
+            color_valid    = true;
+        }
+        rdpq_fill_rectangle(x_off + o.x0, y_off + o.y_start,
+                            x_off + o.x1, y_off + y_end);
+        rects++;
+    };
+
     for (int y = 0; y < MAX_LINES; y++)
     {
-        if (line[y].kind != DRAW) continue;
-        const Run*     runs   = runs_ptr(y);
-        const int      n      = line[y].n_runs;
-        const uint16_t c_oob  = line[y].c_oob;
-        int prev_x = line[y].s_start;
-        for (int r = 0; r < n; r++) {
-            const uint16_t color = runs[r].color5551;
-            const int      xe    = runs[r].x_end;
-            if (color != c_oob && color != 0 && xe > prev_x) {
-                rdpq_set_fill_color(rgba32_from_5551(color));
-                rdpq_fill_rectangle(x_off + prev_x, y_off + y,
-                                    x_off + xe,     y_off + y + 1);
-                rects++;
+        int n_next = 0;
+        // Track which prior-row opens get continued; the rest emit at y.
+        uint32_t consumed = 0;
+
+        if (line[y].kind == DRAW) {
+            const Run*     runs   = runs_ptr(y);
+            const int      n      = line[y].n_runs;
+            const uint16_t c_oob  = line[y].c_oob;
+            int prev_x = line[y].s_start;
+            for (int r = 0; r < n; r++) {
+                const uint16_t color = runs[r].color5551;
+                const int      xe    = runs[r].x_end;
+                if (color != c_oob && color != 0 && xe > prev_x) {
+                    // In-row horizontal coalesce: if the immediately previous
+                    // opened entry abuts (x1==prev_x) with the same color,
+                    // extend its x1 instead of opening a new rect. Both
+                    // continued and freshly-opened entries are fair game —
+                    // mutating a continued open's x1 just means future rows
+                    // will need to match the wider extent to continue, which
+                    // is the desired behaviour for static-x bands.
+                    if (n_next > 0
+                        && next_open[n_next - 1].color == color
+                        && next_open[n_next - 1].x1    == (uint16_t)prev_x) {
+                        next_open[n_next - 1].x1 = (uint16_t)xe;
+                    } else {
+                        int matched = -1;
+                        for (int o = 0; o < n_open; o++) {
+                            if (consumed & (1u << o)) continue;
+                            if (open[o].x0 == prev_x && open[o].x1 == xe
+                                && open[o].color == color) {
+                                matched = o;
+                                break;
+                            }
+                        }
+                        if (matched >= 0) {
+                            consumed |= (1u << matched);
+                            next_open[n_next++] = open[matched];
+                        } else {
+                            next_open[n_next].x0      = (uint16_t)prev_x;
+                            next_open[n_next].x1      = (uint16_t)xe;
+                            next_open[n_next].color   = color;
+                            next_open[n_next].y_start = (uint16_t)y;
+                            n_next++;
+                        }
+                    }
+                }
+                prev_x = xe;
             }
-            prev_x = xe;
         }
+
+        // Close any prior-row opens that didn't continue.
+        for (int o = 0; o < n_open; o++) {
+            if (!(consumed & (1u << o)))
+                emit_open(open[o], y);
+        }
+
+        // Swap.
+        for (int i = 0; i < n_next; i++) open[i] = next_open[i];
+        n_open = n_next;
     }
+
+    // Flush any opens still active after the last row.
+    for (int o = 0; o < n_open; o++) emit_open(open[o], MAX_LINES);
 
     uint64_t tC = get_ticks_us();
 

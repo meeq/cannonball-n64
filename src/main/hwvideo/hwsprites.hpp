@@ -66,6 +66,11 @@ private:
         uint16_t w;       // native pixel width (multiple of 8)
         uint16_t h;       // native pixel height
         uint8_t  has_shadow; // 1 if any pixel uses slot 0xa, else 0
+        // Tight bounding box of slot-0xa pixels (inclusive sx0/sy0, exclusive
+        // sx1/sy1). Lets render_rdp shrink the 2-cycle shadow rect to just the
+        // shadow silhouette region instead of the full sprite footprint.
+        // Undefined when has_shadow == 0.
+        uint16_t shadow_x0, shadow_y0, shadow_x1, shadow_y1;
     };
     AtlasEntry atlas_entries[ATLAS_CAPACITY];
     uint8_t*   atlas_pool;
