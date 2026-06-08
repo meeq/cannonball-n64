@@ -52,6 +52,16 @@ namespace hwroad_rdp
     // signature so future per-case fallbacks have a hook.
     bool should_skip_cpu(uint8_t road_control);
 
+    // Single source of truth for "should ANY road_fg render this frame?"
+    // Returns false when the engine has suppressed road_fg (currently:
+    // fix_bugs is on AND oroad.horizon_base == HORIZON_OFF — the
+    // music-select screen sets that to hide the road). Both
+    // Video::prepare_frame and Render_RDP::finalize_frame consult this
+    // function so build and emit can never disagree on whether road_fg
+    // should run; previously the build site held the predicate inline
+    // and the emit site replayed stale line[]/runs_buf on skip frames.
+    bool should_render_road_fg();
+
     // Last frame's RDP-side cost (EMA µs). Currently bundles the CPU mask
     // build + rspq emit. Drain time is best measured via rspq_wait at the
     // call site; this counter is just the emit time.

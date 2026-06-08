@@ -31,6 +31,7 @@
 #include "n64/hwroad_rdp_internal.hpp"
 #include "n64/platform.hpp"
 #include "hwvideo/hwroad.hpp"
+#include "engine/oroad.hpp"          // ORoad::HORIZON_OFF, ::oroad
 #include "frontend/config.hpp"
 
 #include <libdragon.h>
@@ -194,6 +195,18 @@ void shutdown()
 bool should_skip_cpu(uint8_t /*road_control*/)
 {
     return enabled;
+}
+
+bool should_render_road_fg()
+{
+    // Mirrors the engine-side suppression check formerly inlined at
+    // video.cpp's prepare_frame and applied (until now) only there.
+    // OMusic::enable sets horizon_base = HORIZON_OFF to drop the road on
+    // the music-select screen; with fix_bugs on we honour that. Without
+    // fix_bugs (legacy SDL behaviour) we keep rendering road_fg so the
+    // change is a no-op outside the bug-fix path.
+    return !config.engine.fix_bugs ||
+           oroad.horizon_base != ORoad::HORIZON_OFF;
 }
 
 } // namespace hwroad_rdp

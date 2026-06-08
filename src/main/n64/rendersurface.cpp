@@ -342,7 +342,14 @@ bool Render::finalize_frame()
     // scratch is all alpha=0 in the road area, so the blit above contributed
     // nothing here and we paint into a clean framebuffer. This just emits
     // the prebuilt CI4 mask + per-line TLUTs into rdpq.
-    if (n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control())) {
+    //
+    // should_render_road_fg() mirrors the build-side predicate at
+    // video.cpp's prepare_frame: when the engine suppresses road_fg (e.g.
+    // music-select sets horizon_base = HORIZON_OFF), build was skipped and
+    // line[]/runs_buf hold stale geometry from the prior frame. Emitting
+    // that would paint last frame's road over an unrelated scene.
+    if (n64::hwroad_rdp::should_render_road_fg() &&
+        n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control())) {
         // If prepare_frame kicked the RSP build, the per-row n_runs needs
         // to be synced back before emit walks runs[][]. Cheap no-op when
         // RSP path is disabled or when RSP has already drained.

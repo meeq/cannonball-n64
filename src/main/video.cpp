@@ -175,7 +175,7 @@ void Video::prepare_frame()
     tile_layer->update_tile_values();
 
     N64_PROFILE_PHASE_BEGIN();
-    if (!config.engine.fix_bugs || oroad.horizon_base != ORoad::HORIZON_OFF)
+    if (n64::hwroad_rdp::should_render_road_fg())
     {
         // RDP road_fg overlay: build the CI4 mask + per-line TLUTs here, in
         // prepare_frame, so the writes happen with no RDP DMA traffic on the
