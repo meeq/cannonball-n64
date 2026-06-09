@@ -88,6 +88,28 @@ add_executable(analyze-music
     "${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp"
 )
 
+# Companion tool: combined structural+acoustic loop finder. Require the
+# MML walker state (chan_ram + pcm_ram + aux) to match exactly across the
+# splice (no mid-phrase wrap), then minimise the YM2151+SegaPCM internal-
+# state delta across all such candidate (intro, period) pairs.
+add_executable(find-music-loop
+    ${engine_audio}
+    ${hwaudio}
+    ${romloader}
+    "${CMAKE_CURRENT_SOURCE_DIR}/find_music_loop.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp"
+)
+
+# Diagnostic: dumps SEQ_POS + ancillary chan_ram bytes per frame so we can
+# see whether the Z80 MML walker truly cycles and at what period.
+add_executable(diagnose-chan-ram
+    ${engine_audio}
+    ${hwaudio}
+    ${romloader}
+    "${CMAKE_CURRENT_SOURCE_DIR}/diagnose_chan_ram.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp"
+)
+
 # The engine code is older and a bit warning-noisy under strict modes; keep
 # warnings on but don't fail the build over them.
 add_executable(dump-bytes
@@ -99,5 +121,6 @@ add_executable(dump-bytes
 target_compile_options(audio-render   PRIVATE -Wall -Wno-deprecated-declarations)
 target_compile_options(detect-loop    PRIVATE -Wall -Wno-deprecated-declarations)
 target_compile_options(find-song-loop PRIVATE -Wall -Wno-deprecated-declarations)
-target_compile_options(analyze-music  PRIVATE -Wall -Wno-deprecated-declarations)
-target_compile_options(dump-bytes     PRIVATE -Wall -Wno-deprecated-declarations)
+target_compile_options(analyze-music   PRIVATE -Wall -Wno-deprecated-declarations)
+target_compile_options(find-music-loop PRIVATE -Wall -Wno-deprecated-declarations)
+target_compile_options(dump-bytes      PRIVATE -Wall -Wno-deprecated-declarations)

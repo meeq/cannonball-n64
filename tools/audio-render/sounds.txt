@@ -12,27 +12,46 @@
 #   params    music_loop:    intro_seconds  loop_seconds
 #             other kinds:   duration_seconds
 #
-# Loop values come from tools/audio-render/measure-splice.py, which scores
-# the audible click at the wrap point on the rendered WAV (point step +
-# windowed RMS) and finds the (period, intro) that yields a bit-exact
-# splice. The MML walker's structural cycle isn't always usable directly —
-# YM2151's internal eg_cnt / LFO drift incommensurately, so the audio at
-# one structural cycle isn't byte-identical to the next. We pick the offset
-# where the YM internal counters coincidentally realign.
+# Loop selection methodology:
 #
-# Splice quality at the chosen (intro, period) (50 ms window RMS, all bit-
-# exact at the splice point):
-#   BREEZE  intro=  6.5497s  period= 61.440s  ->  -62 dB
-#   SPLASH  intro= 46.7897s  period=122.880s  ->  -87 dB
-#   MAGICAL intro=157.2499s  period= 30.720s  ->  -65 dB
+# Loop points were chosen empirically by listening to 60s previews (30s
+# pre-wrap + 30s post-wrap) at many (intro, period) candidates and picking
+# the one where the music continues from end-of-loop to intro with the
+# right musical phrase and where the full song's melodic content (the
+# "meat") is captured in one period. The candidate periods were generated
+# from waveform/chroma autocorrelation peaks (find_all_loops.py /
+# find_song_structure.py), then narrowed by listening.
+#
+# All three tracks turned out to share the same loop period (184.32 s =
+# 6 * 30.72 = 3 * 61.44, both clean multiples of the chan_ram cycle), with
+# different intros: BREEZE needs ~2 minutes of intro before its loop body
+# begins; SPLASH loops on itself from the start; MAGICAL has a brief
+# 82-second intro.
+#
+# Earlier purely-algorithmic attempts failed: the chan_ram-byte-identical
+# matcher (find-music-loop) required 290-340 s intros to fully settle the
+# Z80 walker's nested-LOOP/CALL state, but the resulting loops perceived
+# as "5-min intro then 30-s repeating loop" rather than the song's actual
+# verse-and-chorus structure. The audio autocorrelation alone surfaced
+# many high-AC peaks but couldn't distinguish musical phrase boundaries.
+#
+# Splice quality at the chosen (intro, period) (50 ms window RMS):
+#   BREEZE  intro=120.0000s  period=184.320s  ->  -14.7 dB RMS
+#   SPLASH  intro=  0.0000s  period=184.320s  ->  -17.4 dB RMS
+#   MAGICAL intro= 82.0000s  period=184.320s  ->  -30.7 dB RMS
+#
+# Splice clicks are louder than previous values because we now prioritise
+# musical phrasing over click silence. A future improvement would be a
+# short (~50ms) crossfade across the splice to mask the residual click
+# without changing the structural loop.
 #
 # Render durations are auto-derived: (intro + loop) for music_loop, the
 # explicit value for the other kinds.
 
 # --- Music tracks (long, looping; mix includes PCM drum channels) -----------
-0x81  music_loop      music_breeze.wav      6.5497    61.440
-0x82  music_loop      music_splash.wav      46.7897  122.880
-0x85  music_loop      music_magical.wav     157.2499  30.720
+0x81  music_loop      music_breeze.wav      120.0000  184.320
+0x82  music_loop      music_splash.wav        0.0000  184.320
+0x85  music_loop      music_magical.wav      82.0000  184.320
 
 # LASTWAVE is one-shot — the game re-dispatches it to repeat.
 0xA5  music_oneshot   music_lastwave.wav    95
