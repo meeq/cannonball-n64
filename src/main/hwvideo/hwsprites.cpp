@@ -1,5 +1,6 @@
 #include "video.hpp"
 #include "hwvideo/hwsprites.hpp"
+#include "hwvideo/hwsprites_baked.h"
 #include "globals.hpp"
 #include "frontend/config.hpp"
 
@@ -64,6 +65,7 @@ namespace n64_profile {
 hwsprites::hwsprites()
     : atlas_pool(nullptr), atlas_used(0),
       atlas_extracts(0), atlas_hits(0), atlas_overflows(0),
+      baked_blob_pi_addr(0), baked_extracts(0),
       shadow_body_ring_idx(0)
 {
     std::memset(atlas_entries, 0, sizeof(atlas_entries));
@@ -189,8 +191,84 @@ void hwsprites::atlas_init()
     if (atlas_pool) return;
     atlas_pool = (uint8_t*)memalign(8, ATLAS_POOL_BYTES);
     atlas_reset();
-    debugf("atlas_init: pool=%p bytes=%u\n",
-           atlas_pool, (unsigned)ATLAS_POOL_BYTES);
+
+    // Resolve the cart-side baked atlas blob. dfs_rom_addr returns a PI
+    // address into ROM space (0x10000000+) that we PI-DMA from on cache
+    // miss. Returns 0 if the file is missing — extracts fall back to the
+    // CPU EOR-walk spillover and we lose the speedup but stay correct.
+    baked_blob_pi_addr = dfs_rom_addr("sprites/sprite_atlas.bin");
+
+    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx entries=%lu\n",
+           atlas_pool, (unsigned)ATLAS_POOL_BYTES,
+           (unsigned long)baked_blob_pi_addr,
+           (unsigned long)hwsprites_baked_count);
+}
+
+struct HwspritesBakedHit {
+    const HwspritesBakedEntry* be;
+    uint16_t row_offset;   // request addr = be->addr + row_offset * pitch
+};
+
+// Predecessor search on the sorted baked index (key = bank, flip, pitch, addr).
+// A direct hit (row_offset = 0) covers descriptor-table entries; a partial hit
+// (row_offset > 0) covers the runtime `inc_offset(y_adj)` path — when a sprite
+// is partially clipped at the top, the runtime computes addr' = addr + y_adj
+// * pitch and asks for a row-aligned suffix of the same baked blob.
+static HwspritesBakedHit hwsprites_baked_lookup(
+    uint16_t bank, uint16_t addr, int16_t pitch, bool flip,
+    uint16_t source_h)
+{
+    HwspritesBakedHit miss = {nullptr, 0};
+    if (hwsprites_baked_count == 0) return miss;
+    const uint8_t flip_v = flip ? 1 : 0;
+
+    // upper_bound by (bank, flip, pitch, addr) — find smallest index whose
+    // key > (bank, flip_v, pitch, addr). The candidate is index-1.
+    uint32_t lo = 0;
+    uint32_t hi = hwsprites_baked_count;
+    while (lo < hi)
+    {
+        uint32_t mid = (lo + hi) >> 1;
+        const HwspritesBakedEntry& e = hwsprites_baked_index[mid];
+        bool le;
+        if      (e.bank  != bank)   le = (e.bank  < bank);
+        else if (e.flip  != flip_v) le = (e.flip  < flip_v);
+        else if (e.pitch != pitch)  le = (e.pitch < pitch);
+        else                        le = (e.addr <= addr);
+        if (le) lo = mid + 1;
+        else    hi = mid;
+    }
+    if (lo == 0) return miss;
+
+    // Walk back through entries with matching (bank, flip, pitch), picking
+    // the FIRST one whose addr <= target, (target - addr) is a multiple of
+    // pitch, and row_offset + source_h <= cand.h. The walk is closest-first
+    // so we prefer smaller deltas (= exact / near-exact base entries). When
+    // the runtime y_adj path lands on a small-zoom sibling's addr that has
+    // h < source_h, walkback finds the big-zoom base whose row range covers
+    // the full requested h. Bounded to keep worst-case dense clusters cheap.
+    static const uint32_t WALKBACK_MAX = 16;
+    uint32_t i = lo;
+    uint32_t steps = 0;
+    while (i > 0 && steps < WALKBACK_MAX) {
+        --i; ++steps;
+        const HwspritesBakedEntry& cand = hwsprites_baked_index[i];
+        if (cand.bank != bank || cand.flip != flip_v || cand.pitch != pitch)
+            return miss;
+        if (cand.addr > addr) continue;
+        const uint16_t delta = (uint16_t)(addr - cand.addr);
+        if (delta == 0) {
+            if (cand.h >= source_h) return {&cand, 0};
+            continue;
+        }
+        if (pitch <= 0) continue;
+        const uint16_t upitch = (uint16_t)pitch;
+        if (delta % upitch) continue;
+        const uint16_t off = delta / upitch;
+        if ((uint32_t)off + (uint32_t)source_h > (uint32_t)cand.h) continue;
+        return {&cand, off};
+    }
+    return miss;
 }
 
 void hwsprites::atlas_reset()
@@ -200,6 +278,7 @@ void hwsprites::atlas_reset()
 }
 
 uint32_t hwsprites::atlas_extract_count()  const { return atlas_extracts; }
+uint32_t hwsprites::baked_extract_count()  const { return baked_extracts; }
 uint32_t hwsprites::atlas_hit_count()      const { return atlas_hits; }
 uint32_t hwsprites::atlas_overflow_count() const { return atlas_overflows; }
 uint32_t hwsprites::atlas_used_bytes()     const { return atlas_used; }
@@ -259,7 +338,88 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         idx = (idx + 1) & mask;
     }
 
-    // Miss — extract into the bump pool.
+    // ---- Baked-atlas fast path ------------------------------------------
+    // The bake holds one CI4 blob per (bank, addr, pitch, flip) tuple sized
+    // to the largest source_h ever seen for that sprite. Shorter source_h
+    // variants are just row-prefixes of the same blob, so we can PI-DMA
+    // only the first source_h rows (ci4_stride bytes each) from the cart
+    // into the bump pool. That replaces ~500 us of CPU EOR-walk + bitplane
+    // decode with a ~50-100 us PI transfer.
+    if (baked_blob_pi_addr)
+    {
+        const HwspritesBakedHit hit =
+            hwsprites_baked_lookup(bank, addr, pitch, flip, source_h);
+        const HwspritesBakedEntry* be = hit.be;
+        const uint16_t row_off = hit.row_offset;
+        const uint16_t avail_h = be ? (uint16_t)(be->h - row_off) : 0;
+        if (be && source_h <= avail_h)
+        {
+            const uint32_t ci4_stride = (uint32_t)be->w / 2;
+            // bytes to DMA: source_h rows of CI4, padded to 8 (matches the
+            // alignment we'd use for a freshly-extracted entry).
+            const uint32_t bytes =
+                (ci4_stride * (uint32_t)source_h + 7u) & ~7u;
+            // Row-offset variant: skip the first row_off rows of the baked
+            // blob. ci4_stride is a multiple of 4 (w is a multiple of 8), so
+            // the PI source stays 2-byte aligned — fine for dma_read.
+            const uint32_t skip_bytes = (uint32_t)row_off * ci4_stride;
+
+            if (atlas_used + bytes > ATLAS_POOL_BYTES)
+            {
+                atlas_overflows++;
+                if (bytes > ATLAS_POOL_BYTES) return nullptr;
+                atlas_reset();
+                idx = hwsprites_mix64(key) & mask;
+            }
+
+            uint8_t* dst = atlas_pool + atlas_used;
+            atlas_used += bytes;
+
+            // PI-DMA the source-h prefix. dma_read takes a PI address inside
+            // cart space; the bake aligned each entry to 8 bytes, so the
+            // base + offset is 8-byte aligned and the length is 2-aligned.
+            dma_read(dst,
+                     baked_blob_pi_addr + be->blob_offset + skip_bytes,
+                     bytes);
+
+            AtlasEntry& e = atlas_entries[idx];
+            e.key        = key;
+            e.ci4        = dst;
+            e.w          = be->w;
+            e.h          = source_h;             // requested variant height
+            // Shadow bbox is reported in baked coords (rows 0..be->h-1). For a
+            // row-offset variant, shift y by -row_off and clip to source_h so
+            // the body pass doesn't sample rows we never DMA'd in.
+            e.has_shadow = be->has_shadow;
+            e.shadow_x0  = be->shadow_x0;
+            e.shadow_x1  = be->shadow_x1;
+            if (e.has_shadow)
+            {
+                const uint16_t y0 = be->shadow_y0;
+                const uint16_t y1 = be->shadow_y1;
+                if (y1 <= row_off) {
+                    e.has_shadow = 0;
+                } else {
+                    e.shadow_y0 = (y0 > row_off) ? (uint16_t)(y0 - row_off) : 0;
+                    const uint16_t y1_shift = (uint16_t)(y1 - row_off);
+                    e.shadow_y1 = (y1_shift > source_h) ? source_h : y1_shift;
+                }
+            }
+            if (e.has_shadow && e.shadow_y1 <= e.shadow_y0)
+                e.has_shadow = 0;
+            if (!e.has_shadow)
+            {
+                e.shadow_x0 = e.shadow_y0 = 0;
+                e.shadow_x1 = e.shadow_y1 = 0;
+            }
+
+            baked_extracts++;
+            atlas_extracts++;
+            return &e;
+        }
+    }
+
+    // ---- Spillover: CPU EOR walk + bitplane decode (the original path) --
     const uint32_t* spritedata = sprites + 0x10000u * (uint32_t)(bank & 7);
 
     // Cap row width at 32 words (256 px). Real OutRun sprites top out below

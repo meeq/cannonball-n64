@@ -27,6 +27,7 @@ public:
 
     // Diagnostics for the atlas cache (FPS overlay).
     uint32_t atlas_extract_count() const;
+    uint32_t baked_extract_count() const;
     uint32_t atlas_hit_count() const;
     uint32_t atlas_overflow_count() const;
     uint32_t atlas_used_bytes() const;
@@ -81,6 +82,13 @@ private:
     uint32_t   atlas_extracts;
     uint32_t   atlas_hits;
     uint32_t   atlas_overflows;
+
+    // Cart PI address of /sprites/sprite_atlas.bin (resolved at first
+    // render_rdp call via dfs_rom_addr). 0 = unresolved or DFS file missing,
+    // in which case extracts fall through to the CPU EOR-walk spillover.
+    // Atlas miss path PI-DMAs ci4 bytes out of this blob.
+    uint32_t   baked_blob_pi_addr;
+    uint32_t   baked_extracts;   // count of baked-path extracts (diagnostics)
 
     // Ring of scratch TLUTs used by the shadow body pass: each entry is a copy
     // of sprite_tlut[color*16] with slot 10 zeroed (so the shadow texel becomes
