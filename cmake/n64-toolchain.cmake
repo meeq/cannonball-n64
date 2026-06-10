@@ -71,6 +71,10 @@ set(COMMON_FLAGS_LIST
     "-ffast-math"
     "-Os"
     "-flto"
+    # Drop DWARF unwind tables; we don't use C++ exceptions or backtrace
+    # libraries that walk them. Strips .eh_frame + .gcc_except_table.
+    "-fno-unwind-tables"
+    "-fno-asynchronous-unwind-tables"
     "-Wall"
     "-Wno-deprecated-declarations"
     "-Wno-unused-variable"
