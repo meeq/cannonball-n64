@@ -12,8 +12,14 @@
 // Decode logic mirrors hwsprites.cpp:atlas_get_or_extract bit-for-bit so the
 // baked output is identical to what the runtime would produce.
 //
+// Also emits sprites_native.bin: the runtime hwsprites byte-swapped uint32_t
+// sprite ROM (1 MiB), written big-endian on disk so a PI-DMA into N64 RAM
+// reproduces the exact uint32_t array hwsprites::init() used to build. The
+// runtime drops the 1 MiB resident `sprites[]` and reads bank slices on demand.
+//
 // Usage:
 //   bake-sprites --roms <roms_dir> --blob <out.bin> --index <out.c>
+//                --sprites-blob <out.bin>
 
 #include <algorithm>
 #include <cstdint>
@@ -181,7 +187,7 @@ static bool write_index(const std::string& path,
 
 int main(int argc, char** argv)
 {
-    std::string roms_dir, blob_path, index_path;
+    std::string roms_dir, blob_path, index_path, sprites_blob_path;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -189,14 +195,17 @@ int main(int argc, char** argv)
             if (i + 1 >= argc) { std::fprintf(stderr, "bake-sprites: %s missing arg\n", who); std::exit(2); }
             return std::string(argv[++i]);
         };
-        if      (a == "--roms")  roms_dir   = next("--roms");
-        else if (a == "--blob")  blob_path  = next("--blob");
-        else if (a == "--index") index_path = next("--index");
+        if      (a == "--roms")          roms_dir          = next("--roms");
+        else if (a == "--blob")          blob_path         = next("--blob");
+        else if (a == "--index")         index_path        = next("--index");
+        else if (a == "--sprites-blob")  sprites_blob_path = next("--sprites-blob");
         else { std::fprintf(stderr, "bake-sprites: unknown arg %s\n", a.c_str()); return 2; }
     }
-    if (roms_dir.empty() || blob_path.empty() || index_path.empty()) {
+    if (roms_dir.empty() || blob_path.empty() || index_path.empty()
+        || sprites_blob_path.empty()) {
         std::fprintf(stderr,
-            "usage: bake-sprites --roms <dir> --blob <out.bin> --index <out.c>\n");
+            "usage: bake-sprites --roms <dir> --blob <out.bin> --index <out.c>"
+            " --sprites-blob <out.bin>\n");
         return 2;
     }
 
@@ -224,6 +233,34 @@ int main(int argc, char** argv)
             uint8_t d0 = *spr++;
             sprites_words[i] = (uint32_t(d0) << 24) | (uint32_t(d1) << 16)
                              | (uint32_t(d2) <<  8) |  uint32_t(d3);
+        }
+    }
+
+    // Emit sprites_native.bin — the byte-swapped sprite ROM as raw N64-side
+    // bytes. We write each uint32_t big-endian so the disk byte order matches
+    // what PI-DMA will land in big-endian N64 RAM; that way the runtime can
+    // dma_read(scratch, pi_addr + bank*64KiB*4, BANK_BYTES) and reinterpret
+    // scratch as the same uint32_t array hwsprites::init() used to build.
+    {
+        std::ofstream f(sprites_blob_path, std::ios::binary);
+        if (!f) {
+            std::fprintf(stderr, "bake-sprites: cannot open %s\n",
+                         sprites_blob_path.c_str());
+            return 1;
+        }
+        std::vector<uint8_t> be(SPRITES_LENGTH * 4);
+        for (uint32_t i = 0; i < SPRITES_LENGTH; i++) {
+            uint32_t w = sprites_words[i];
+            be[i*4 + 0] = (uint8_t)((w >> 24) & 0xff);
+            be[i*4 + 1] = (uint8_t)((w >> 16) & 0xff);
+            be[i*4 + 2] = (uint8_t)((w >>  8) & 0xff);
+            be[i*4 + 3] = (uint8_t)( w        & 0xff);
+        }
+        f.write((const char*)be.data(), (std::streamsize)be.size());
+        if (!f) {
+            std::fprintf(stderr, "bake-sprites: write failed %s\n",
+                         sprites_blob_path.c_str());
+            return 1;
         }
     }
 

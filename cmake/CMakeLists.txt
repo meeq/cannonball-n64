@@ -228,5 +228,7 @@ add_dependencies(cannonball bake-sprites)
 n64_create_rom(cannonball
     TITLE "CannonBall"
     DFS_ROOT "${N64_DFS_ROOT}"
-    EXTRA_DFS_DEPS ${AUDIO_PAYLOAD_STAGED_FILES} "${BAKE_SPRITES_STAGED_BLOB}"
+    EXTRA_DFS_DEPS ${AUDIO_PAYLOAD_STAGED_FILES}
+                   "${BAKE_SPRITES_STAGED_BLOB}"
+                   "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
 )

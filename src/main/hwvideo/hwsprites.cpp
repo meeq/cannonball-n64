@@ -17,6 +17,11 @@ namespace n64_profile {
     extern uint32_t spr_call_us;
 }
 
+// Set to 1 to log heap stats around atlas_init. Useful when tuning the
+// atlas pool size against the heap ceiling — leave off in checked-in builds
+// so the ISViewer log isn't cluttered.
+#define CANNONBALL_LOG_HEAP 0
+
 /***************************************************************************
     Video Emulation: OutRun Sprite Rendering Hardware.
     Based on MAME source code.
@@ -62,8 +67,24 @@ namespace n64_profile {
 *
  *******************************************************************************************/
 
+// CPU EOR-walk spillover slice scratch. The legacy path read from a 1 MiB
+// resident `sprites[]` member; we instead PI-DMA just the word range this
+// extract will touch from /sprites/sprites_native.bin (BE on disk) into BSS
+// scratch. The slice is sized by (source_h × |pitch|) + 32-word cushion to
+// cover the 32-word/row EOR walk; a 64 KiB scratch fits every observed
+// OutRun sprite without clamping. Cost per fallback ≈ 0.2-0.8 ms for typical
+// frames vs. ~50 ms for a full bank DMA. Bank-cache thrashing across many
+// fallbacks-per-frame is what made the bank-granularity approach unviable.
+namespace {
+    constexpr uint32_t SPRITE_BANK_WORDS    = 0x10000u;           // 64K words per bank
+    constexpr uint32_t SPRITE_BANK_BYTES    = SPRITE_BANK_WORDS * 4u;
+    constexpr uint32_t SPRITE_SCRATCH_BYTES = 64u * 1024u;        // 64 KiB
+    alignas(8) uint8_t s_sprite_slice_scratch[SPRITE_SCRATCH_BYTES];
+}
+
 hwsprites::hwsprites()
-    : atlas_pool(nullptr), atlas_used(0),
+    : sprites_pi_addr(0),
+      atlas_pool(nullptr), atlas_used(0),
       atlas_extracts(0), atlas_hits(0), atlas_overflows(0),
       baked_blob_pi_addr(0), baked_extracts(0),
       shadow_body_ring_idx(0)
@@ -84,27 +105,11 @@ void hwsprites::init(const uint8_t* src_sprites)
 {
     reset();
 
-    if (src_sprites)
-    {
-        // Convert S16 tiles to a more useable format
-        const uint8_t *spr = src_sprites;
-
-        for (uint32_t i = 0; i < SPRITES_LENGTH; i++)
-        {
-            uint8_t d3 = *spr++;
-            uint8_t d2 = *spr++;
-            uint8_t d1 = *spr++;
-            uint8_t d0 = *spr++;
-
-            sprites[i] = (d0 << 24) | (d1 << 16) | (d2 << 8) | d3;
-        }
-    }
-
-    // Atlas pool allocation is deferred to the first render_rdp() call. By the
-    // time we render, Video::init has freed the ROM source buffers (sprites/
-    // tiles/road, ~2.5 MiB), leaving a much larger contiguous block for the
-    // atlas. Allocating here failed on N64 even with Expansion Pak — heap was
-    // too fragmented during boot.
+    // Legacy path byte-swapped src_sprites (the 1 MiB sprite ROM) into a
+    // resident sprites[] member. That member is gone — bank slices live on
+    // cart and are PI-DMA'd into BSS scratch on EOR-walk fallback. src_sprites
+    // is unused here; callers still free it after init returns.
+    (void)src_sprites;
 }
 
 void hwsprites::reset()
@@ -190,13 +195,18 @@ void hwsprites::swap()
 void hwsprites::atlas_init()
 {
     if (atlas_pool) return;
-    // Try the max size first; fall back to MIN if the heap can't honour it.
-    atlas_pool_bytes = ATLAS_POOL_BYTES_MAX;
+
+    // Expansion Pak (8 MiB) → 2 MiB pool; base console (4 MiB) → 1 MiB pool.
+    atlas_pool_bytes = is_memory_expanded()
+                          ? ATLAS_POOL_BYTES_EXPANSION
+                          : ATLAS_POOL_BYTES_BASE;
+
+#if CANNONBALL_LOG_HEAP
+    heap_stats_t hs0; sys_get_heap_stats(&hs0);
+    debugf("atlas_init: heap before total=%d used=%d free=%d\n",
+           hs0.total, hs0.used, hs0.total - hs0.used);
+#endif
     atlas_pool = (uint8_t*)memalign(8, atlas_pool_bytes);
-    if (!atlas_pool) {
-        atlas_pool_bytes = ATLAS_POOL_BYTES_MIN;
-        atlas_pool = (uint8_t*)memalign(8, atlas_pool_bytes);
-    }
     atlas_reset();
 
     // Resolve the cart-side baked atlas blob. dfs_rom_addr returns a PI
@@ -205,10 +215,25 @@ void hwsprites::atlas_init()
     // CPU EOR-walk spillover and we lose the speedup but stay correct.
     baked_blob_pi_addr = dfs_rom_addr("sprites/sprite_atlas.bin");
 
-    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx entries=%lu\n",
+    // Resolve the cart-side native sprite ROM blob (BE on disk = matches
+    // PI-DMA target layout). EOR-walk fallback DMAs per-extract slices.
+    sprites_pi_addr = dfs_rom_addr("sprites/sprites_native.bin");
+
+#if CANNONBALL_LOG_HEAP
+    heap_stats_t hs1; sys_get_heap_stats(&hs1);
+    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx sprites_blob=%08lx entries=%lu heap after used=%d free=%d\n",
            atlas_pool, (unsigned)atlas_pool_bytes,
            (unsigned long)baked_blob_pi_addr,
+           (unsigned long)sprites_pi_addr,
+           (unsigned long)hwsprites_baked_count,
+           hs1.used, hs1.total - hs1.used);
+#else
+    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx sprites_blob=%08lx entries=%lu\n",
+           atlas_pool, (unsigned)atlas_pool_bytes,
+           (unsigned long)baked_blob_pi_addr,
+           (unsigned long)sprites_pi_addr,
            (unsigned long)hwsprites_baked_count);
+#endif
 }
 
 struct HwspritesBakedHit {
@@ -335,14 +360,26 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     const uint32_t mask = ATLAS_CAPACITY - 1;
     uint32_t idx = hwsprites_mix64(key) & mask;
 
-    while (atlas_entries[idx].key != 0)
+    // Bounded linear probe. The baked-blob fast path can insert tiny (~8 byte)
+    // entries that fill the 1024-slot hash table long before atlas_used crosses
+    // the pool ceiling, so we can't rely on the pool-overflow path to keep the
+    // table from saturating. On full-table detection, recover identically to a
+    // pool overflow: reset, rehash, fall through to insertion.
+    for (uint32_t probes = 0; probes < ATLAS_CAPACITY; ++probes)
     {
+        if (atlas_entries[idx].key == 0) break;
         if (atlas_entries[idx].key == key)
         {
             atlas_hits++;
             return &atlas_entries[idx];
         }
         idx = (idx + 1) & mask;
+        if (probes + 1 == ATLAS_CAPACITY)
+        {
+            atlas_overflows++;
+            atlas_reset();
+            idx = hwsprites_mix64(key) & mask;
+        }
     }
 
     // ---- Baked-atlas fast path ------------------------------------------
@@ -427,7 +464,34 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     }
 
     // ---- Spillover: CPU EOR walk + bitplane decode (the original path) --
-    const uint32_t* spritedata = sprites + 0x10000u * (uint32_t)(bank & 7);
+    // The bank source lives on cart. DMA only the word range this extract
+    // will touch: rows step by `pitch` from `addr` for source_h rows, each
+    // row walks ≤ 32 words to the EOR sentinel — so the window is bounded
+    // by [addr + min(0, source_h*pitch), addr + max(0, source_h*pitch)]
+    // ± 32 words of cushion. If the cart blob is missing (sprites_pi_addr
+    // == 0) we have no source — bail and let the sprite drop rather than
+    // read garbage from scratch.
+    if (!sprites_pi_addr) return nullptr;
+    const uint32_t* spritedata;
+    {
+        const int32_t  pitch_s   = (int32_t)pitch;
+        const int32_t  step      = (int32_t)source_h * pitch_s;
+        constexpr int32_t CUSHION = 32;
+        int32_t min_w = (int32_t)addr + (step < 0 ? step : 0) - CUSHION;
+        int32_t max_w = (int32_t)addr + (step > 0 ? step : 0) + CUSHION;
+        if (min_w < 0)            min_w = 0;
+        if (max_w > 0xffff)       max_w = 0xffff;
+        if (min_w > max_w)        min_w = max_w;
+        uint32_t n_bytes = ((uint32_t)(max_w - min_w + 1)) * 4u;
+        n_bytes = (n_bytes + 7u) & ~7u;                 // PI-DMA 8-byte chunks
+        if (n_bytes > SPRITE_SCRATCH_BYTES)             // shouldn't trigger
+            n_bytes = SPRITE_SCRATCH_BYTES;
+        const uint32_t bank_offset = (uint32_t)(bank & 7) * SPRITE_BANK_BYTES;
+        const uint32_t src = sprites_pi_addr + bank_offset + (uint32_t)min_w * 4u;
+        dma_read(s_sprite_slice_scratch, src, n_bytes);
+        // Rebase so spritedata[cur] resolves to scratch[cur - min_w].
+        spritedata = (const uint32_t*)s_sprite_slice_scratch - min_w;
+    }
 
     // Cap row width at 32 words (256 px). Real OutRun sprites top out below
     // that; the bound stops a malformed/never-terminating row from runaway
@@ -552,10 +616,9 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
 void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                            int x_offset, int y_offset)
 {
-    // Lazy-init the atlas pool. Deferred from hwsprites::init() because the
-    // heap is too fragmented at boot (ROM sources + 1 MiB sprites[] both live
-    // simultaneously). By the first render call, Video::init() has freed the
-    // ROM source buffers and we have a contiguous block to grab.
+    // Lazy-init guard. Normally atlas_init() runs explicitly from main()
+    // before ROM load so the pool gets a clean contiguous region; this is
+    // just a safety net for unit-test / replay paths that don't.
     if (!atlas_pool) atlas_init();
     if (!atlas_pool) return;
 

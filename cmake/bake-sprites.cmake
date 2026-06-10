@@ -55,18 +55,23 @@ add_custom_command(
 # Run the bake. Both outputs come out of a single tool invocation, so they
 # share one custom_command.
 # -----------------------------------------------------------------------------
-set(BAKE_SPRITES_INDEX_SRC   "${CMAKE_BINARY_DIR}/sprite_atlas_index.c")
-set(BAKE_SPRITES_BLOB        "${CMAKE_BINARY_DIR}/sprite_atlas.bin")
-set(BAKE_SPRITES_STAGED_BLOB "${_BAKE_STAGE_DIR}/sprite_atlas.bin")
+set(BAKE_SPRITES_INDEX_SRC          "${CMAKE_BINARY_DIR}/sprite_atlas_index.c")
+set(BAKE_SPRITES_BLOB               "${CMAKE_BINARY_DIR}/sprite_atlas.bin")
+set(BAKE_SPRITES_STAGED_BLOB        "${_BAKE_STAGE_DIR}/sprite_atlas.bin")
+set(BAKE_SPRITES_NATIVE_BLOB        "${CMAKE_BINARY_DIR}/sprites_native.bin")
+set(BAKE_SPRITES_STAGED_NATIVE_BLOB "${_BAKE_STAGE_DIR}/sprites_native.bin")
 
 add_custom_command(
-    OUTPUT  "${BAKE_SPRITES_INDEX_SRC}" "${BAKE_SPRITES_BLOB}"
+    OUTPUT  "${BAKE_SPRITES_INDEX_SRC}"
+            "${BAKE_SPRITES_BLOB}"
+            "${BAKE_SPRITES_NATIVE_BLOB}"
     COMMAND "${_BAKE_HOST_BIN}"
-            --roms  "${_BAKE_ROMS_DIR}"
-            --blob  "${BAKE_SPRITES_BLOB}"
-            --index "${BAKE_SPRITES_INDEX_SRC}"
+            --roms          "${_BAKE_ROMS_DIR}"
+            --blob          "${BAKE_SPRITES_BLOB}"
+            --index         "${BAKE_SPRITES_INDEX_SRC}"
+            --sprites-blob  "${BAKE_SPRITES_NATIVE_BLOB}"
     DEPENDS "${_BAKE_HOST_BIN}"
-    COMMENT "[BAKE] sprite_atlas.bin + sprite_atlas_index.c"
+    COMMENT "[BAKE] sprite_atlas.bin + sprite_atlas_index.c + sprites_native.bin"
     VERBATIM)
 
 add_custom_command(
@@ -77,5 +82,15 @@ add_custom_command(
     COMMENT "[BAKE] stage sprite_atlas.bin"
     VERBATIM)
 
+add_custom_command(
+    OUTPUT  "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${BAKE_SPRITES_NATIVE_BLOB}" "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
+    DEPENDS "${BAKE_SPRITES_NATIVE_BLOB}"
+    COMMENT "[BAKE] stage sprites_native.bin"
+    VERBATIM)
+
 add_custom_target(bake-sprites ALL
-    DEPENDS "${BAKE_SPRITES_INDEX_SRC}" "${BAKE_SPRITES_STAGED_BLOB}")
+    DEPENDS "${BAKE_SPRITES_INDEX_SRC}"
+            "${BAKE_SPRITES_STAGED_BLOB}"
+            "${BAKE_SPRITES_STAGED_NATIVE_BLOB}")

@@ -18,6 +18,7 @@
 #include "frontend/config.hpp"
 #include "n64/hwroad_rdp.hpp"
 #include "n64/hwroad_rdp_rsp.hpp"
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <malloc.h>
@@ -79,6 +80,14 @@ namespace n64_profile
     uint32_t raw_composite_us       = 0;
     uint32_t composite_skipped_frames = 0;
 }
+
+// Scratch surface for the hwroad foreground (engine-resolution RGBA5551).
+// Reserved as static BSS rather than memalign'd at Render::init so the
+// allocation can't be defeated by heap fragmentation after ROM load / audio
+// init / atlas alloc. Size is fixed at S16_WIDTH * S16_HEIGHT * 2 bytes
+// (320*224*2 = 143360 B). 16-byte alignment satisfies both the rdpq DMA
+// minimum and the data_cache_hit_invalidate cache-line precondition.
+alignas(16) static uint16_t s_scratch_storage[S16_WIDTH * S16_HEIGHT];
 
 Render::Render()
     : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
@@ -176,6 +185,21 @@ void Render::set_shadow_intensity(float f)
     shadow_multi = (int)std::round(255.0f * f);
 }
 
+void Render::boot_display()
+{
+    if (initialized) return;
+
+    // FILTERS_DISABLED skips VI's AA + dedither + resample chain. VI shares
+    // RDRAM bandwidth with CPU/RDP, and we're CPU-bandwidth bound, so handing
+    // that back is a free win — the engine output is already correctly sized
+    // for the framebuffer so there's nothing to filter.
+    display_init(n64::FB_RES, n64::FB_DEPTH, n64::FB_COUNT,
+                 GAMMA_NONE, FILTERS_DISABLED);
+    rdpq_init();
+
+    initialized = true;
+}
+
 bool Render::init(int src_w, int src_h,
                   int /*scale_in*/, int video_mode_in, int scanlines_in)
 {
@@ -185,28 +209,17 @@ bool Render::init(int src_w, int src_h,
     video_mode = video_mode_in;
     scanlines  = scanlines_in;
 
-    if (!initialized)
-    {
-        // FILTERS_DISABLED skips VI's AA + dedither + resample chain. VI
-        // shares RDRAM bandwidth with CPU/RDP, and we're CPU-bandwidth bound,
-        // so handing that back is a free win — the engine output is already
-        // correctly sized for the framebuffer so there's nothing to filter.
-        display_init(n64::FB_RES, n64::FB_DEPTH, n64::FB_COUNT,
-                     GAMMA_NONE, FILTERS_DISABLED);
-        rdpq_init();
+    // boot_display() is expected to have run in main() before any heavy
+    // heap consumer; this guard is the safety net for unit tests or future
+    // call sites that skip the early boot.
+    boot_display();
 
-        initialized = true;
-    }
-
-    if (scratch_pixels)
-        free(scratch_pixels);
-
-    // 16-byte alignment: rdpq_tex_blit DMA needs ≥8, and data_cache_hit_
-    // invalidate asserts 16-byte (cache-line) alignment on both base and
-    // length. 320×224×2 = 143360 bytes which is a multiple of 16, so the
-    // alloc alignment is the only knob to set.
+    // Engine resolution is fixed at S16_WIDTH x S16_HEIGHT on N64 (widescreen
+    // disabled, src_w / src_h always match), so the static buffer is sized
+    // exactly right. Assert the contract — anything else is a config bug.
+    assert(src_width == S16_WIDTH && src_height == S16_HEIGHT);
     const int bytes = src_width * src_height * (int)sizeof(uint16_t);
-    scratch_pixels = (uint16_t*)memalign(16, bytes);
+    scratch_pixels = s_scratch_storage;
 
     // All CPU writes to the scratch surface go through KSEG1 so the store
     // buffer coalesces sequential writes straight into RDRAM (no cache-line
@@ -229,12 +242,10 @@ bool Render::init(int src_w, int src_h,
 
 void Render::disable()
 {
-    if (scratch_pixels)
-    {
-        free(scratch_pixels);
-        scratch_pixels = nullptr;
-        scratch_uc_ptr = nullptr;
-    }
+    // scratch_pixels lives in BSS (s_scratch_storage); just clear the alias
+    // pointers, no free.
+    scratch_pixels = nullptr;
+    scratch_uc_ptr = nullptr;
     if (initialized)
     {
         rdpq_close();

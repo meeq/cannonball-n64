@@ -51,6 +51,11 @@ Video::~Video(void)
     delete renderer;
 }
 
+void Video::boot_display()
+{
+    renderer->boot_display();
+}
+
 int Video::init(Roms* roms, video_settings_t* settings)
 {
     if (!set_video_mode(settings))
@@ -58,7 +63,7 @@ int Video::init(Roms* roms, video_settings_t* settings)
 
     // Convert S16 tiles to a more useable format
     tile_layer->init(roms->tiles.rom, config.video.hires != 0);
-    
+
     clear_tile_ram();
     clear_text_ram();
     if (roms->tiles.rom)

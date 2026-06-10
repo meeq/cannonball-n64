@@ -40,6 +40,12 @@ public:
     ~Video();
     
 	int init(Roms* roms, video_settings_t* settings);
+
+    // Bring up libdragon's display + rdpq early. Called from main() before
+    // ROM load so the framebuffer + RSPQ allocations land in fresh heap.
+    // Idempotent; init() will no-op the underlying boot if already done.
+    void boot_display();
+
     void disable();
     int set_video_mode(video_settings_t* settings);
     void set_shadow_intensity(float);

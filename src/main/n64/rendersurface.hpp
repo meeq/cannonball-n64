@@ -115,6 +115,14 @@ public:
     Render();
     ~Render();
 
+    // Bring up libdragon's display + rdpq early so their internal allocations
+    // (2 framebuffers + RSPQ command buffer + rdpq state) land in a fresh,
+    // contiguous heap region. Called from main() right after the sprite
+    // atlas pool so all big-contiguous allocs front-load before ROM load /
+    // audio init fragment the heap. Idempotent — Render::init() detects this
+    // has already happened via the initialized flag and skips re-entry.
+    void boot_display();
+
     bool init(int src_width, int src_height,
               int scale, int video_mode, int scanlines);
     void disable();

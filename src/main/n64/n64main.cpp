@@ -42,6 +42,11 @@ Audio  cannonball::audio;
 Input  input;
 bool   pause_engine = false;
 
+// Set to 1 to log heap stats at key boot milestones (post-ROM load,
+// post-audio init). Useful for diagnosing OOM in the 4 MiB build; off in
+// shipping builds so the ISViewer log isn't cluttered.
+#define CANNONBALL_LOG_HEAP 0
+
 namespace
 {
     void boot_subsystems()
@@ -156,8 +161,38 @@ int main(int /*argc*/, char* /*argv*/[])
 {
     boot_subsystems();
 
+    // Memory-map order: every big-contiguous heap allocation happens here,
+    // *before* ROM load (which is the 2.3 MiB elephant that fragments the
+    // remaining free space). Once all the must-be-contiguous chunks are in
+    // place, ROMs fill the rest. Audio init's wav64 mixer + scratch buffers
+    // come before ROMs for the same reason.
+    //
+    //   1. sprite atlas pool  (2 MiB EP / 1 MiB base)
+    //   2. display_init        (2× 320×240 framebuffers, RSPQ buffer)
+    //   3. config + audio init (wav64 mixer + 4-channel scratch)
+    //   4. roms.load           (~2.3 MiB)
+    //   5. video.init          (small allocs only — display + rdpq already up)
     config.load();
     platform_overrides();
+
+    video.sprite_layer->atlas_init();
+    video.boot_display();
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-display: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
+
+    audio.init();
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-audio: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
+
+    config.set_fps(config.video.fps);
 
     if (!roms.load_revb_roms(config.sound.fix_samples))
     {
@@ -165,16 +200,15 @@ int main(int /*argc*/, char* /*argv*/[])
         while (1) { /* halt */ }
     }
 
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-roms: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
+
     if (!omusic.load_widescreen_map(config.data.res_path))
         debugf("Widescreen tilemaps not loaded\n");
-
-    // Bring the DAC up before set_fps() — config.set_fps() calls
-    // osoundint.init() (which sets the chip emulators' output rate) and then
-    // cycles audio.stop_audio()/start_audio() around it. With the DAC
-    // already initialised, those bounces are just flag toggles.
-    audio.init();
-
-    config.set_fps(config.video.fps);
 
     if (!video.init(&roms, &config.video))
     {

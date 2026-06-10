@@ -32,6 +32,11 @@ public:
     uint32_t atlas_overflow_count() const;
     uint32_t atlas_used_bytes() const;
 
+    // Allocate the atlas bump pool. Normally fires lazily on first render_rdp,
+    // but callable early (after dfs_init) so the MAX-tier size has a chance
+    // at a contiguous heap region before later allocs fragment it.
+    void atlas_init();
+
 private:
     // Clip values.
     uint16_t x1, x2;
@@ -41,9 +46,12 @@ private:
     static const uint32_t SPRITES_LENGTH = 0x100000 >> 2;
     static const uint16_t COLOR_BASE = 0x800;
 
-    // 8-byte aligned so atlas extraction reads source words from the same
-    // alignment the rdpq DMAs expect for derived CI4 atlas blocks.
-    alignas(8) uint32_t sprites[SPRITES_LENGTH]; // Converted sprites
+    // Cart PI address of /sprites/sprites_native.bin (1 MiB pre-byte-swapped
+    // sprite ROM, BE on disk so PI-DMA into RAM reproduces the legacy
+    // sprites[] array exactly). Resolved at atlas_init() via dfs_rom_addr.
+    // The CPU EOR-walk spillover path DMAs a 256 KiB bank slice on demand
+    // into a static .cpp-local scratch instead of holding 1 MiB resident.
+    uint32_t sprites_pi_addr;
 
     // Two halves of RAM
     uint16_t ram[SPRITE_RAM_SIZE];
@@ -55,13 +63,17 @@ private:
     // whole cache is reset (data is re-extracted on next miss) so we never
     // need a true LRU walk.
     static constexpr uint32_t ATLAS_CAPACITY   = 1024;       // power of 2
-    // Pool size is tiered at init: try the largest first, fall back if the
-    // heap can't satisfy the alignment. Each ovf event costs a ~20 ms frame
-    // to re-extract every visible sprite (see project_spr_spike_atlas_overflow),
-    // so larger is better as long as memalign succeeds.
-    static constexpr uint32_t ATLAS_POOL_BYTES_MAX = 2048u << 10;  // 2 MiB
-    static constexpr uint32_t ATLAS_POOL_BYTES_MIN = 1024u << 10;  // 1 MiB
-    uint32_t                  atlas_pool_bytes = 0;          // resolved at init
+    // Atlas pool size is picked at atlas_init() from get_memory_size():
+    //   8 MiB (Expansion Pak)  -> ATLAS_POOL_BYTES_EXPANSION (2 MiB)
+    //   4 MiB (base console)   -> ATLAS_POOL_BYTES_BASE      (1 MiB)
+    // Larger = fewer overflow-recovery frames (each costs ~20 ms; see
+    // project_spr_spike_atlas_overflow). Single value per session — no MIN/MAX
+    // fallback at runtime, just a one-time branch on detected RAM.
+    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 1u << 20;          // 1 MiB
+    static constexpr uint32_t ATLAS_POOL_BYTES_EXPANSION = 2u << 20;          // 2 MiB
+    // Next target for heap reclamation is hwtiles::tiles[] (256 KiB), still
+    // a converted-ROM mirror kept resident. Moving it cart-side would let
+    // the base-console pool grow toward parity with the expansion tier.
     struct AtlasEntry
     {
         uint64_t key;     // 0 = empty
@@ -77,6 +89,7 @@ private:
     };
     AtlasEntry atlas_entries[ATLAS_CAPACITY];
     uint8_t*   atlas_pool;
+    uint32_t   atlas_pool_bytes;  // chosen at atlas_init() from get_memory_size
     uint32_t   atlas_used;
     uint32_t   atlas_extracts;
     uint32_t   atlas_hits;
@@ -98,7 +111,6 @@ private:
     alignas(8) uint16_t shadow_body_tluts[SHADOW_TLUT_RING * 16];
     uint32_t   shadow_body_ring_idx;
 
-    void atlas_init();
     void atlas_reset();
     const AtlasEntry* atlas_get_or_extract(uint16_t bank, uint16_t addr,
                                            uint16_t height, int16_t pitch,
