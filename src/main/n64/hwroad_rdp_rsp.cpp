@@ -133,6 +133,17 @@ namespace
     void*     n_runs_cached = nullptr;
     uint16_t* n_runs_uc     = nullptr;
 
+    // Per-row OOB-colour array — populated by build_foreground_lores_rdp_rsp
+    // and consumed by the HWRoadRDP_EmitCoobFill overlay command. One u16
+    // per row; 0xFFFF means SKIP (inactive), else RGBA5551 c_oob for that
+    // row. RSP-loaded via DMA, so 8-byte aligned size. Trailing 0xFFFF
+    // sentinel simplifies the RSP walk: walking to MAX_LINES+1 catches the
+    // closing edge of a run that extends to the last drawn row.
+    constexpr size_t COOB_FILL_BYTES = (((size_t)MAX_LINES + 1) * 2 + 7) & ~7;
+    void*     coob_fill_cached    = nullptr;
+    uint16_t* coob_fill_uc        = nullptr;
+    bool      coob_fill_populated = false;
+
     uint32_t s_frame = 0;
 }
 
@@ -164,6 +175,11 @@ void init()
     n_runs_uc     = (uint16_t*)UncachedAddr(n_runs_cached);
     std::memset(n_runs_uc, 0, N_RUNS_BYTES);
 
+    coob_fill_cached = memalign(16, COOB_FILL_BYTES);
+    assertf(coob_fill_cached, "hwroad_rdp_rsp: coob_fill alloc failed");
+    coob_fill_uc     = (uint16_t*)UncachedAddr(coob_fill_cached);
+    std::memset(coob_fill_uc, 0xFF, COOB_FILL_BYTES);
+
     state_uc->n_runs_phys = PhysicalAddr(n_runs_cached);
 
     initialised = true;
@@ -191,7 +207,32 @@ void shutdown()
     free(state_cached);  state_cached = nullptr; state_uc = nullptr;
     if (shadow_cached) { free(shadow_cached); shadow_cached = nullptr; shadow_buf = nullptr; }
     if (n_runs_cached) { free(n_runs_cached); n_runs_cached = nullptr; n_runs_uc = nullptr; }
+    if (coob_fill_cached) {
+        free(coob_fill_cached);
+        coob_fill_cached = nullptr;
+        coob_fill_uc     = nullptr;
+    }
+    coob_fill_populated = false;
     initialised = false;
+}
+
+bool coob_fill_ready()
+{
+    return initialised && coob_fill_populated;
+}
+
+void dispatch_coob_fill(int x_off, int y_off, int W)
+{
+    if (!coob_fill_ready()) return;
+    // Pack (x_off, y_off) into a single 32-bit arg and (W, MAX_LINES) into
+    // another so the command fits the 12-byte rspq cmd budget. Both halves
+    // are 16-bit signed/unsigned values bounded by the framebuffer extent.
+    rspq_write(overlay_id, 1,
+               PhysicalAddr(coob_fill_cached),
+               ((uint32_t)(x_off & 0xFFFF) << 16) | ((uint32_t)(y_off & 0xFFFF)),
+               ((uint32_t)(W     & 0xFFFF) << 16) | ((uint32_t)(MAX_LINES & 0xFFFF)));
+    // Single-use per frame: emit phase consumed it.
+    coob_fill_populated = false;
 }
 
 } // namespace hwroad_rdp_rsp
@@ -308,11 +349,14 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         const uint32_t data1 = roadram[0x100 + y];
 
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
-        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0; continue; }
+        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
+          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
         if (ctrl == 0 && ((data0 & 0x800) != 0))
-        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0; continue; }
+        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
+          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
         if (ctrl == 3 && ((data1 & 0x800) != 0))
-        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0; continue; }
+        { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
+          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
 
         const int32_t color0_idx = ((road_control & 4) != 0)
                                       ? y : (int32_t)(data0 & 0x1ff);
@@ -377,6 +421,12 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         line[y].tex_end   = (uint16_t)span_end;
         line[y].c_oob     = c_oob;
 
+        // The coob fill sees OOB_ONLY and DRAW rows identically — both paint
+        // the full row width with c_oob (the per-run pass overpaints the
+        // body on DRAW rows). Record c_oob unconditionally; SKIP is the only
+        // kind that maps to the 0xFFFF sentinel above.
+        rsp::coob_fill_uc[y] = c_oob;
+
         if (span_end <= span_start) {
             line[y].kind = OOB_ONLY;
             rsp::desc_uc[y].kind = 1;
@@ -405,6 +455,11 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         d->src1_phys   = PhysicalAddr(src1 + t1b);
         d->runs_phys   = PhysicalAddr(runs_ptr(y));
     }
+
+    // Trailing sentinel so the RSP walk can cleanly close a run that runs
+    // all the way to the last drawn row.
+    rsp::coob_fill_uc[MAX_LINES] = 0xFFFF;
+    rsp::coob_fill_populated = true;
 
     uint64_t t_cpu_end = get_ticks_us();
     rsp::cpu_us = (rsp::cpu_us * 7 + (uint32_t)(t_cpu_end - t0)) >> 3;

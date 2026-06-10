@@ -29,6 +29,7 @@
 
 #include "n64/hwroad_rdp.hpp"
 #include "n64/hwroad_rdp_internal.hpp"
+#include "n64/hwroad_rdp_rsp.hpp"
 #include "n64/platform.hpp"
 #include "hwvideo/hwroad.hpp"
 #include "engine/oroad.hpp"          // ORoad::HORIZON_OFF, ::oroad
@@ -596,8 +597,19 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     // multi-row rectangle. Tunnel rows have long stretches of identical
     // OOB colour, so a worst-case 224 single-pixel fills collapses to a
     // few dozen taller rects.
+    //
+    // When the RSP build path is active and has populated the per-row c_oob
+    // array, hand the whole phase off to the RSP — it emits the same coalesced
+    // SET_FILL_COLOR + FILL_RECTANGLE pairs straight into the RDP buffer,
+    // running async behind the CPU's Phase 2b walk.
     uint32_t phase_a_rects = 0;
-    {
+    if (n64::hwroad_rdp_rsp::coob_fill_ready()) {
+        n64::hwroad_rdp_rsp::dispatch_coob_fill(x_off, y_off, W);
+        // RSP emits its own SET_FILL_COLOR commands, so any colour we had
+        // cached on the CPU side is now stale relative to what the RDP will
+        // see when Phase 2b runs. Reset so Phase 2b's first run re-emits.
+        color_valid = false;
+    } else {
         int      run_start = -1;
         uint16_t run_color = 0;
         for (int y = 0; y <= MAX_LINES; y++)

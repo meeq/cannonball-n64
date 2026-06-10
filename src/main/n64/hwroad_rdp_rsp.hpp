@@ -64,5 +64,18 @@ namespace hwroad_rdp_rsp
     extern uint32_t v_mismatches;
     extern int      v_first_row;
     extern int      v_first_byte;
+
+    // Per-row OOB-colour fill dispatch — RSP-side emit of vertically
+    // coalesced fill_rectangles for the c_oob strip that backs every active
+    // road row. Caller (emit phase) must have already issued
+    // rdpq_set_mode_fill() so the RDP is in fill mode when our queued command
+    // flushes through the rspq buffer. Args are framebuffer-space (x_off,
+    // y_off) and span width W.
+    void dispatch_coob_fill(int x_off, int y_off, int W);
+
+    // True iff the build pass populated the per-row c_oob array for this
+    // frame. Lets the emit phase fall back to the CPU loop when the build
+    // was CPU-driven (rsp::enabled == false) or hasn't run yet.
+    bool coob_fill_ready();
 }
 }

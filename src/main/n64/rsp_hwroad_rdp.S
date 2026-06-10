@@ -84,6 +84,7 @@
 ####################################################################
 
 #include <rsp_queue.inc>
+#include <rdpq_constants.h>
 
 .set noreorder
 .set at
@@ -95,7 +96,11 @@
 
 RSPQ_BeginOverlayHeader
     # 12 bytes = 3 words: (cmd|arg0) + arg1 + arg2 (descriptor base + state base).
-    RSPQ_DefineCommand HWRoadRDP_BuildRuns, 12
+    RSPQ_DefineCommand HWRoadRDP_BuildRuns,    12
+    # HWRoadRDP_EmitCoobFill: emits the per-row OOB-colour strip via direct
+    # RDP fill_rectangle writes. arg0 = coob array RDRAM ptr, arg1 = (x_off<<16)
+    # | y_off, arg2 = (W<<16) | n_rows.
+    RSPQ_DefineCommand HWRoadRDP_EmitCoobFill, 12
 RSPQ_EndOverlayHeader
 
 RSPQ_BeginSavedState
@@ -140,6 +145,29 @@ N_RUNS_OUT:  .space 512         # 256 rows * 2 = 512B (covers MAX_LINES=224 plus
 # NB_SAVE is the count after pruning duplicates and out-of-range entries.
 BOUNDS:      .space 16
 NB_SAVE:     .space 4
+
+# Per-row c_oob colour table consumed by HWRoadRDP_EmitCoobFill. CPU
+# writes one u16 per row (0xFFFF = inactive, else RGBA5551). Sized for
+# MAX_LINES+1 entries with the trailing entry stamped 0xFFFF on the CPU
+# side so the walk's closing edge falls out naturally; rounded up to
+# 8-byte multiple for SP DMA (232 rows * 2 = 464).
+#
+# Aliased onto N_RUNS_OUT — DMEM is tight and the two arrays never live
+# simultaneously: BuildRuns writes N_RUNS_OUT and DMAs it out before
+# sync_runs returns; EmitCoobFill is queued strictly after that drain, so
+# N_RUNS_OUT's bytes are dead by the time we DMA the coob table in.
+COOB_FILL_DMEM = N_RUNS_OUT
+.align 8
+# RDP command staging for the coob fill command. Mirrors the upstream
+# RDPQ_CMD_STAGING from rsp_rdpq.inc but is private to this overlay so
+# we don't have to drag in the rest of that file (triangle, modes, …).
+# 0xB0 bytes = 22 8-byte slots — enough for many fill+colour pairs
+# before we need to flush via hp_RDPQ_Send.
+COOB_STAGING:    .space 0xB0
+.align 4
+# Current write position inside COOB_STAGING. Reset to COOB_STAGING base
+# at the top of the command and advanced 8 bytes per hp_RDPQ_Write8 call.
+COOB_STAGING_PTR: .space 4
 
 ####################################################################
 # Code segment.
@@ -840,3 +868,254 @@ frame_done:
 
     j       RSPQ_Loop
     nop
+
+############################################################
+# hp_RDPQ_Write8 — append 8 bytes (a0, a1) to COOB_STAGING.
+#
+# Lightweight clone of upstream RDPQ_Write8 sized for this overlay
+# (the upstream lives in rsp_rdpq.inc; including the whole .inc would
+# pull in triangle / mode-API / scissor code we don't use and overflow
+# IMEM). Touches only s0; ra is preserved.
+############################################################
+hp_RDPQ_Write8:
+    lw      s0, %lo(COOB_STAGING_PTR)
+    sw      a0, 0x00(s0)
+    sw      a1, 0x04(s0)
+    addi    s0, s0, 8
+    jr      ra
+    sw      s0, %lo(COOB_STAGING_PTR)
+
+############################################################
+# hp_RDPQ_Send — flush COOB_STAGING bytes [s4, s3) to the RDP buffer.
+#
+# Mirrors upstream RDPQ_Send (rsp_rdpq.inc): DMAs the staged bytes to
+# the live RDP buffer, advancing DP_END via RSPQCmd_RdpAppendBuffer.
+# When the buffer wraps, swaps RDPQ_DYNAMIC_BUFFERS and re-points DP
+# via RSPQCmd_RdpSetBuffer.
+#
+# In:
+#   s4 = DMEM start (= %lo(COOB_STAGING))
+#   s3 = DMEM end (= COOB_STAGING_PTR snapshot)
+# Out: returns to ra (after the tail-called append/set), with
+#      COOB_STAGING_PTR reset by the caller.
+############################################################
+hp_RDPQ_Send:
+    sub     rspq_cmd_size, s3, s4
+    beqz    rspq_cmd_size, JrRa          # nothing staged — exit cleanly
+    move    ra2, ra
+
+    lw      s0, %lo(RDPQ_CURRENT)
+    and     s0, s0, 0xFFFFFF             # mask to RDRAM
+    lw      a2, %lo(RDPQ_SENTINEL)
+    sub     a2, a2, rspq_cmd_size
+    bge     a2, s0, hp_send_do_dma
+    li      t5, RSPQCmd_RdpAppendBuffer  # next_func = append
+
+    # Not enough room — switch dynamic buffers. Wait for END_VALID to
+    # clear (and any SYNC_FULL to drain) before reusing the other slot.
+    lbu     t3, %lo(RDPQ_SYNCFULL_ONGOING)
+    ori     t3, t3, DP_STATUS_END_VALID
+hp_send_wait:
+    mfc0    t0, COP0_DP_STATUS
+    and     t0, t0, t3
+    bnez    t0, hp_send_wait
+    nop
+
+    lw      s0, %lo(RDPQ_DYNAMIC_BUFFERS) + 4
+    lw      t1, %lo(RDPQ_DYNAMIC_BUFFERS) + 0
+    sw      s0, %lo(RDPQ_DYNAMIC_BUFFERS) + 0
+    sw      t1, %lo(RDPQ_DYNAMIC_BUFFERS) + 4
+    add     a2, s0, RDPQ_DYNAMIC_BUFFER_SIZE
+    move    a1, s0                       # a1 = new DP_START
+    li      t5, RSPQCmd_RdpSetBuffer     # next_func = setbuf
+
+hp_send_do_dma:
+    add     t0, rspq_cmd_size, -1
+    jal     DMAOut
+    add     a0, s0, rspq_cmd_size        # a0 = new DP_END
+
+    jr      t5                            # tail to next_func
+    move    ra, ra2
+
+############################################################
+# HWRoadRDP_EmitCoobFill: emit the per-row OOB-colour strip directly
+# to the RDP via fill_rectangles.
+#
+# Args:
+#   a0 = (cmd<<24) | coob_phys (RDRAM ptr to u16 COOB array)
+#   a1 = (x_off<<16) | y_off
+#   a2 = (W<<16) | n_rows
+#
+# The caller (emit_foreground_lores_rdp on CPU) must have issued
+# rdpq_set_mode_fill() before queueing this command so the RDP is in
+# fill mode when our staged commands flush through.
+#
+# Per row y in [0..n_rows]:
+#   - load c = COOB[y]; 0xFFFF means "inactive"
+#   - track an "open" rect (run_start, run_color):
+#       * if active and matches run_color: extend (no emit)
+#       * if active and different colour, or inactive: close run, emit
+#         SET_FILL_COLOR + FILL_RECTANGLE for [x_off, y_off+run_start ..
+#         x_off+W, y_off+y], then open a new run if active.
+#
+# Walking the trailing 0xFFFF sentinel at y=n_rows closes the final
+# open run without special-casing.
+#
+# Reg roster:
+#   s0  = coob phys (saved before DMA), then scratch
+#   s1  = x_off (sign-extended)
+#   s2  = y_off (sign-extended)
+#   s5  = n_rows (loop bound)
+#   s6  = W   — kept out of s3 because hp_RDPQ_Send consumes s3 as its
+#              DMEM-end argument; s6 survives both DMAOut and the flush.
+#   k0  = current y
+#   t6  = run_start (or -1)
+#   t7  = run_color (only valid when t6 >= 0). Trashed by hp_RDPQ_Send
+#         (it aliases rspq_cmd_size), but always re-set in the open path
+#         or left dead in the close-only path before next read.
+#   s7  = current row c — held in a callee-saved reg so it survives the
+#         mid-loop flush (DMAOut inside hp_RDPQ_Send destroys t-regs).
+############################################################
+HWRoadRDP_EmitCoobFill:
+    # ---- DMA the coob array in. -----------------------------
+    # COOB array is MAX_LINES+1 u16 = 464 bytes (CPU rounds and stamps a
+    # 0xFFFF sentinel at MAX_LINES so the loop's trailing close lands).
+    # Strip the rspq cmd byte from a0 via shift (andi's immediate is 16-bit
+    # on MIPS, so 0xFFFFFF can't be encoded directly).
+    sll     s0, a0, 8
+    srl     s0, s0, 8                    # phys = a0 & 0x00FFFFFF
+    li      s4, %lo(COOB_FILL_DMEM)
+    jal     DMAIn
+    li      t0, DMA_SIZE(464, 1)
+
+    # ---- Stash inputs in callee-saved regs. -----------------
+    # x_off / y_off are sign-extended in case the caller hands us a
+    # negative offset (none today, but keep the encoding honest).
+    sra     s1, a1, 16                   # x_off
+    sll     s2, a1, 16
+    sra     s2, s2, 16                   # y_off
+    sra     s6, a2, 16                   # W (kept in s6 so flush below
+                                         #     can use s3 as hp_RDPQ_Send arg)
+    andi    s5, a2, 0xFFFF               # n_rows
+
+    # ---- Reset staging pointer. ------------------------------
+    li      t0, %lo(COOB_STAGING)
+    sw      t0, %lo(COOB_STAGING_PTR)
+
+    # ---- Loop init. -----------------------------------------
+    li      t6, -1                       # run_start = -1
+    li      t7, 0                        # run_color (unused while -1)
+    li      k0, 0                        # y
+
+    addiu   s5, s5, 1                    # walk inclusive of sentinel row
+
+coob_loop:
+    sltu    t0, k0, s5
+    beqz    t0, coob_done
+    nop
+
+    # c = COOB[y]. Land in callee-saved s7 so it survives any mid-loop
+    # flush via DMAOut (which destroys t-regs).
+    sll     t0, k0, 1
+    addiu   t1, t0, %lo(COOB_FILL_DMEM)
+    lhu     s7, 0(t1)
+
+    bltz    t6, coob_no_open
+    nop
+
+    # Have an open run. If colour matches, extend (skip emit).
+    beq     s7, t7, coob_advance
+    nop
+
+    # ---- Close current run: emit SET_FILL_COLOR + FILL_RECTANGLE. ----
+    # SET_FILL_COLOR: w0 = 0xF7000000, w1 = (c<<16) | c (16bpp pack)
+    lui     a0, 0xF700
+    sll     a1, t7, 16
+    or      a1, a1, t7
+    jal     hp_RDPQ_Write8
+    nop
+
+    # FILL_RECTANGLE: coords are 10.2 sub-pixel — multiply pixel inputs
+    # by 4 before packing into the 12-bit fields. In fill mode (cycle_type
+    # == 2) the encoded w0 also gets (4<<12)|4 subtracted so that an
+    # exclusive bottom-right (x1, y1) sample-aligns to the last covered
+    # pixel: see __rdpq_fill_rectangle in libdragon/src/rdpq/rdpq_rect.c.
+    #   w0 = 0xF6000000 | ((x1*4 & 0xFFF) << 12) | (y1*4 & 0xFFF) - 0x4004
+    #   w1 = ((x0*4 & 0xFFF) << 12) | (y0*4 & 0xFFF)
+    # Coords (pixel space):
+    #   x0 = x_off               x1 = x_off + W
+    #   y0 = y_off + run_start   y1 = y_off + y
+    add     t8, s2, t6                   # y0 = y_off + run_start  (px)
+    add     t9, s2, k0                   # y1 = y_off + y          (px)
+    add     v0, s1, s6                   # x1 = x_off + W          (px)
+
+    sll     v0, v0, 2                    # x1 subpixel
+    sll     t9, t9, 2                    # y1 subpixel
+    andi    t0, v0, 0xFFF
+    sll     t0, t0, 12
+    andi    t1, t9, 0xFFF
+    or      t0, t0, t1
+    lui     t1, 0xF600
+    or      t0, t0, t1
+    addiu   a0, t0, -0x4004              # fill-mode coord adjust
+
+    sll     t2, s1, 2                    # x0 subpixel (t2 = scratch; c is in s7)
+    sll     t8, t8, 2                    # y0 subpixel
+    andi    t0, t2, 0xFFF
+    sll     t0, t0, 12
+    andi    t1, t8, 0xFFF
+    or      a1, t0, t1
+    jal     hp_RDPQ_Write8
+    nop
+
+    # ---- Mid-command flush if staging is getting full. -----
+    # Each emitted rect uses 16 bytes; threshold (0xA0 = 160) leaves
+    # >= 16 bytes headroom so we never overflow between checks. c is in
+    # s7 (callee-saved), so DMAOut's t-clobbers below don't touch it.
+    lw      t4, %lo(COOB_STAGING_PTR)
+    li      t5, %lo(COOB_STAGING) + 0xA0
+    sltu    t0, t4, t5                   # 1 if ptr < threshold (skip flush)
+    bnez    t0, coob_after_flush
+    nop
+    li      s4, %lo(COOB_STAGING)
+    move    s3, t4                        # s3 = staging end (input to hp_RDPQ_Send)
+    sw      s4, %lo(COOB_STAGING_PTR)     # reset write head to base
+    jal     hp_RDPQ_Send
+    nop
+coob_after_flush:
+
+    # ---- Decide what to do with the new row. ---------------
+    # If s7 (c) == 0xFFFF (inactive), leave closed; otherwise open a new
+    # run at y with c.
+    li      t3, 0xFFFF
+    beq     s7, t3, coob_close_only
+    nop
+    move    t6, k0                       # run_start = y
+    move    t7, s7                       # run_color = c
+    j       coob_advance
+    nop
+coob_close_only:
+    li      t6, -1
+    j       coob_advance
+    nop
+
+coob_no_open:
+    # No open run. If c is active, open. If inactive, fall through.
+    li      t3, 0xFFFF
+    beq     s7, t3, coob_advance
+    nop
+    move    t6, k0
+    move    t7, s7
+
+coob_advance:
+    addiu   k0, k0, 1
+    j       coob_loop
+    nop
+
+coob_done:
+    # Final flush + return to dispatcher.
+    li      s4, %lo(COOB_STAGING)
+    lw      s3, %lo(COOB_STAGING_PTR)
+    li      t0, %lo(COOB_STAGING)
+    sw      t0, %lo(COOB_STAGING_PTR)
+    jal_and_j hp_RDPQ_Send, RSPQ_Loop
