@@ -25,9 +25,6 @@ public:
     void restore_tiles();
     void set_x_clamp(const uint16_t);
     void update_tile_values();
-    void render_tile_layer(uint16_t*, uint8_t, uint8_t);
-    void render_text_layer(uint16_t*, uint8_t);
-    void render_all_tiles(uint16_t*);
 
     // RDP tile-layer renderer: walks both BG (page=1) and FG (page=0) tilemaps
     // in a single pass that shares the atlas ring, unique-code map, and chunk
@@ -57,15 +54,19 @@ private:
     uint16_t s16_width_noscale;
 
     static const int TILES_LENGTH = 0x10000;
-    // Aligned to 8 bytes so rdpq DMAs can read tile rows directly from this
-    // array as a CI4 atlas — each tile_idx*8 uint32_t row holds 8 nibbles
-    // (leftmost pixel in the high nibble of byte 0), which is the exact
-    // CI4 byte layout the RDP expects on a big-endian N64.
+    // The legacy SDL build holds a 256 KiB resident CI4 tile array (built
+    // by bitplane-decoding the 192 KiB raw tile ROM at init time). On N64
+    // the conversion is done offline by the bake-sprites tool, which emits
+    // /tiles/tiles_native.bin into DFS — a 256 KiB CI4 blob laid out as
+    // uint32_t [TILES_LENGTH], big-endian on disk so PI-DMA reproduces the
+    // array bit-for-bit in BE N64 RAM. render_rdp_tile_layers and
+    // render_rdp_text_layer PI-DMA 32 bytes (8 rows × 4 B) per unique tile
+    // from this blob into a per-call scratch instead of indexing tiles[].
     //
-    // The SDL build keeps a tiles_backup mirror for the widescreen-only
-    // patch/restore cycle in OMusic; on N64 widescreen is hardcoded off,
-    // so the backup is dropped to save 256 KiB BSS.
-    alignas(8) uint32_t tiles[TILES_LENGTH];        // Converted tiles
+    // tiles_pi_addr is resolved at init() via dfs_rom_addr; 0 = unresolved
+    // / missing payload. patch_tiles / restore_tiles are stubbed on N64
+    // (widescreen is hardcoded off), so the blob is truly read-only.
+    uint32_t tiles_pi_addr;
 
     uint16_t page[4];
     uint16_t scroll_x[4];
@@ -75,66 +76,4 @@ private:
 
     static const uint16_t NUM_TILES = 0x2000; // Length of graphic rom / 24
     static const uint16_t TILEMAP_COLOUR_OFFSET = 0x1c00;
-    
-    void (hwtiles::*render8x8_tile_mask)(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        uint16_t StartX, 
-        uint16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset); 
-        
-    void (hwtiles::*render8x8_tile_mask_clip)(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        int16_t StartX, 
-        int16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset); 
-        
-    void render8x8_tile_mask_lores(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        uint16_t StartX, 
-        uint16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset); 
-
-    void render8x8_tile_mask_clip_lores(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        int16_t StartX, 
-        int16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset);
-        
-    void render8x8_tile_mask_hires(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        uint16_t StartX, 
-        uint16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset); 
-        
-    void render8x8_tile_mask_clip_hires(
-        uint16_t *buf,
-        uint16_t nTileNumber, 
-        int16_t StartX, 
-        int16_t StartY, 
-        uint16_t nTilePalette, 
-        uint16_t nColourDepth, 
-        uint16_t nMaskColour, 
-        uint16_t nPaletteOffset);
-        
-    inline void set_pixel_x4(uint16_t *buf, uint32_t data);
 };

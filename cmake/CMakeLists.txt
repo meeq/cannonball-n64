@@ -231,4 +231,5 @@ n64_create_rom(cannonball
     EXTRA_DFS_DEPS ${AUDIO_PAYLOAD_STAGED_FILES}
                    "${BAKE_SPRITES_STAGED_BLOB}"
                    "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
+                   "${BAKE_TILES_STAGED_NATIVE_BLOB}"
 )

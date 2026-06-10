@@ -185,9 +185,39 @@ static bool write_index(const std::string& path,
     return (bool)f;
 }
 
+// Bitplane → CI4 conversion for OutRun tile graphics. Mirrors
+// hwtiles::init() exactly (src/main/hwvideo/hwtiles.cpp): three 64 KiB
+// bitplanes laid out back-to-back at offsets 0x00000/0x10000/0x20000 of
+// the 0x30000-byte tile ROM, decoded into a 256 KiB uint32_t array
+// indexed by [i], where i ∈ [0, 0x10000). Each output word holds 8 CI4
+// pixels (leftmost in the high nibble of byte 0) — the exact CI4 byte
+// layout the RDP expects on a big-endian N64.
+static void bake_tiles_words(const uint8_t* src_tiles,
+                             std::vector<uint32_t>& tiles_words)
+{
+    const uint32_t TILES_LENGTH = 0x10000u;
+    tiles_words.assign(TILES_LENGTH, 0);
+    for (uint32_t i = 0; i < TILES_LENGTH; i++) {
+        const uint8_t p0 = src_tiles[i];
+        const uint8_t p1 = src_tiles[i + 0x10000];
+        const uint8_t p2 = src_tiles[i + 0x20000];
+        uint32_t val = 0;
+        for (int bit_i = 0; bit_i < 8; bit_i++) {
+            const uint8_t bit = (uint8_t)(7 - bit_i);
+            const uint8_t pix =
+                (uint8_t)( ((p0 >> bit)       & 1)
+                         | (((p1 >> bit) << 1) & 2)
+                         | (((p2 >> bit) << 2) & 4) );
+            val = (val << 4) | pix;
+        }
+        tiles_words[i] = val;
+    }
+}
+
 int main(int argc, char** argv)
 {
-    std::string roms_dir, blob_path, index_path, sprites_blob_path;
+    std::string roms_dir, blob_path, index_path,
+                sprites_blob_path, tiles_blob_path;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -199,13 +229,14 @@ int main(int argc, char** argv)
         else if (a == "--blob")          blob_path         = next("--blob");
         else if (a == "--index")         index_path        = next("--index");
         else if (a == "--sprites-blob")  sprites_blob_path = next("--sprites-blob");
+        else if (a == "--tiles-blob")    tiles_blob_path   = next("--tiles-blob");
         else { std::fprintf(stderr, "bake-sprites: unknown arg %s\n", a.c_str()); return 2; }
     }
     if (roms_dir.empty() || blob_path.empty() || index_path.empty()
-        || sprites_blob_path.empty()) {
+        || sprites_blob_path.empty() || tiles_blob_path.empty()) {
         std::fprintf(stderr,
             "usage: bake-sprites --roms <dir> --blob <out.bin> --index <out.c>"
-            " --sprites-blob <out.bin>\n");
+            " --sprites-blob <out.bin> --tiles-blob <out.bin>\n");
         return 2;
     }
 
@@ -260,6 +291,37 @@ int main(int argc, char** argv)
         if (!f) {
             std::fprintf(stderr, "bake-sprites: write failed %s\n",
                          sprites_blob_path.c_str());
+            return 1;
+        }
+    }
+
+    // Emit tiles_native.bin — the 256 KiB pre-decoded CI4 tile blob the N64
+    // runtime DMAs on demand instead of holding hwtiles::tiles[] resident.
+    // Each uint32_t is written big-endian on disk so PI-DMA into BE N64 RAM
+    // reproduces the array bit-for-bit (matches hwtiles::init()'s output
+    // exactly).
+    {
+        std::vector<uint32_t> tiles_words;
+        bake_tiles_words(roms.tiles.rom, tiles_words);
+
+        std::ofstream f(tiles_blob_path, std::ios::binary);
+        if (!f) {
+            std::fprintf(stderr, "bake-sprites: cannot open %s\n",
+                         tiles_blob_path.c_str());
+            return 1;
+        }
+        std::vector<uint8_t> be(tiles_words.size() * 4);
+        for (size_t i = 0; i < tiles_words.size(); i++) {
+            const uint32_t w = tiles_words[i];
+            be[i*4 + 0] = (uint8_t)((w >> 24) & 0xff);
+            be[i*4 + 1] = (uint8_t)((w >> 16) & 0xff);
+            be[i*4 + 2] = (uint8_t)((w >>  8) & 0xff);
+            be[i*4 + 3] = (uint8_t)( w        & 0xff);
+        }
+        f.write((const char*)be.data(), (std::streamsize)be.size());
+        if (!f) {
+            std::fprintf(stderr, "bake-sprites: write failed %s\n",
+                         tiles_blob_path.c_str());
             return 1;
         }
     }

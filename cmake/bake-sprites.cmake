@@ -23,8 +23,10 @@ endif()
 
 set(_BAKE_TOOL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../tools/bake-sprites")
 set(_BAKE_ROMS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../roms/")
-set(_BAKE_STAGE_DIR "${N64_DFS_ROOT}/sprites")
+set(_BAKE_STAGE_DIR       "${N64_DFS_ROOT}/sprites")
+set(_BAKE_TILES_STAGE_DIR "${N64_DFS_ROOT}/tiles")
 file(MAKE_DIRECTORY "${_BAKE_STAGE_DIR}")
+file(MAKE_DIRECTORY "${_BAKE_TILES_STAGE_DIR}")
 
 # -----------------------------------------------------------------------------
 # Host bake-sprites tool — child cmake invocation (auto-detects host
@@ -60,18 +62,22 @@ set(BAKE_SPRITES_BLOB               "${CMAKE_BINARY_DIR}/sprite_atlas.bin")
 set(BAKE_SPRITES_STAGED_BLOB        "${_BAKE_STAGE_DIR}/sprite_atlas.bin")
 set(BAKE_SPRITES_NATIVE_BLOB        "${CMAKE_BINARY_DIR}/sprites_native.bin")
 set(BAKE_SPRITES_STAGED_NATIVE_BLOB "${_BAKE_STAGE_DIR}/sprites_native.bin")
+set(BAKE_TILES_NATIVE_BLOB          "${CMAKE_BINARY_DIR}/tiles_native.bin")
+set(BAKE_TILES_STAGED_NATIVE_BLOB   "${_BAKE_TILES_STAGE_DIR}/tiles_native.bin")
 
 add_custom_command(
     OUTPUT  "${BAKE_SPRITES_INDEX_SRC}"
             "${BAKE_SPRITES_BLOB}"
             "${BAKE_SPRITES_NATIVE_BLOB}"
+            "${BAKE_TILES_NATIVE_BLOB}"
     COMMAND "${_BAKE_HOST_BIN}"
             --roms          "${_BAKE_ROMS_DIR}"
             --blob          "${BAKE_SPRITES_BLOB}"
             --index         "${BAKE_SPRITES_INDEX_SRC}"
             --sprites-blob  "${BAKE_SPRITES_NATIVE_BLOB}"
+            --tiles-blob    "${BAKE_TILES_NATIVE_BLOB}"
     DEPENDS "${_BAKE_HOST_BIN}"
-    COMMENT "[BAKE] sprite_atlas.bin + sprite_atlas_index.c + sprites_native.bin"
+    COMMENT "[BAKE] sprite_atlas.bin + sprite_atlas_index.c + sprites_native.bin + tiles_native.bin"
     VERBATIM)
 
 add_custom_command(
@@ -90,7 +96,16 @@ add_custom_command(
     COMMENT "[BAKE] stage sprites_native.bin"
     VERBATIM)
 
+add_custom_command(
+    OUTPUT  "${BAKE_TILES_STAGED_NATIVE_BLOB}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${BAKE_TILES_NATIVE_BLOB}" "${BAKE_TILES_STAGED_NATIVE_BLOB}"
+    DEPENDS "${BAKE_TILES_NATIVE_BLOB}"
+    COMMENT "[BAKE] stage tiles_native.bin"
+    VERBATIM)
+
 add_custom_target(bake-sprites ALL
     DEPENDS "${BAKE_SPRITES_INDEX_SRC}"
             "${BAKE_SPRITES_STAGED_BLOB}"
-            "${BAKE_SPRITES_STAGED_NATIVE_BLOB}")
+            "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
+            "${BAKE_TILES_STAGED_NATIVE_BLOB}")
