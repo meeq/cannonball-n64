@@ -654,93 +654,107 @@ void HWRoad::emit_foreground_lores_rdp(int x_off, int y_off)
     // (above-horizon sky bands, tunnel-wall strips) where x0/x1 are constant
     // across many rows.
 
-    struct OpenRect { uint16_t x0, x1, color; uint16_t y_start; };
-    // Bound: at most one open per visible run per row, capped by
-    // MAX_RUNS_PER_ROW. Double-buffer for "current row about to open" vs
-    // "carried from prior row".
-    OpenRect open[MAX_RUNS_PER_ROW];
-    OpenRect next_open[MAX_RUNS_PER_ROW];
-    int n_open = 0;
-
     uint32_t rects = 0;
 
-    auto emit_open = [&](const OpenRect& o, int y_end) {
-        if (!color_valid || o.color != last_color5551) {
-            rdpq_set_fill_color(rgba32_from_5551(o.color));
-            last_color5551 = o.color;
-            color_valid    = true;
-        }
-        rdpq_fill_rectangle(x_off + o.x0, y_off + o.y_start,
-                            x_off + o.x1, y_off + y_end);
-        n64_profile::prim_count++;
-        rects++;
-    };
+    if (n64::hwroad_rdp_rsp::emit_runs_ready()) {
+        // Hand the per-run fill emit off to the RSP. It DMA's emit_row +
+        // n_runs once, then per row DMA's runs[] and emits SET_FILL_COLOR +
+        // FILL_RECTANGLE pairs straight into the RDP buffer — same dedup +
+        // skip semantics as emit_open below (skip color==c_oob, color==0,
+        // zero-width). No vertical coalesce: prior measurement of the CPU
+        // path showed coalesce wins came from static-x bands the dispatch
+        // can recoup later if needed.
+        n64::hwroad_rdp_rsp::dispatch_emit_runs(x_off, y_off);
+        // RSP emits its own SET_FILL_COLORs, so any cached last colour on
+        // the CPU side is stale relative to the RDP stream.
+        color_valid = false;
+    } else {
+        struct OpenRect { uint16_t x0, x1, color; uint16_t y_start; };
+        // Bound: at most one open per visible run per row, capped by
+        // MAX_RUNS_PER_ROW. Double-buffer for "current row about to open" vs
+        // "carried from prior row".
+        OpenRect open[MAX_RUNS_PER_ROW];
+        OpenRect next_open[MAX_RUNS_PER_ROW];
+        int n_open = 0;
 
-    for (int y = 0; y < MAX_LINES; y++)
-    {
-        int n_next = 0;
-        // Track which prior-row opens get continued; the rest emit at y.
-        uint32_t consumed = 0;
+        auto emit_open = [&](const OpenRect& o, int y_end) {
+            if (!color_valid || o.color != last_color5551) {
+                rdpq_set_fill_color(rgba32_from_5551(o.color));
+                last_color5551 = o.color;
+                color_valid    = true;
+            }
+            rdpq_fill_rectangle(x_off + o.x0, y_off + o.y_start,
+                                x_off + o.x1, y_off + y_end);
+            n64_profile::prim_count++;
+            rects++;
+        };
 
-        if (line[y].kind == DRAW) {
-            const Run*     runs   = runs_ptr(y);
-            const int      n      = line[y].n_runs;
-            const uint16_t c_oob  = line[y].c_oob;
-            int prev_x = line[y].s_start;
-            for (int r = 0; r < n; r++) {
-                const uint16_t color = runs[r].color5551;
-                const int      xe    = runs[r].x_end;
-                if (color != c_oob && color != 0 && xe > prev_x) {
-                    // In-row horizontal coalesce: if the immediately previous
-                    // opened entry abuts (x1==prev_x) with the same color,
-                    // extend its x1 instead of opening a new rect. Both
-                    // continued and freshly-opened entries are fair game —
-                    // mutating a continued open's x1 just means future rows
-                    // will need to match the wider extent to continue, which
-                    // is the desired behaviour for static-x bands.
-                    if (n_next > 0
-                        && next_open[n_next - 1].color == color
-                        && next_open[n_next - 1].x1    == (uint16_t)prev_x) {
-                        next_open[n_next - 1].x1 = (uint16_t)xe;
-                    } else {
-                        int matched = -1;
-                        for (int o = 0; o < n_open; o++) {
-                            if (consumed & (1u << o)) continue;
-                            if (open[o].x0 == prev_x && open[o].x1 == xe
-                                && open[o].color == color) {
-                                matched = o;
-                                break;
+        for (int y = 0; y < MAX_LINES; y++)
+        {
+            int n_next = 0;
+            // Track which prior-row opens get continued; the rest emit at y.
+            uint32_t consumed = 0;
+
+            if (line[y].kind == DRAW) {
+                const Run*     runs   = runs_ptr(y);
+                const int      n      = line[y].n_runs;
+                const uint16_t c_oob  = line[y].c_oob;
+                int prev_x = line[y].s_start;
+                for (int r = 0; r < n; r++) {
+                    const uint16_t color = runs[r].color5551;
+                    const int      xe    = runs[r].x_end;
+                    if (color != c_oob && color != 0 && xe > prev_x) {
+                        // In-row horizontal coalesce: if the immediately previous
+                        // opened entry abuts (x1==prev_x) with the same color,
+                        // extend its x1 instead of opening a new rect. Both
+                        // continued and freshly-opened entries are fair game —
+                        // mutating a continued open's x1 just means future rows
+                        // will need to match the wider extent to continue, which
+                        // is the desired behaviour for static-x bands.
+                        if (n_next > 0
+                            && next_open[n_next - 1].color == color
+                            && next_open[n_next - 1].x1    == (uint16_t)prev_x) {
+                            next_open[n_next - 1].x1 = (uint16_t)xe;
+                        } else {
+                            int matched = -1;
+                            for (int o = 0; o < n_open; o++) {
+                                if (consumed & (1u << o)) continue;
+                                if (open[o].x0 == prev_x && open[o].x1 == xe
+                                    && open[o].color == color) {
+                                    matched = o;
+                                    break;
+                                }
+                            }
+                            if (matched >= 0) {
+                                consumed |= (1u << matched);
+                                next_open[n_next++] = open[matched];
+                            } else {
+                                next_open[n_next].x0      = (uint16_t)prev_x;
+                                next_open[n_next].x1      = (uint16_t)xe;
+                                next_open[n_next].color   = color;
+                                next_open[n_next].y_start = (uint16_t)y;
+                                n_next++;
                             }
                         }
-                        if (matched >= 0) {
-                            consumed |= (1u << matched);
-                            next_open[n_next++] = open[matched];
-                        } else {
-                            next_open[n_next].x0      = (uint16_t)prev_x;
-                            next_open[n_next].x1      = (uint16_t)xe;
-                            next_open[n_next].color   = color;
-                            next_open[n_next].y_start = (uint16_t)y;
-                            n_next++;
-                        }
                     }
+                    prev_x = xe;
                 }
-                prev_x = xe;
             }
+
+            // Close any prior-row opens that didn't continue.
+            for (int o = 0; o < n_open; o++) {
+                if (!(consumed & (1u << o)))
+                    emit_open(open[o], y);
+            }
+
+            // Swap.
+            for (int i = 0; i < n_next; i++) open[i] = next_open[i];
+            n_open = n_next;
         }
 
-        // Close any prior-row opens that didn't continue.
-        for (int o = 0; o < n_open; o++) {
-            if (!(consumed & (1u << o)))
-                emit_open(open[o], y);
-        }
-
-        // Swap.
-        for (int i = 0; i < n_next; i++) open[i] = next_open[i];
-        n_open = n_next;
+        // Flush any opens still active after the last row.
+        for (int o = 0; o < n_open; o++) emit_open(open[o], MAX_LINES);
     }
-
-    // Flush any opens still active after the last row.
-    for (int o = 0; o < n_open; o++) emit_open(open[o], MAX_LINES);
 
     uint64_t tC = get_ticks_us();
 

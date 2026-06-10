@@ -77,5 +77,20 @@ namespace hwroad_rdp_rsp
     // frame. Lets the emit phase fall back to the CPU loop when the build
     // was CPU-driven (rsp::enabled == false) or hasn't run yet.
     bool coob_fill_ready();
+
+    // Per-row body fill dispatch — RSP-side emit of fill_rectangles for the
+    // per-row run lists produced by BuildRuns. Reads n_runs from RDRAM (async
+    // written by the BuildRuns DMAOut) and the per-row runs[][] from the
+    // shared runs_buf. Walks each row's runs, emitting SET_FILL_COLOR +
+    // FILL_RECTANGLE pairs for runs whose colour differs from c_oob (Phase 2a
+    // already paints those) and is non-zero (vestigial CI4 transparent slot).
+    // Must be queued AFTER dispatch_coob_fill so the c_oob backstop lands
+    // first in the RDP command stream.
+    void dispatch_emit_runs(int x_off, int y_off);
+
+    // True iff the build pass populated the per-row emit state for this
+    // frame. Lets the emit phase fall back to the CPU Phase 2b loop when
+    // the build was CPU-driven or hasn't run yet.
+    bool emit_runs_ready();
 }
 }

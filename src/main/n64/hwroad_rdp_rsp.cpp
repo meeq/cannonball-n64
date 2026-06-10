@@ -144,6 +144,24 @@ namespace
     uint16_t* coob_fill_uc        = nullptr;
     bool      coob_fill_populated = false;
 
+    // Per-row state consumed by the HWRoadRDP_EmitRuns overlay command.
+    // s_start = initial prev_x for the row's run walk; c_oob = colour to
+    // skip on emit (Phase 2a coob_fill already painted it). n_runs is read
+    // separately from n_runs_uc, which BuildRuns DMAOuts asynchronously —
+    // EmitRuns DMAs both arrays in at command entry. 4 B/row × MAX_LINES
+    // (224) = 896 B total.
+    struct alignas(4) EmitRowRDP
+    {
+        uint16_t s_start;
+        uint16_t c_oob;
+    };
+    static_assert(sizeof(EmitRowRDP) == 4, "EmitRowRDP must be 4 bytes");
+
+    constexpr size_t EMIT_ROW_BYTES = ((size_t)MAX_LINES * sizeof(EmitRowRDP) + 7) & ~7;
+    void*       emit_row_cached     = nullptr;
+    EmitRowRDP* emit_row_uc         = nullptr;
+    bool        emit_runs_populated = false;
+
     uint32_t s_frame = 0;
 }
 
@@ -180,6 +198,11 @@ void init()
     coob_fill_uc     = (uint16_t*)UncachedAddr(coob_fill_cached);
     std::memset(coob_fill_uc, 0xFF, COOB_FILL_BYTES);
 
+    emit_row_cached = memalign(16, EMIT_ROW_BYTES);
+    assertf(emit_row_cached, "hwroad_rdp_rsp: emit_row alloc failed");
+    emit_row_uc     = (EmitRowRDP*)UncachedAddr(emit_row_cached);
+    std::memset(emit_row_uc, 0, EMIT_ROW_BYTES);
+
     state_uc->n_runs_phys = PhysicalAddr(n_runs_cached);
 
     initialised = true;
@@ -191,6 +214,10 @@ void sync_runs()
     using namespace n64::hwroad_rdp::detail;
 
     if (!initialised) return;
+    // Stage 2: when EmitRuns will dispatch on RSP, the CPU never reads
+    // n_runs / runs_buf — the RSP consumes both from RDRAM directly. Skip
+    // the rspq_wait to preserve the build-phase async parallelism.
+    if (emit_runs_populated) return;
     rspq_wait();
     for (int y = 0; y < MAX_LINES; y++) {
         if (line[y].kind == DRAW)
@@ -213,6 +240,12 @@ void shutdown()
         coob_fill_uc     = nullptr;
     }
     coob_fill_populated = false;
+    if (emit_row_cached) {
+        free(emit_row_cached);
+        emit_row_cached = nullptr;
+        emit_row_uc     = nullptr;
+    }
+    emit_runs_populated = false;
     initialised = false;
 }
 
@@ -233,6 +266,26 @@ void dispatch_coob_fill(int x_off, int y_off, int W)
                ((uint32_t)(W     & 0xFFFF) << 16) | ((uint32_t)(MAX_LINES & 0xFFFF)));
     // Single-use per frame: emit phase consumed it.
     coob_fill_populated = false;
+}
+
+bool emit_runs_ready()
+{
+    return initialised && emit_runs_populated;
+}
+
+void dispatch_emit_runs(int x_off, int y_off)
+{
+    using namespace n64::hwroad_rdp::detail;
+    if (!emit_runs_ready()) return;
+    // 16-byte command (4 user args): emit_row + n_runs + runs_base RDRAM
+    // pointers plus packed (x_off, y_off). runs_buf is the uncached alias of
+    // runs_buf_cached; PhysicalAddr masks the KSEG bits the same either way.
+    rspq_write(overlay_id, 2,
+               PhysicalAddr(emit_row_cached),
+               PhysicalAddr(n_runs_cached),
+               PhysicalAddr(runs_buf),
+               ((uint32_t)(x_off & 0xFFFF) << 16) | ((uint32_t)(y_off & 0xFFFF)));
+    emit_runs_populated = false;
 }
 
 } // namespace hwroad_rdp_rsp
@@ -350,13 +403,22 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
 
         if (((data0 & 0x800) != 0) && ((data1 & 0x800) != 0))
         { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
-          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
+          rsp::coob_fill_uc[y] = 0xFFFF;
+          rsp::emit_row_uc[y].s_start = 0;
+          rsp::emit_row_uc[y].c_oob   = 0;
+          continue; }
         if (ctrl == 0 && ((data0 & 0x800) != 0))
         { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
-          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
+          rsp::coob_fill_uc[y] = 0xFFFF;
+          rsp::emit_row_uc[y].s_start = 0;
+          rsp::emit_row_uc[y].c_oob   = 0;
+          continue; }
         if (ctrl == 3 && ((data1 & 0x800) != 0))
         { line[y].kind = SKIP; rsp::desc_uc[y].kind = 0;
-          rsp::coob_fill_uc[y] = 0xFFFF; continue; }
+          rsp::coob_fill_uc[y] = 0xFFFF;
+          rsp::emit_row_uc[y].s_start = 0;
+          rsp::emit_row_uc[y].c_oob   = 0;
+          continue; }
 
         const int32_t color0_idx = ((road_control & 4) != 0)
                                       ? y : (int32_t)(data0 & 0x1ff);
@@ -427,6 +489,13 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         // kind that maps to the 0xFFFF sentinel above.
         rsp::coob_fill_uc[y] = c_oob;
 
+        // Per-row body-emit state. OOB_ONLY rows produce no body runs so
+        // n_runs will be 0 and the RSP walk will skip them via the
+        // n_runs_uc lookup; s_start/c_oob still get stamped so a stale
+        // value from a prior frame doesn't leak in.
+        rsp::emit_row_uc[y].s_start = (uint16_t)span_start;
+        rsp::emit_row_uc[y].c_oob   = c_oob;
+
         if (span_end <= span_start) {
             line[y].kind = OOB_ONLY;
             rsp::desc_uc[y].kind = 1;
@@ -460,6 +529,7 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     // all the way to the last drawn row.
     rsp::coob_fill_uc[MAX_LINES] = 0xFFFF;
     rsp::coob_fill_populated = true;
+    rsp::emit_runs_populated = true;
 
     uint64_t t_cpu_end = get_ticks_us();
     rsp::cpu_us = (rsp::cpu_us * 7 + (uint32_t)(t_cpu_end - t0)) >> 3;
