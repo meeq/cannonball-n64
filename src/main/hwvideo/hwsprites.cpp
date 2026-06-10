@@ -22,6 +22,14 @@ namespace n64_profile {
 // so the ISViewer log isn't cluttered.
 #define CANNONBALL_LOG_HEAP 0
 
+// Diagnostic toggle. When set to 1, the baked-atlas fast path is skipped
+// entirely and every extract goes through the CPU EOR-walk spillover. Used
+// to bisect sprite-corruption regressions involving the cart-side sprite
+// ROM path: if corruption disappears with this on, the bug is in the baked
+// path; if it persists, the bug is in the spillover slice-DMA / rebase
+// logic. Leave at 0 in checked-in builds.
+#define HWSPR_DIAG_FORCE_SPILLOVER 0
+
 /***************************************************************************
     Video Emulation: OutRun Sprite Rendering Hardware.
     Based on MAME source code.
@@ -389,6 +397,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     // only the first source_h rows (ci4_stride bytes each) from the cart
     // into the bump pool. That replaces ~500 us of CPU EOR-walk + bitplane
     // decode with a ~50-100 us PI transfer.
+#if !HWSPR_DIAG_FORCE_SPILLOVER
     if (baked_blob_pi_addr)
     {
         const HwspritesBakedHit hit =
@@ -411,7 +420,11 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             if (atlas_used + bytes > atlas_pool_bytes)
             {
                 atlas_overflows++;
-                if (bytes > atlas_pool_bytes) return nullptr;
+                assertf(bytes <= atlas_pool_bytes,
+                        "hwsprites: baked sprite %ux%u (%u bytes) exceeds "
+                        "atlas pool (%u bytes)",
+                        (unsigned)be->w, (unsigned)source_h, (unsigned)bytes,
+                        (unsigned)atlas_pool_bytes);
                 atlas_reset();
                 idx = hwsprites_mix64(key) & mask;
             }
@@ -462,35 +475,101 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             return &e;
         }
     }
+#endif
 
     // ---- Spillover: CPU EOR walk + bitplane decode (the original path) --
     // The bank source lives on cart. DMA only the word range this extract
     // will touch: rows step by `pitch` from `addr` for source_h rows, each
     // row walks ≤ 32 words to the EOR sentinel — so the window is bounded
-    // by [addr + min(0, source_h*pitch), addr + max(0, source_h*pitch)]
-    // ± 32 words of cushion. If the cart blob is missing (sprites_pi_addr
-    // == 0) we have no source — bail and let the sprite drop rather than
-    // read garbage from scratch.
-    if (!sprites_pi_addr) return nullptr;
+    // by [row_lo - 32, row_hi + 32] in word units, where row_lo/row_hi are
+    // the smaller/larger of first_row (= addr) and last_row (= addr +
+    // (h-1)*pitch). Bailing here would silently corrupt rendering — assert
+    // instead so a missing DFS payload halts at boot, not mid-frame.
+    // See [[feedback-never-silent-drop-content]].
+    assertf(sprites_pi_addr,
+            "hwsprites: spillover invoked before atlas_init resolved "
+            "sprites_native.bin");
     const uint32_t* spritedata;
     {
-        const int32_t  pitch_s   = (int32_t)pitch;
-        const int32_t  step      = (int32_t)source_h * pitch_s;
-        constexpr int32_t CUSHION = 32;
-        int32_t min_w = (int32_t)addr + (step < 0 ? step : 0) - CUSHION;
-        int32_t max_w = (int32_t)addr + (step > 0 ? step : 0) + CUSHION;
-        if (min_w < 0)            min_w = 0;
-        if (max_w > 0xffff)       max_w = 0xffff;
-        if (min_w > max_w)        min_w = max_w;
-        uint32_t n_bytes = ((uint32_t)(max_w - min_w + 1)) * 4u;
-        n_bytes = (n_bytes + 7u) & ~7u;                 // PI-DMA 8-byte chunks
-        if (n_bytes > SPRITE_SCRATCH_BYTES)             // shouldn't trigger
-            n_bytes = SPRITE_SCRATCH_BYTES;
-        const uint32_t bank_offset = (uint32_t)(bank & 7) * SPRITE_BANK_BYTES;
-        const uint32_t src = sprites_pi_addr + bank_offset + (uint32_t)min_w * 4u;
-        dma_read(s_sprite_slice_scratch, src, n_bytes);
-        // Rebase so spritedata[cur] resolves to scratch[cur - min_w].
-        spritedata = (const uint32_t*)s_sprite_slice_scratch - min_w;
+        const int32_t pitch_s = (int32_t)pitch;
+        // Compute the slice in *absolute* blob-word coordinates (bank * 0x10000
+        // + bank-relative word) instead of clamping each bank to [0, 0xffff].
+        // OutRun's sprite ROM is one contiguous blob laid out as four banks,
+        // and the original sprites[] array let a row's EOR walk underflow
+        // bank-relative cur into the previous bank — a legitimate cross-bank
+        // read used by real sprite data. Clamping per-bank silently truncated
+        // those reads to OOB scratch, producing horizontal-line corruption at
+        // the top of crowd sprites near bank edges.
+        //
+        // Walk extension is ASYMMETRIC: the per-row EOR walk only steps in
+        // one direction (cur++ for flip=0, cur-- for flip=1), so we need
+        // cushion only on the walk side. The legacy 1 MiB sprites[] member
+        // sat in zero-initialised BSS, so reads that overran the blob just
+        // returned zero — never satisfied the EOR sentinel, walk ran to
+        // MAX_WORDS_PER_ROW, and the extra phantom words decoded to slot 0
+        // (transparent). We reproduce that by clamping the DMA to blob
+        // bounds and pre-zeroing the slack region in scratch.
+        constexpr int32_t  WALK_OVERSHOOT  = 32;  // == MAX_WORDS_PER_ROW
+        constexpr int64_t  BLOB_LAST_WORD  = (int64_t)SPRITES_LENGTH - 1;
+        const int64_t abs_addr  = (int64_t)bank * 0x10000 + (int64_t)addr;
+        const int64_t abs_first = abs_addr;
+        const int64_t abs_last  =
+            abs_addr + ((int64_t)source_h - 1) * pitch_s;
+        const int64_t row_lo    = abs_first < abs_last ? abs_first : abs_last;
+        const int64_t row_hi    = abs_first > abs_last ? abs_first : abs_last;
+        const int64_t want_min  = flip
+            ? (row_lo - WALK_OVERSHOOT) : row_lo;
+        const int64_t want_max  = flip
+            ? row_hi : (row_hi + WALK_OVERSHOOT);
+        // Intersect with blob bounds. dma_lo/dma_hi span the words we'll
+        // actually fetch from cart; want_min/want_max span the scratch
+        // layout including the legacy-OOB phantom slots.
+        int64_t dma_lo = want_min < 0 ? 0 : want_min;
+        int64_t dma_hi = want_max > BLOB_LAST_WORD ? BLOB_LAST_WORD : want_max;
+        // Caller asked for a fully-out-of-blob slice — that's a real bug:
+        // every bank/addr the engine emits should land inside the 1 MiB
+        // ROM. See [[feedback-never-silent-drop-content]].
+        assertf(dma_lo <= dma_hi,
+                "hwsprites: slice fully outside blob (bank=%u addr=%u h=%u "
+                "pitch=%d flip=%u want=[%lld..%lld])",
+                (unsigned)bank, (unsigned)addr, (unsigned)source_h, (int)pitch,
+                (unsigned)flip, (long long)want_min, (long long)want_max);
+        // Round dma_lo down (even) / dma_hi up (odd) so the DMA dest offset
+        // stays 8-byte aligned and the length is a multiple of 8 bytes.
+        // BLOB_LAST_WORD is odd (SPRITES_LENGTH = 0x40000), so |1 caps safely.
+        dma_lo &= ~(int64_t)1;
+        dma_hi |= (int64_t)1;
+        if (dma_hi > BLOB_LAST_WORD) dma_hi = BLOB_LAST_WORD;
+        const uint32_t total_words = (uint32_t)(want_max - want_min + 1);
+        uint32_t n_bytes = (total_words * 4u + 7u) & ~7u;
+        assertf(n_bytes <= SPRITE_SCRATCH_BYTES,
+                "hwsprites: slice %u > scratch %u (bank=%u addr=%u h=%u "
+                "pitch=%d)",
+                (unsigned)n_bytes, (unsigned)SPRITE_SCRATCH_BYTES,
+                (unsigned)bank, (unsigned)addr, (unsigned)source_h, (int)pitch);
+        // Pre-zero the entire scratch range so any OOB walk slot reads as 0.
+        std::memset(s_sprite_slice_scratch, 0, n_bytes);
+        const uint32_t dma_word_off = (uint32_t)(dma_lo - want_min);
+        const uint32_t dma_byte_off = dma_word_off * 4u;
+        const uint32_t dma_words    = (uint32_t)(dma_hi - dma_lo + 1);
+        const uint32_t dma_bytes    = dma_words * 4u;          // already 8-aligned
+        const uint32_t src = sprites_pi_addr + (uint32_t)dma_lo * 4u;
+        // dma_read does NOT touch the CPU cache: it just programs PI and
+        // waits. The scratch is a static buffer reused across extracts, so
+        // (a) the memset zeros above live only in cache until we push them
+        // to RAM, and (b) any cache lines still resident from the previous
+        // extract's walk reads would return stale bytes after the PI write.
+        // Flush + invalidate the full slice range so RAM gets the zeros in
+        // the OOB slack and the CPU reloads fresh data after the DMA.
+        data_cache_hit_writeback_invalidate(s_sprite_slice_scratch, n_bytes);
+        dma_read(s_sprite_slice_scratch + dma_byte_off, src, dma_bytes);
+        // Rebase so spritedata[cur] (cur in bank-relative words) resolves to
+        // scratch[(bank*0x10000 + cur - want_min) words]. The offset is signed
+        // because want_min can be smaller than bank*0x10000 when last_row
+        // sits in a prior bank or when the flip=1 walk extends below it.
+        const int64_t rebase_words = (int64_t)bank * 0x10000 - want_min;
+        spritedata =
+            (const uint32_t*)s_sprite_slice_scratch + (ptrdiff_t)rebase_words;
     }
 
     // Cap row width at 32 words (256 px). Real OutRun sprites top out below
@@ -534,7 +613,11 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     if (atlas_used + bytes > atlas_pool_bytes)
     {
         atlas_overflows++;
-        if (bytes > atlas_pool_bytes) return nullptr;
+        assertf(bytes <= atlas_pool_bytes,
+                "hwsprites: spillover sprite %ux%u (%u bytes) exceeds "
+                "atlas pool (%u bytes)",
+                (unsigned)w, (unsigned)h, (unsigned)bytes,
+                (unsigned)atlas_pool_bytes);
         atlas_reset();
         idx = hwsprites_mix64(key) & mask;  // table is empty; first slot is free
     }
