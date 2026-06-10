@@ -182,14 +182,21 @@ void hwsprites::swap()
 // from the prior RDP passes).
 //
 // Lookup is open-addressed (linear probing) into ATLAS_CAPACITY slots; values
-// allocate from a single ATLAS_POOL_BYTES bump pool. On pool overflow the
-// cache resets wholesale (re-extract on next miss) so no LRU walk is needed.
+// allocate from a single bump pool sized at init (MAX with MIN fallback). On
+// pool overflow the cache resets wholesale (re-extract on next miss) so no
+// LRU walk is needed.
 // ============================================================================
 
 void hwsprites::atlas_init()
 {
     if (atlas_pool) return;
-    atlas_pool = (uint8_t*)memalign(8, ATLAS_POOL_BYTES);
+    // Try the max size first; fall back to MIN if the heap can't honour it.
+    atlas_pool_bytes = ATLAS_POOL_BYTES_MAX;
+    atlas_pool = (uint8_t*)memalign(8, atlas_pool_bytes);
+    if (!atlas_pool) {
+        atlas_pool_bytes = ATLAS_POOL_BYTES_MIN;
+        atlas_pool = (uint8_t*)memalign(8, atlas_pool_bytes);
+    }
     atlas_reset();
 
     // Resolve the cart-side baked atlas blob. dfs_rom_addr returns a PI
@@ -199,7 +206,7 @@ void hwsprites::atlas_init()
     baked_blob_pi_addr = dfs_rom_addr("sprites/sprite_atlas.bin");
 
     debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx entries=%lu\n",
-           atlas_pool, (unsigned)ATLAS_POOL_BYTES,
+           atlas_pool, (unsigned)atlas_pool_bytes,
            (unsigned long)baked_blob_pi_addr,
            (unsigned long)hwsprites_baked_count);
 }
@@ -364,10 +371,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             // the PI source stays 2-byte aligned — fine for dma_read.
             const uint32_t skip_bytes = (uint32_t)row_off * ci4_stride;
 
-            if (atlas_used + bytes > ATLAS_POOL_BYTES)
+            if (atlas_used + bytes > atlas_pool_bytes)
             {
                 atlas_overflows++;
-                if (bytes > ATLAS_POOL_BYTES) return nullptr;
+                if (bytes > atlas_pool_bytes) return nullptr;
                 atlas_reset();
                 idx = hwsprites_mix64(key) & mask;
             }
@@ -460,10 +467,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     const uint32_t ci4_stride = (uint32_t)w / 2;
     const uint32_t bytes = (ci4_stride * (uint32_t)h + 7u) & ~7u;
 
-    if (atlas_used + bytes > ATLAS_POOL_BYTES)
+    if (atlas_used + bytes > atlas_pool_bytes)
     {
         atlas_overflows++;
-        if (bytes > ATLAS_POOL_BYTES) return nullptr;
+        if (bytes > atlas_pool_bytes) return nullptr;
         atlas_reset();
         idx = hwsprites_mix64(key) & mask;  // table is empty; first slot is free
     }
