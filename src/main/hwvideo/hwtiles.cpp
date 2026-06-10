@@ -124,7 +124,6 @@ void hwtiles::init(uint8_t* src_tiles, const bool hires)
             }
             tiles[i] = val; // Store converted value
         }
-        memcpy(tiles_backup, tiles, TILES_LENGTH * sizeof(uint32_t));
     }
     
     if (hires)
@@ -141,29 +140,13 @@ void hwtiles::init(uint8_t* src_tiles, const bool hires)
     }
 }
 
-// Patch Tileset with new data
-void hwtiles::patch_tiles(RomLoader* patch)
-{
-    memcpy(tiles_backup, tiles, TILES_LENGTH * sizeof(uint32_t));
-
-    for (uint32_t i = 0; i < patch->length;)
-    {
-        uint32_t tile_index = patch->read16(&i) << 3;
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-        tiles[tile_index++] = patch->read32(&i);
-    }
-}
-
-void hwtiles::restore_tiles()
-{
-    memcpy(tiles, tiles_backup, TILES_LENGTH * sizeof(uint32_t));
-}
+// patch_tiles / restore_tiles are widescreen-only on N64. With
+// video.widescreen hardcoded to 0 (frontend/config.cpp), OMusic's call
+// site gates on config.s16_x_off > 0 and never enters. tiles_backup is
+// dropped to save 256 KiB BSS — both methods are stubs so the OMusic
+// gate stays the single source of truth.
+void hwtiles::patch_tiles(RomLoader*) {}
+void hwtiles::restore_tiles() {}
 
 // Set Tilemap X Clamp
 //

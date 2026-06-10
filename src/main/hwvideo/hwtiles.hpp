@@ -61,8 +61,11 @@ private:
     // array as a CI4 atlas — each tile_idx*8 uint32_t row holds 8 nibbles
     // (leftmost pixel in the high nibble of byte 0), which is the exact
     // CI4 byte layout the RDP expects on a big-endian N64.
+    //
+    // The SDL build keeps a tiles_backup mirror for the widescreen-only
+    // patch/restore cycle in OMusic; on N64 widescreen is hardcoded off,
+    // so the backup is dropped to save 256 KiB BSS.
     alignas(8) uint32_t tiles[TILES_LENGTH];        // Converted tiles
-    alignas(8) uint32_t tiles_backup[TILES_LENGTH]; // Converted tiles (backup without patch)
 
     uint16_t page[4];
     uint16_t scroll_x[4];
