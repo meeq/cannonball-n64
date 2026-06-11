@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """render-sound.py — drive one audio pipeline entry.
 
-Internal helper invoked by cmake/audio-payload.cmake, one process per row
-of sounds.txt. Pipeline:
+Invoked by cmake/audio-payload.cmake (one process per row of sounds.txt)
+and also runnable standalone for ad-hoc renders. Pipeline:
 
   audio-render (host C++) --> raw WAV (44100 Hz, stereo)
        |
@@ -10,8 +10,11 @@ of sounds.txt. Pipeline:
        |
   audioconv64 --> VADPCM wav64 (22050 Hz; --wav-loop-offset for music_loop)
 
-Direct invocation works too — pass --kind / --intro / --loop / --duration
-matching one sounds.txt row.
+External-tool defaults when flags are omitted:
+  --render-bin  build-host/audio-render/audio-render   (this repo)
+  --audioconv   $N64_INST/bin/audioconv64              (libdragon install)
+  --ffmpeg      ffmpeg                                 (from PATH)
+  --roms        roms/                                  (this repo)
 """
 
 import argparse
@@ -28,12 +31,51 @@ def run(cmd):
         sys.exit(f"command failed: {' '.join(cmd)}")
 
 
+def default_audioconv():
+    n64_inst = os.environ.get("N64_INST")
+    if n64_inst:
+        path = os.path.join(n64_inst, "bin", "audioconv64")
+        if os.path.exists(path):
+            return path
+    found = shutil.which("audioconv64")
+    if found:
+        return found
+    sys.exit("audioconv64 not found: set $N64_INST or pass --audioconv")
+
+
+def default_ffmpeg():
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    sys.exit("ffmpeg not found: install it or pass --ffmpeg")
+
+
+def default_render_bin():
+    # Relative to the repo root, where cmake builds the host tool.
+    candidates = [
+        "build-host/audio-render/audio-render",
+        os.path.join(os.path.dirname(__file__),
+                     "../../build-host/audio-render/audio-render"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    sys.exit("audio-render not found: build with "
+             "`cmake -S tools/audio-render -B build-host/audio-render && "
+             "cmake --build build-host/audio-render` or pass --render-bin")
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--render-bin", required=True)
-    p.add_argument("--audioconv",  required=True)
-    p.add_argument("--ffmpeg",     required=True)
-    p.add_argument("--roms",       required=True)
+    p.add_argument("--render-bin",
+                   help="path to host audio-render binary (default: "
+                        "build-host/audio-render/audio-render)")
+    p.add_argument("--audioconv",
+                   help="path to audioconv64 (default: $N64_INST/bin/audioconv64)")
+    p.add_argument("--ffmpeg",
+                   help="path to ffmpeg (default: from $PATH)")
+    p.add_argument("--roms",       default="roms/",
+                   help="path to OutRun ROM directory (default: roms/)")
     p.add_argument("--out-wav",    required=True,
                    help="raw 44100 Hz render destination")
     p.add_argument("--out-wav64",  required=True,
@@ -51,6 +93,13 @@ def main():
     p.add_argument("--render-rate", type=int, default=44100)
     p.add_argument("--wav64-rate",  type=int, default=22050)
     args = p.parse_args()
+
+    if not args.render_bin:
+        args.render_bin = default_render_bin()
+    if not args.audioconv:
+        args.audioconv  = default_audioconv()
+    if not args.ffmpeg:
+        args.ffmpeg     = default_ffmpeg()
 
     os.makedirs(os.path.dirname(args.out_wav)   or ".", exist_ok=True)
     os.makedirs(os.path.dirname(args.out_wav64) or ".", exist_ok=True)
