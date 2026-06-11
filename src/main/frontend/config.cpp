@@ -16,6 +16,7 @@
 #include "engine/ohiscore.hpp"
 #include "engine/outils.hpp"
 #include "engine/audio/osoundint.hpp"
+#include "../n64/save.hpp"
 
 Config config;
 
@@ -145,17 +146,45 @@ void Config::load()
     cont_traffic   = 3;
 }
 
-bool Config::save()                    { return true; }
-void Config::load_scores(bool)         { }
-void Config::save_scores(bool)         { }
+bool Config::save() { return true; }
+
+void Config::load_scores(bool original_mode)
+{
+    // EEPROM read failure (no-save build / fresh wipe / corrupted block) keeps
+    // the defaults the caller seeded via ohiscore.init_def_scores().
+    n64save::load_scores(original_mode, engine.jap != 0, ohiscore.scores);
+}
+
+void Config::save_scores(bool original_mode)
+{
+    n64save::save_scores(original_mode, engine.jap != 0, ohiscore.scores);
+}
+
 void Config::load_tiletrial_scores()
 {
     static const uint16_t COUNTER_1M_15 = 0x11D0;
+    if (n64save::load_ttrial(engine.jap != 0, ttrial.best_times))
+        return;
     for (int i = 0; i < 15; i++)
         ttrial.best_times[i] = COUNTER_1M_15;
 }
-void Config::save_tiletrial_scores()   { }
-bool Config::clear_scores()            { ohiscore.init_def_scores(); return true; }
+
+void Config::save_tiletrial_scores()
+{
+    n64save::save_ttrial(engine.jap != 0, ttrial.best_times);
+}
+
+bool Config::clear_scores()
+{
+    ohiscore.init_def_scores();
+    // Re-seed the engine's in-RAM ttrial table too — Config::load_tiletrial_scores
+    // already does this from defaults when EEPROM read fails.
+    static const uint16_t COUNTER_1M_15 = 0x11D0;
+    for (int i = 0; i < 15; i++)
+        ttrial.best_times[i] = COUNTER_1M_15;
+    n64save::wipe();
+    return true;
+}
 
 void Config::set_fps(int fps)
 {

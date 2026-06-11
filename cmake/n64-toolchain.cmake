@@ -51,6 +51,7 @@ set(N64_MKDFS         ${N64_BINDIR}/mkdfs)
 set(N64_TOOL          ${N64_BINDIR}/n64tool)
 set(N64_SYM           ${N64_BINDIR}/n64sym)
 set(N64_ELFCOMPRESS   ${N64_BINDIR}/n64elfcompress)
+set(N64_ED64ROMCONFIG ${N64_BINDIR}/ed64romconfig)
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM BOTH)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
@@ -270,6 +271,10 @@ function(n64_create_rom target_name)
         COMMAND ${N64_TOOL} --toc --title "${ARG_TITLE}"
                 --output "${rom_out}.tmp"
                 --align 256 ${n64tool_inputs} ${N64_VERSION_FILES}
+        # Advertise 16 Kbit EEPROM to flashcarts / emulators that honour the
+        # advanced homebrew header (ed64v3, ares, etc.). Stock 64drive needs
+        # this manually; libdragon's runtime probe still gates real use.
+        COMMAND ${N64_ED64ROMCONFIG} --savetype eeprom16k "${rom_out}.tmp"
         COMMAND ${CMAKE_COMMAND} -E rename "${rom_out}.tmp" "${rom_out}"
         DEPENDS ${n64tool_deps}
         COMMENT "[Z64] ${target_name}.z64"
