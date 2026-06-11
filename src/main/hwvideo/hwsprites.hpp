@@ -69,11 +69,15 @@ private:
     // Larger = fewer overflow-recovery frames (each costs ~20 ms; see
     // project_spr_spike_atlas_overflow). Single value per session — no MIN/MAX
     // fallback at runtime, just a one-time branch on detected RAM.
-    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 1u << 20;          // 1 MiB
+    // 4 MiB sizing: post-roms heap has ~210 KiB free at 128 KiB pool.
+    // Both 256 KiB and 160 KiB starve later allocs — hwroad_rdp needs
+    // ~57 KiB runs_buf, hwroad_rdp_rsp needs more for shadow_cached, plus
+    // video.init small allocs. Heap fragmentation eats apparent headroom.
+    // Keep this at 128 KiB; the rspq_wait() correctness drain stays, perf
+    // recovery for overflow has to come from elsewhere (pool ping-pong, or
+    // skipping the drain when no LOAD_BLOCK references the recycled region).
+    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 128u << 10;        // 128 KiB
     static constexpr uint32_t ATLAS_POOL_BYTES_EXPANSION = 2u << 20;          // 2 MiB
-    // Next target for heap reclamation is hwtiles::tiles[] (256 KiB), still
-    // a converted-ROM mirror kept resident. Moving it cart-side would let
-    // the base-console pool grow toward parity with the expansion tier.
     struct AtlasEntry
     {
         uint64_t key;     // 0 = empty

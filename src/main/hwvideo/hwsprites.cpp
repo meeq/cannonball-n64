@@ -87,7 +87,10 @@ namespace {
     constexpr uint32_t SPRITE_BANK_WORDS    = 0x10000u;           // 64K words per bank
     constexpr uint32_t SPRITE_BANK_BYTES    = SPRITE_BANK_WORDS * 4u;
     constexpr uint32_t SPRITE_SCRATCH_BYTES = 64u * 1024u;        // 64 KiB
-    alignas(8) uint8_t s_sprite_slice_scratch[SPRITE_SCRATCH_BYTES];
+    // 16-byte alignment matches the R4300 D-cache line size, so the
+    // data_cache_hit_writeback_invalidate() call below operates on whole
+    // lines without touching memory ahead of the buffer.
+    alignas(16) uint8_t s_sprite_slice_scratch[SPRITE_SCRATCH_BYTES];
 }
 
 hwsprites::hwsprites()
@@ -385,6 +388,15 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         if (probes + 1 == ATLAS_CAPACITY)
         {
             atlas_overflows++;
+            // Drain RSP/RDP before invalidating the pool — overflow recovery
+            // resets atlas_used to 0 and the next extract overwrites pool+0
+            // with bytes for a different sprite. Any queued LOAD_BLOCK still
+            // references those physical addresses; without the drain the RDP
+            // reads the freshly-written bytes and renders the wrong sprite's
+            // CI4 (horizontal stripe corruption on 4 MiB consoles where the
+            // 128 KiB pool overflows mid-frame on dense scenes like Stage 1
+            // palm trees). 8 MiB gets a 2 MiB pool that rarely overflows.
+            rspq_wait();
             atlas_reset();
             idx = hwsprites_mix64(key) & mask;
         }
@@ -425,6 +437,9 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                         "atlas pool (%u bytes)",
                         (unsigned)be->w, (unsigned)source_h, (unsigned)bytes,
                         (unsigned)atlas_pool_bytes);
+                // Drain queued LOAD_BLOCK before reusing pool addresses.
+                // See the rationale block at the table-full overflow above.
+                rspq_wait();
                 atlas_reset();
                 idx = hwsprites_mix64(key) & mask;
             }
@@ -435,6 +450,13 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             // PI-DMA the source-h prefix. dma_read takes a PI address inside
             // cart space; the bake aligned each entry to 8 bytes, so the
             // base + offset is 8-byte aligned and the length is 2-aligned.
+            //
+            // The same atlas slot may still hold cached lines from a previous
+            // EOR-walk extract (that path writes cached + writeback, but does
+            // not invalidate). dma_read does no cache management, so we must
+            // wipe those stale lines first or the next cached read of this
+            // RDRAM range picks them up. See [[dma-read-no-cache-mgmt]].
+            data_cache_hit_writeback_invalidate(dst, bytes);
             dma_read(dst,
                      baked_blob_pi_addr + be->blob_offset + skip_bytes,
                      bytes);
@@ -517,10 +539,22 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             abs_addr + ((int64_t)source_h - 1) * pitch_s;
         const int64_t row_lo    = abs_first < abs_last ? abs_first : abs_last;
         const int64_t row_hi    = abs_first > abs_last ? abs_first : abs_last;
-        const int64_t want_min  = flip
+        int64_t want_min = flip
             ? (row_lo - WALK_OVERSHOOT) : row_lo;
         const int64_t want_max  = flip
             ? row_hi : (row_hi + WALK_OVERSHOOT);
+        // Round want_min down to even (in word units) so dma_byte_off =
+        // (dma_lo - want_min) * 4 stays a multiple of 8. An odd want_min
+        // leaves dma_byte_off at 4-mod-8, which trips dma_read_async's
+        // misalign handler (libdragon/src/dma.c:147): the handler does the
+        // leading bytes via a CACHED CPU write while PI DMA writes the rest
+        // of the same 16-byte cacheline directly to RAM. The cacheline ends
+        // up dirty with correct CPU bytes + stale (pre-DMA) bytes; the EOR
+        // walk then reads the stale half from cache and decodes garbage CI4
+        // into the atlas. Manifests as horizontal stripe corruption on
+        // sprites whose source addr/pitch puts row_lo on an odd word
+        // (e.g. Stage 1 palm tree foliage).
+        want_min &= ~(int64_t)1;
         // Intersect with blob bounds. dma_lo/dma_hi span the words we'll
         // actually fetch from cart; want_min/want_max span the scratch
         // layout including the legacy-OOB phantom slots.
@@ -618,6 +652,9 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                 "atlas pool (%u bytes)",
                 (unsigned)w, (unsigned)h, (unsigned)bytes,
                 (unsigned)atlas_pool_bytes);
+        // Drain queued LOAD_BLOCK before reusing pool addresses.
+        // See the rationale block at the table-full overflow earlier.
+        rspq_wait();
         atlas_reset();
         idx = hwsprites_mix64(key) & mask;  // table is empty; first slot is free
     }
