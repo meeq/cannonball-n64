@@ -58,28 +58,40 @@ private:
     uint16_t ramBuff[SPRITE_RAM_SIZE];
 
     // Sprite atlas cache (N64 RDP path). Open-addressed hashmap keyed by
-    // (bank, addr, height, pitch); values point into a single contiguous
-    // bump pool sized for ~typical OutRun working set. On pool overflow the
-    // whole cache is reset (data is re-extracted on next miss) so we never
-    // need a true LRU walk.
+    // (bank, addr, height, pitch); values point into a segmented bump pool.
+    //
+    // Pool layout: ATLAS_SEGMENTS fixed-size segments forming a ring. New
+    // extracts bump into the current segment; when it fills, we drain queued
+    // RDP work, advance to the next segment, and tombstone any hash entries
+    // pointing into the new-current segment. This converts the old wholesale
+    // atlas_reset() (re-extracting every visible sprite = 14-30 ms stall) into
+    // a segment retire that only invalidates entries in one quarter of the
+    // pool (~5 ms re-extract for the affected subset).
+    //
+    // Hash deletion via tombstones (key=1). Real keys always have bit 63 set
+    // (see hwsprites_atlas_key), so 0 (empty) and 1 (tombstone) are free
+    // sentinels. Probe loop treats tombstones as "keep walking" but remembers
+    // the first as the insertion candidate, so the table stays usable after
+    // many retires without needing a compact rebuild.
     static constexpr uint32_t ATLAS_CAPACITY   = 1024;       // power of 2
+    // ATLAS_SEGMENTS must be a power of 2 (we mask, not modulo). 4 is the
+    // sweet spot — fewer segments means each retire invalidates more entries
+    // (back toward today's wholesale-reset cost); more means each segment is
+    // small enough that working-set-per-segment hit rate drops.
+    static constexpr uint32_t ATLAS_SEGMENTS   = 4;
     // Atlas pool size is picked at atlas_init() from get_memory_size():
     //   8 MiB (Expansion Pak)  -> ATLAS_POOL_BYTES_EXPANSION (2 MiB)
-    //   4 MiB (base console)   -> ATLAS_POOL_BYTES_BASE      (1 MiB)
-    // Larger = fewer overflow-recovery frames (each costs ~20 ms; see
-    // project_spr_spike_atlas_overflow). Single value per session — no MIN/MAX
-    // fallback at runtime, just a one-time branch on detected RAM.
-    // 4 MiB sizing: post-RAM-reclaim (mask_buf dropped, shadow_buf lazy,
-    // hwroad_rsp gated) post-roms heap has ~208 KiB free at 128 KiB pool,
-    // so total pool budget = ~336 KiB. 256 KiB leaves ~80 KiB headroom —
-    // larger pool cuts overflow-recovery frames during cold-start (per-
-    // priority working set previously exceeded 128 KiB; see
-    // project_spr_spike_atlas_overflow).
+    //   4 MiB (base console)   -> ATLAS_POOL_BYTES_BASE      (256 KiB)
+    // Single value per session — no MIN/MAX fallback at runtime, just a
+    // one-time branch on detected RAM.
+    // 4 MiB sizing: 256 KiB total / 4 segments = 64 KiB/segment. The largest
+    // OutRun sprite (max width 32 words × 8 = 256 px, max height 256 rows,
+    // CI4 = 32 KiB) fits in one segment with margin.
     static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 256u << 10;        // 256 KiB
     static constexpr uint32_t ATLAS_POOL_BYTES_EXPANSION = 2u << 20;          // 2 MiB
     struct AtlasEntry
     {
-        uint64_t key;     // 0 = empty
+        uint64_t key;     // 0 = empty, 1 = tombstone (retired-segment slot)
         uint8_t* ci4;     // 8-byte aligned, ci4_stride * h bytes
         uint16_t w;       // native pixel width (multiple of 8)
         uint16_t h;       // native pixel height
@@ -92,11 +104,18 @@ private:
     };
     AtlasEntry atlas_entries[ATLAS_CAPACITY];
     uint8_t*   atlas_pool;
-    uint32_t   atlas_pool_bytes;  // chosen at atlas_init() from get_memory_size
-    uint32_t   atlas_used;
+    uint32_t   atlas_pool_bytes;     // chosen at atlas_init() from get_memory_size
+    uint32_t   atlas_segment_bytes;  // atlas_pool_bytes / ATLAS_SEGMENTS
+    uint32_t   atlas_segment_used[ATLAS_SEGMENTS];  // bump cursor per segment
+    uint32_t   atlas_current_segment;               // 0..ATLAS_SEGMENTS-1
     uint32_t   atlas_extracts;
     uint32_t   atlas_hits;
+    // atlas_overflows: incremented on drain-forced stalls — segment retires
+    // that called rspq_wait() because LOAD_BLOCKs were queued, plus the rare
+    // hash-table-full fallback. Drives the OUT/PLS "spr ovf" column. Pass-1
+    // prepass retires don't count (drain_on_overflow=false).
     uint32_t   atlas_overflows;
+    uint32_t   atlas_segment_retirements;  // all retires, drained or not
 
     // Cart PI address of /sprites/sprite_atlas.bin (resolved at first
     // render_rdp call via dfs_rom_addr). 0 = unresolved or DFS file missing,
@@ -115,11 +134,19 @@ private:
     uint32_t   shadow_body_ring_idx;
 
     void atlas_reset();
-    // drain_on_overflow=true means atlas_reset() during overflow recovery
-    // must rspq_wait() first (caller has queued LOAD_BLOCK refs to the
-    // pool — see project_spr_spike_atlas_overflow). False is only safe
-    // when the caller has NOT yet emitted any LOAD_BLOCK against this
-    // pool snapshot — used by render_rdp's pass 1 prepass.
+    // Advance current segment to (current+1) mod ATLAS_SEGMENTS. Walks the
+    // hash and tombstones any real entry whose ci4 falls in the new-current
+    // segment; resets that segment's bump cursor.
+    void atlas_advance_segment();
+    // Bump-allocate `bytes` from the current segment. When the segment
+    // doesn't have room, drain queued RDP work (when drain_on_overflow=true)
+    // and advance to the next segment. drain_on_overflow=false is only safe
+    // when the caller has NOT yet emitted any LOAD_BLOCK against the pool
+    // snapshot the allocator is about to rewrite — used by render_rdp's pass
+    // 1 prepass. Returns NULL only if the request is structurally impossible
+    // (asserts on bytes > segment_bytes — single sprite that doesn't fit one
+    // segment is a hard error).
+    uint8_t* atlas_pool_alloc(uint32_t bytes, bool drain_on_overflow);
     const AtlasEntry* atlas_get_or_extract(uint16_t bank, uint16_t addr,
                                            uint16_t height, int16_t pitch,
                                            bool flip, uint16_t vzoom,

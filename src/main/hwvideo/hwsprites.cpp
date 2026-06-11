@@ -96,12 +96,15 @@ namespace {
 
 hwsprites::hwsprites()
     : sprites_pi_addr(0),
-      atlas_pool(nullptr), atlas_used(0),
+      atlas_pool(nullptr), atlas_pool_bytes(0), atlas_segment_bytes(0),
+      atlas_current_segment(0),
       atlas_extracts(0), atlas_hits(0), atlas_overflows(0),
+      atlas_segment_retirements(0),
       baked_blob_pi_addr(0), baked_extracts(0),
       shadow_body_ring_idx(0)
 {
     std::memset(atlas_entries, 0, sizeof(atlas_entries));
+    std::memset(atlas_segment_used, 0, sizeof(atlas_segment_used));
 }
 
 hwsprites::~hwsprites()
@@ -208,10 +211,13 @@ void hwsprites::atlas_init()
 {
     if (atlas_pool) return;
 
-    // Expansion Pak (8 MiB) → 2 MiB pool; base console (4 MiB) → 1 MiB pool.
+    // Expansion Pak (8 MiB) → 2 MiB pool; base console (4 MiB) → 256 KiB pool.
     atlas_pool_bytes = is_memory_expanded()
                           ? ATLAS_POOL_BYTES_EXPANSION
                           : ATLAS_POOL_BYTES_BASE;
+    // Both pool sizes are exact multiples of ATLAS_SEGMENTS=4, so the
+    // segments tile the pool with no padding.
+    atlas_segment_bytes = atlas_pool_bytes / ATLAS_SEGMENTS;
 
 #if CANNONBALL_LOG_HEAP
     heap_stats_t hs0; sys_get_heap_stats(&hs0);
@@ -318,14 +324,80 @@ static HwspritesBakedHit hwsprites_baked_lookup(
 void hwsprites::atlas_reset()
 {
     std::memset(atlas_entries, 0, sizeof(atlas_entries));
-    atlas_used = 0;
+    std::memset(atlas_segment_used, 0, sizeof(atlas_segment_used));
+    atlas_current_segment = 0;
+}
+
+// Advance the bump ring. Tombstones any real hash entry whose ci4 falls into
+// the segment that's about to become current; clears that segment's cursor.
+// Caller is responsible for draining queued RDP work before calling — the
+// retire invalidates the addresses any in-flight LOAD_BLOCK would reference.
+void hwsprites::atlas_advance_segment()
+{
+    const uint32_t new_seg = (atlas_current_segment + 1) & (ATLAS_SEGMENTS - 1);
+    const uint8_t* seg_lo = atlas_pool + (uintptr_t)new_seg * atlas_segment_bytes;
+    const uint8_t* seg_hi = seg_lo + atlas_segment_bytes;
+    for (uint32_t i = 0; i < ATLAS_CAPACITY; ++i)
+    {
+        AtlasEntry& e = atlas_entries[i];
+        // 0 = empty, 1 = tombstone — neither holds a ci4 reference.
+        if (e.key < 2) continue;
+        if (e.ci4 >= seg_lo && e.ci4 < seg_hi)
+        {
+            e.key        = 1;       // tombstone — probes walk past, inserts can reuse
+            e.ci4        = nullptr;
+            e.w          = 0;
+            e.h          = 0;
+            e.has_shadow = 0;
+        }
+    }
+    atlas_segment_used[new_seg] = 0;
+    atlas_current_segment       = new_seg;
+    atlas_segment_retirements++;
+}
+
+uint8_t* hwsprites::atlas_pool_alloc(uint32_t bytes, bool drain_on_overflow)
+{
+    // Each extract must fit in a single segment. On 4 MiB this is 64 KiB;
+    // the largest OutRun sprite (256x256 CI4 = 32 KiB) fits with headroom.
+    // If this ever fires, either ATLAS_SEGMENTS must shrink or the pool
+    // must grow — silently dropping a sprite would corrupt rendering.
+    assertf(bytes <= atlas_segment_bytes,
+            "hwsprites: extract %u bytes exceeds segment size %u "
+            "(pool=%u, segments=%u)",
+            (unsigned)bytes, (unsigned)atlas_segment_bytes,
+            (unsigned)atlas_pool_bytes, (unsigned)ATLAS_SEGMENTS);
+
+    if (atlas_segment_used[atlas_current_segment] + bytes > atlas_segment_bytes)
+    {
+        // Segment full. Drain queued LOAD_BLOCK refs before reusing the next
+        // segment's pool addresses — see project_spr_spike_atlas_overflow.
+        // Pass-1 prepass sets drain_on_overflow=false because no LOAD_BLOCK
+        // has been queued against this snapshot yet.
+        if (drain_on_overflow)
+        {
+            rspq_wait();
+            atlas_overflows++;
+        }
+        atlas_advance_segment();
+    }
+    uint8_t* dst = atlas_pool
+                 + (uintptr_t)atlas_current_segment * atlas_segment_bytes
+                 + atlas_segment_used[atlas_current_segment];
+    atlas_segment_used[atlas_current_segment] += bytes;
+    return dst;
 }
 
 uint32_t hwsprites::atlas_extract_count()  const { return atlas_extracts; }
 uint32_t hwsprites::baked_extract_count()  const { return baked_extracts; }
 uint32_t hwsprites::atlas_hit_count()      const { return atlas_hits; }
 uint32_t hwsprites::atlas_overflow_count() const { return atlas_overflows; }
-uint32_t hwsprites::atlas_used_bytes()     const { return atlas_used; }
+uint32_t hwsprites::atlas_used_bytes()     const
+{
+    uint32_t s = 0;
+    for (uint32_t i = 0; i < ATLAS_SEGMENTS; ++i) s += atlas_segment_used[i];
+    return s;
+}
 
 // MurmurHash3 finalizer — small and well-distributed for our 64-bit keys.
 static inline uint32_t hwsprites_mix64(uint64_t k)
@@ -372,15 +444,34 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     const uint32_t mask = ATLAS_CAPACITY - 1;
     uint32_t idx = hwsprites_mix64(key) & mask;
 
-    // Bounded linear probe. The baked-blob fast path can insert tiny (~8 byte)
-    // entries that fill the 1024-slot hash table long before atlas_used crosses
-    // the pool ceiling, so we can't rely on the pool-overflow path to keep the
-    // table from saturating. On full-table detection, recover identically to a
-    // pool overflow: reset, rehash, fall through to insertion.
+    // Bounded linear probe with tombstone-aware insert tracking.
+    // Sentinel layout: 0 = empty, 1 = tombstone (slot whose old entry was
+    // retired with its segment), >=2^62 = real entry (hwsprites_atlas_key
+    // always sets bit 63). The probe walks past tombstones — they might sit
+    // between an entry's ideal slot and the slot it actually landed in. On
+    // miss, we insert at the first tombstone encountered (if any), else at
+    // the empty slot where the probe stopped.
+    //
+    // Table-full case (no empty, no tombstone seen in 1024 probes) is the
+    // rare safety net: wholesale reset, rehash, treat as fresh insert.
+    uint32_t insert_idx = ATLAS_CAPACITY;  // sentinel = "not chosen yet"
     for (uint32_t probes = 0; probes < ATLAS_CAPACITY; ++probes)
     {
-        if (atlas_entries[idx].key == 0) break;
-        if (atlas_entries[idx].key == key)
+        const uint64_t k = atlas_entries[idx].key;
+        if (k == 0)
+        {
+            // Empty slot — probe terminates. Use the earliest tombstone we
+            // saw if any, else this slot.
+            if (insert_idx == ATLAS_CAPACITY) insert_idx = idx;
+            break;
+        }
+        if (k == 1)
+        {
+            // Tombstone — remember it but keep probing past it (the real
+            // entry may live further down the chain).
+            if (insert_idx == ATLAS_CAPACITY) insert_idx = idx;
+        }
+        else if (k == key)
         {
             atlas_hits++;
             return &atlas_entries[idx];
@@ -388,21 +479,17 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         idx = (idx + 1) & mask;
         if (probes + 1 == ATLAS_CAPACITY)
         {
+            // All 1024 slots probed without finding the key and without
+            // finding an empty/tombstone — table is fully saturated with
+            // real-entry mismatches. Recover identically to the old
+            // wholesale overflow path: drain (if caller has LOAD_BLOCKs
+            // queued — see project_spr_spike_atlas_overflow), full reset,
+            // rehash from scratch.
             atlas_overflows++;
-            // Drain RSP/RDP before invalidating the pool — overflow recovery
-            // resets atlas_used to 0 and the next extract overwrites pool+0
-            // with bytes for a different sprite. Any queued LOAD_BLOCK still
-            // references those physical addresses; without the drain the RDP
-            // reads the freshly-written bytes and renders the wrong sprite's
-            // CI4 (horizontal stripe corruption on 4 MiB consoles where the
-            // 128 KiB pool overflows mid-frame on dense scenes like Stage 1
-            // palm trees). 8 MiB gets a 2 MiB pool that rarely overflows.
-            // The drain is skippable when the caller is render_rdp's pass 1
-            // extract prepass — no LOAD_BLOCK has been queued against this
-            // pool snapshot yet, so reset can't race anything in flight.
             if (drain_on_overflow) rspq_wait();
             atlas_reset();
-            idx = hwsprites_mix64(key) & mask;
+            insert_idx = hwsprites_mix64(key) & mask;
+            break;
         }
     }
 
@@ -433,23 +520,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             // the PI source stays 2-byte aligned — fine for dma_read.
             const uint32_t skip_bytes = (uint32_t)row_off * ci4_stride;
 
-            if (atlas_used + bytes > atlas_pool_bytes)
-            {
-                atlas_overflows++;
-                assertf(bytes <= atlas_pool_bytes,
-                        "hwsprites: baked sprite %ux%u (%u bytes) exceeds "
-                        "atlas pool (%u bytes)",
-                        (unsigned)be->w, (unsigned)source_h, (unsigned)bytes,
-                        (unsigned)atlas_pool_bytes);
-                // Drain queued LOAD_BLOCK before reusing pool addresses.
-                // See the rationale block at the table-full overflow above.
-                if (drain_on_overflow) rspq_wait();
-                atlas_reset();
-                idx = hwsprites_mix64(key) & mask;
-            }
-
-            uint8_t* dst = atlas_pool + atlas_used;
-            atlas_used += bytes;
+            uint8_t* dst = atlas_pool_alloc(bytes, drain_on_overflow);
 
             // PI-DMA the source-h prefix. dma_read takes a PI address inside
             // cart space; the bake aligned each entry to 8 bytes, so the
@@ -465,7 +536,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                      baked_blob_pi_addr + be->blob_offset + skip_bytes,
                      bytes);
 
-            AtlasEntry& e = atlas_entries[idx];
+            AtlasEntry& e = atlas_entries[insert_idx];
             e.key        = key;
             e.ci4        = dst;
             e.w          = be->w;
@@ -648,23 +719,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     const uint32_t ci4_stride = (uint32_t)w / 2;
     const uint32_t bytes = (ci4_stride * (uint32_t)h + 7u) & ~7u;
 
-    if (atlas_used + bytes > atlas_pool_bytes)
-    {
-        atlas_overflows++;
-        assertf(bytes <= atlas_pool_bytes,
-                "hwsprites: spillover sprite %ux%u (%u bytes) exceeds "
-                "atlas pool (%u bytes)",
-                (unsigned)w, (unsigned)h, (unsigned)bytes,
-                (unsigned)atlas_pool_bytes);
-        // Drain queued LOAD_BLOCK before reusing pool addresses.
-        // See the rationale block at the table-full overflow earlier.
-        if (drain_on_overflow) rspq_wait();
-        atlas_reset();
-        idx = hwsprites_mix64(key) & mask;  // table is empty; first slot is free
-    }
-
-    uint8_t* dst = atlas_pool + atlas_used;
-    atlas_used += bytes;
+    uint8_t* dst = atlas_pool_alloc(bytes, drain_on_overflow);
     std::memset(dst, 0, bytes);
 
     // Pass 2: decode pixels into CI4. Leftmost pixel of a byte sits in the
@@ -717,7 +772,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
 
     data_cache_hit_writeback(dst, bytes);
 
-    AtlasEntry& e = atlas_entries[idx];
+    AtlasEntry& e = atlas_entries[insert_idx];
     e.key        = key;
     e.ci4        = dst;
     e.w          = w;
