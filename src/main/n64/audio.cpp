@@ -170,17 +170,16 @@ namespace
                 if (freq < 1.0f) freq = 1.0f;
                 mixer_ch_set_freq(ch, freq);
 
-                // Per-voice attenuation. The original chip's CPU mixer would
-                // accumulate all 16 voices of (int8*uint8) into int32 and
-                // wrap on overflow; the libdragon mixer clips at int16 at
-                // the output stage. /N_PCM_CH (i.e. /16) was strictly safe
-                // but pushed typical SFX (1–3 simultaneous voices) ~24 dB
-                // below full scale and made them inaudible. /4 keeps headroom
-                // for ~4 simultaneous full-volume voices, which covers the
-                // common OutRun load (engine + voice + crash + passing).
-                constexpr float PCM_VOICE_HEADROOM = 4.0f;
-                float lvol = (float)regs[2] / 255.0f / PCM_VOICE_HEADROOM;
-                float rvol = (float)regs[3] / 255.0f / PCM_VOICE_HEADROOM;
+                // Per-voice attenuation. SegaPCM treats vol=0xFF as full
+                // scale per voice (sample = int8 × regs[2] in MAME), so
+                // regs[2]/255 matches the SDL build's per-voice level.
+                // OutRun's Z80 caps VOL_L/VOL_R at 0x40 (see osound.cpp
+                // VOL_MAX) and engine tones at 0x3F (get_adjusted_vol), so
+                // a max-volume voice sits at ~0.25 amplitude — leaves room
+                // for the typical 1–3 simultaneous voices to sum without
+                // clipping, and matches what the SDL mixer hears.
+                float lvol = (float)regs[2] / 255.0f;
+                float rvol = (float)regs[3] / 255.0f;
                 mixer_ch_set_vol(ch, lvol, rvol);
 
                 // One-shot completion: the chip-side stream_update would
