@@ -17,7 +17,6 @@ namespace detail
 {
     constexpr int MAX_LINES    = S16_HEIGHT;    // 224
     constexpr int MAX_SPAN_PX  = 320;           // s16 active width
-    constexpr int MASK_BYTES   = (MAX_SPAN_PX + 1) / 2;
     constexpr int TLUT_ENTRIES = 16;
 
     // Per-row run list — replaces the CI4 mask + TLUT pair for the CPU
@@ -60,17 +59,13 @@ namespace detail
         uint8_t  src_s_offset;
     };
 
-    // Defined in hwroad_rdp.cpp. mask_buf / tlut_buf are uncached aliases
-    // (KSEG1) — writes go through the R4300 store buffer with no cache
-    // traffic; RDP DMAs read fresh data without an explicit writeback.
-    // mask_buf/tlut_buf are retained for RSP path compatibility; the CPU
-    // build/emit path now uses runs_buf instead.
-    extern uint8_t*  mask_buf;
+    // Defined in hwroad_rdp.cpp. Uncached aliases (KSEG1) — writes go
+    // through the R4300 store buffer with no cache traffic; RDP DMAs read
+    // fresh data without an explicit writeback.
     extern uint16_t* tlut_buf;
     extern Run*      runs_buf;
     extern LineState line[MAX_LINES];
 
-    inline uint8_t*  mask_ptr(int y) { return mask_buf + (size_t)y * MASK_BYTES; }
     inline uint16_t* tlut_ptr(int y) { return tlut_buf + (size_t)y * TLUT_ENTRIES; }
     inline Run*      runs_ptr(int y) { return runs_buf + (size_t)y * MAX_RUNS_PER_ROW; }
 }

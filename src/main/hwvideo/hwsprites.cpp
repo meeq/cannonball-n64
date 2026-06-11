@@ -356,7 +356,7 @@ static inline uint64_t hwsprites_atlas_key(uint16_t bank, uint16_t addr,
 
 const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     uint16_t bank, uint16_t addr, uint16_t height, int16_t pitch, bool flip,
-    uint16_t vzoom)
+    uint16_t vzoom, bool drain_on_overflow)
 {
     if (!atlas_pool || height == 0 || vzoom == 0) return nullptr;
 
@@ -396,7 +396,10 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
             // CI4 (horizontal stripe corruption on 4 MiB consoles where the
             // 128 KiB pool overflows mid-frame on dense scenes like Stage 1
             // palm trees). 8 MiB gets a 2 MiB pool that rarely overflows.
-            rspq_wait();
+            // The drain is skippable when the caller is render_rdp's pass 1
+            // extract prepass — no LOAD_BLOCK has been queued against this
+            // pool snapshot yet, so reset can't race anything in flight.
+            if (drain_on_overflow) rspq_wait();
             atlas_reset();
             idx = hwsprites_mix64(key) & mask;
         }
@@ -439,7 +442,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                         (unsigned)atlas_pool_bytes);
                 // Drain queued LOAD_BLOCK before reusing pool addresses.
                 // See the rationale block at the table-full overflow above.
-                rspq_wait();
+                if (drain_on_overflow) rspq_wait();
                 atlas_reset();
                 idx = hwsprites_mix64(key) & mask;
             }
@@ -654,7 +657,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
                 (unsigned)atlas_pool_bytes);
         // Drain queued LOAD_BLOCK before reusing pool addresses.
         // See the rationale block at the table-full overflow earlier.
-        rspq_wait();
+        if (drain_on_overflow) rspq_wait();
         atlas_reset();
         idx = hwsprites_mix64(key) & mask;  // table is empty; first slot is free
     }
@@ -834,6 +837,59 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 
     const uint32_t numbanks = SPRITES_LENGTH / 0x10000;
 
+    // -------------------------------------------------------------------
+    // Pass 1 — atlas prepass. Walk this priority's sprites and call
+    // atlas_get_or_extract to populate the pool, but emit nothing. The
+    // overflow-recovery rspq_wait() drain is skipped here because no
+    // LOAD_BLOCK has been queued against the pool yet — there is nothing
+    // in flight that could be reading the about-to-be-recycled addresses.
+    // This is the whole point of the 2-pass split: on 4 MiB the 128 KiB
+    // pool was overflowing ~1.2x per frame inside pass 2, and each drain
+    // stalled the CPU on the full RDP queue. Pass 1 absorbs the overflow
+    // cost (just memset+ptr reset, ~µs) so pass 2 sees a stable pool.
+    //
+    // When the working set fits in the pool, pass 2 hits the atlas 100%
+    // and never overflows — zero drains, no extract cost. When the
+    // working set exceeds the pool, pass 2 still misses and can overflow;
+    // we keep the drain there for correctness. Worst case = today.
+    //
+    // CPU cost of pass 1: re-parses ramBuff and re-derives bank/addr/
+    // pitch/flip/vzoom, which is ~10us total across ~60 visible sprites.
+    // Atlas hits in pass 1 are O(1) hash probes. The duplicate parse is
+    // a rounding error against the saved drain cost.
+    // -------------------------------------------------------------------
+    for (uint16_t data = 0; data < SPRITE_RAM_SIZE; data += 8)
+    {
+        if ((ramBuff[data+0] & 0x8000) != 0) break;
+
+        uint32_t sprpri = 1u << ((ramBuff[data+3] >> 12) & 3);
+        if (sprpri != priority) continue;
+
+        int16_t hide   = (ramBuff[data+0] & 0x5000);
+        int32_t height = (ramBuff[data+5] >> 8) + 1;
+        if (hide != 0 || height == 0) continue;
+
+        int16_t  bank   = (ramBuff[data+0] >> 9) & 7;
+        uint32_t addr   = ramBuff[data+1];
+        int32_t  pitch  = ((ramBuff[data+2] >> 1) | ((ramBuff[data+4] & 0x1000) << 3)) >> 8;
+        int32_t  vzoom  = ramBuff[data+3] & 0x7ff;
+        int32_t  flip   = (~ramBuff[data+4] >> 14) & 1;
+
+        if (numbanks) bank %= numbanks;
+        if (vzoom < 0x40) vzoom = 0x40;
+        if (config.video.hires) vzoom >>= 1;
+
+        atlas_get_or_extract(
+            (uint16_t)bank, (uint16_t)addr,
+            (uint16_t)height, (int16_t)pitch, flip != 0,
+            (uint16_t)vzoom, /*drain_on_overflow=*/false);
+    }
+
+    // -------------------------------------------------------------------
+    // Pass 2 — emit. Same walk + parse, but now also computes screen
+    // coordinates, runs the frustum cull, manages the TLUT/atlas/pipeline
+    // bypass cache, and emits LOAD_BLOCK + texture rectangles.
+    // -------------------------------------------------------------------
     for (uint16_t data = 0; data < SPRITE_RAM_SIZE; data += 8)
     {
         if ((ramBuff[data+0] & 0x8000) != 0) break;
@@ -883,10 +939,13 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             vzoom >>= 1;
         }
 
+        // Pass 2 (emit). drain_on_overflow=true: any miss here that triggers
+        // overflow recovery must rspq_wait() first because we've already
+        // queued LOAD_BLOCKs against the pool earlier in this same loop.
         const AtlasEntry* e = atlas_get_or_extract(
             (uint16_t)bank, (uint16_t)addr,
             (uint16_t)height, (int16_t)pitch, flip != 0,
-            (uint16_t)vzoom);
+            (uint16_t)vzoom, /*drain_on_overflow=*/true);
         if (!e) continue;
 
         // Shadow pass is a 2-cycle RDP operation (darken blender). If this

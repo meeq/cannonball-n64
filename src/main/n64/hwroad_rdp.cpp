@@ -56,7 +56,6 @@ static uint32_t s_frame = 0;
 // Shared with hwroad_rdp_rsp.cpp via the internal header.
 namespace detail
 {
-    uint8_t*  mask_buf = nullptr;
     uint16_t* tlut_buf = nullptr;
     Run*      runs_buf = nullptr;
     LineState line[MAX_LINES];
@@ -64,7 +63,6 @@ namespace detail
 
 using detail::MAX_LINES;
 using detail::MAX_SPAN_PX;
-using detail::MASK_BYTES;
 using detail::TLUT_ENTRIES;
 using detail::MAX_RUNS_PER_ROW;
 using detail::LineState;
@@ -72,20 +70,16 @@ using detail::Run;
 using detail::SKIP;
 using detail::OOB_ONLY;
 using detail::DRAW;
-using detail::mask_buf;
 using detail::tlut_buf;
 using detail::runs_buf;
 using detail::line;
-using detail::mask_ptr;
 using detail::tlut_ptr;
 using detail::runs_ptr;
 
 namespace
 {
-    // Per-line CI4 mask + TLUT — vestigial from the CI4 path, retained so
-    // the RSP overlay file (hwroad_rdp_rsp.cpp) continues to compile against
-    // the shared LineState layout. The CPU path no longer touches them.
-    constexpr size_t MASK_BUF_BYTES = (size_t)MAX_LINES * MASK_BYTES;
+    // Per-line CI4 TLUT — written by the CPU build (or RSP build via
+    // hwroad_rdp_rsp) and read by RDP at emit time via TILE0 palette load.
     constexpr size_t TLUT_BUF_BYTES = (size_t)MAX_LINES * TLUT_ENTRIES * 2;
 
     // Per-line run lists. 224 * 64 * 4 = 56 KB.
@@ -165,11 +159,6 @@ namespace
 
 void init()
 {
-    if (!mask_buf) {
-        mask_buf = (uint8_t*)malloc_uncached_aligned(16, MASK_BUF_BYTES);
-        assertf(mask_buf, "hwroad_rdp: mask_buf alloc failed (%u bytes)",
-                (unsigned)MASK_BUF_BYTES);
-    }
     if (!tlut_buf) {
         tlut_buf = (uint16_t*)malloc_uncached_aligned(16, TLUT_BUF_BYTES);
         assertf(tlut_buf, "hwroad_rdp: tlut_buf alloc failed (%u bytes)",
@@ -180,7 +169,6 @@ void init()
         assertf(runs_buf, "hwroad_rdp: runs_buf alloc failed (%u bytes)",
                 (unsigned)RUNS_BUF_BYTES);
     }
-    std::memset(mask_buf, 0, MASK_BUF_BYTES);
     std::memset(tlut_buf, 0, TLUT_BUF_BYTES);
     std::memset(runs_buf, 0, RUNS_BUF_BYTES);
     for (int y = 0; y < MAX_LINES; y++) {
@@ -191,7 +179,6 @@ void init()
 
 void shutdown()
 {
-    if (mask_buf) { free_uncached(mask_buf); mask_buf = nullptr; }
     if (tlut_buf) { free_uncached(tlut_buf); tlut_buf = nullptr; }
     if (runs_buf) { free_uncached(runs_buf); runs_buf = nullptr; }
 }

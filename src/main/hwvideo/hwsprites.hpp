@@ -69,14 +69,13 @@ private:
     // Larger = fewer overflow-recovery frames (each costs ~20 ms; see
     // project_spr_spike_atlas_overflow). Single value per session — no MIN/MAX
     // fallback at runtime, just a one-time branch on detected RAM.
-    // 4 MiB sizing: post-roms heap has ~210 KiB free at 128 KiB pool.
-    // Both 256 KiB and 160 KiB starve later allocs — hwroad_rdp needs
-    // ~57 KiB runs_buf, hwroad_rdp_rsp needs more for shadow_cached, plus
-    // video.init small allocs. Heap fragmentation eats apparent headroom.
-    // Keep this at 128 KiB; the rspq_wait() correctness drain stays, perf
-    // recovery for overflow has to come from elsewhere (pool ping-pong, or
-    // skipping the drain when no LOAD_BLOCK references the recycled region).
-    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 128u << 10;        // 128 KiB
+    // 4 MiB sizing: post-RAM-reclaim (mask_buf dropped, shadow_buf lazy,
+    // hwroad_rsp gated) post-roms heap has ~208 KiB free at 128 KiB pool,
+    // so total pool budget = ~336 KiB. 256 KiB leaves ~80 KiB headroom —
+    // larger pool cuts overflow-recovery frames during cold-start (per-
+    // priority working set previously exceeded 128 KiB; see
+    // project_spr_spike_atlas_overflow).
+    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 256u << 10;        // 256 KiB
     static constexpr uint32_t ATLAS_POOL_BYTES_EXPANSION = 2u << 20;          // 2 MiB
     struct AtlasEntry
     {
@@ -116,8 +115,14 @@ private:
     uint32_t   shadow_body_ring_idx;
 
     void atlas_reset();
+    // drain_on_overflow=true means atlas_reset() during overflow recovery
+    // must rspq_wait() first (caller has queued LOAD_BLOCK refs to the
+    // pool — see project_spr_spike_atlas_overflow). False is only safe
+    // when the caller has NOT yet emitted any LOAD_BLOCK against this
+    // pool snapshot — used by render_rdp's pass 1 prepass.
     const AtlasEntry* atlas_get_or_extract(uint16_t bank, uint16_t addr,
                                            uint16_t height, int16_t pitch,
-                                           bool flip, uint16_t vzoom);
+                                           bool flip, uint16_t vzoom,
+                                           bool drain_on_overflow);
 };
 

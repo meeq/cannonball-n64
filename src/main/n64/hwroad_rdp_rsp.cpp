@@ -15,13 +15,10 @@
          TLUT). Writes are: hwroad_rdp::detail::tlut_buf (per-row),
          hwroad_rdp::detail::line (LineState), and a per-row entry in
          the descriptor table here.
-      2. CPU: pre-fill mask row with oob_pair via 4-byte uncached stores.
-         RSP only needs to overwrite the in-span nibble pairs; OOB
-         segments are already correct.
-      3. CPU: rspq_write(HWRoadRDP_BuildMasks, desc_base, state_base).
-      4. RSP: per row, async DMA src0+src1 in, scalar pack, DMA mask
+      2. CPU: rspq_write(HWRoadRDP_BuildMasks, desc_base, state_base).
+      3. RSP: per row, async DMA src0+src1 in, scalar pack, DMA runs[y]
          out. Caller (emit_foreground_lores_rdp) issues rspq_wait
-         before reading mask_buf via RDP DMA.
+         before reading runs_buf via RDP DMA.
 ***************************************************************************/
 
 #include "n64/hwroad_rdp.hpp"
@@ -178,12 +175,11 @@ void init()
     assertf(state_uc, "hwroad_rdp_rsp: state alloc failed");
     std::memset(state_uc, 0, sizeof(FrameStateRDP));
 
-    // Shadow buffer for validate path — holds the CPU baseline runs[] while
-    // we diff against the RSP output. Cached so the diff loop reads cache.
-    shadow_cached = memalign(16, SHADOW_BYTES);
-    assertf(shadow_cached, "hwroad_rdp_rsp: shadow alloc failed");
-    shadow_buf    = (uint8_t*)shadow_cached;
-    std::memset(shadow_buf, 0, SHADOW_BYTES);
+    // Shadow buffer for validate path (~56 KiB) is now allocated lazily on
+    // first validate=true frame in build_foreground_lores_rdp_rsp. With
+    // validate hard-off in shipping builds it would just be dead RAM, and
+    // on the 4 MiB base console every reclaimed KiB lets the sprite atlas
+    // pool grow toward covering the per-priority working set.
 
     n_runs_uc = (uint16_t*)malloc_uncached_aligned(16, N_RUNS_BYTES);
     assertf(n_runs_uc, "hwroad_rdp_rsp: n_runs alloc failed");
@@ -298,7 +294,7 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     using namespace n64::hwroad_rdp::detail;
     namespace rsp = n64::hwroad_rdp_rsp;
 
-    if (!mask_buf || !tlut_buf || !rsp::desc_uc || !rsp::state_uc) return;
+    if (!tlut_buf || !rsp::desc_uc || !rsp::state_uc) return;
 
     const uint8_t ctrl = road_control & 3;
     rsp::s_frame++;
@@ -539,6 +535,16 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     // the CPU result, so visuals stay correct even when the RSP path has a
     // bug. 2x prep cost — keep this off for perf testing.
     if (rsp::validate) {
+        // Lazy-alloc the shadow buffer (~56 KiB) on first use. Init time
+        // skipped this to keep boot RAM tight on the 4 MiB base console.
+        if (!rsp::shadow_cached) {
+            rsp::shadow_cached = memalign(16, rsp::SHADOW_BYTES);
+            assertf(rsp::shadow_cached,
+                    "hwroad_rdp_rsp: shadow alloc failed (%u bytes)",
+                    (unsigned)rsp::SHADOW_BYTES);
+            rsp::shadow_buf = (uint8_t*)rsp::shadow_cached;
+            std::memset(rsp::shadow_buf, 0, rsp::SHADOW_BYTES);
+        }
         rspq_wait();
         // Snapshot RSP runs + n_runs.
         std::memcpy(rsp::shadow_buf, runs_buf,

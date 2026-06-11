@@ -93,6 +93,14 @@ void init()
 {
     if (initialised)
         return;
+    // Gate the boot-time work on enabled — the scalar RSP path lost ~45%
+    // to the CPU rasteriser in earlier benchmarks (see PR notes / commit
+    // log), so the default is enabled=false and the 14 KiB descriptor
+    // buffer + overlay slot are dead weight. Flipping enabled=true at
+    // build time will re-arm the path on the next boot; runtime toggle
+    // is intentionally not supported.
+    if (!enabled)
+        return;
 
     overlay_id = rspq_overlay_register(&rsp_hwroad);
 
