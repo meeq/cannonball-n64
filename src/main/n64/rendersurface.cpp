@@ -18,6 +18,7 @@
 #include "frontend/config.hpp"
 #include "n64/hwroad_rdp.hpp"
 #include "n64/hwroad_rdp_rsp.hpp"
+#include <rdp.h>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -289,6 +290,16 @@ bool Render::finalize_frame()
 
     rdpq_attach(disp, NULL);
 
+    // TEMP-PROBE: reset RDP perf counters at frame start. Read at end of
+    // frame (post-rspq_wait) to compute pipe-busy / clock ratio. Answers
+    // whether the RDP rasterizer is saturated (fps-floor is RDP-bound) or
+    // idle (fps-floor is CPU/RSP feed-bound). ares doesn't emulate these
+    // counters; valid only on real hardware.
+    *DP_STATUS = DP_WSTATUS_RESET_CLOCK_COUNTER
+               | DP_WSTATUS_RESET_PIPE_COUNTER
+               | DP_WSTATUS_RESET_CMD_COUNTER
+               | DP_WSTATUS_RESET_TMEM_COUNTER;
+
     const int x = (disp->width - src_width) / 2;
 
     // Clip all subsequent RDP work to the 320x224 game viewport so partial-
@@ -482,6 +493,28 @@ bool Render::finalize_frame()
                (unsigned long)txt_emit, (unsigned long)txt_drain);
     }
 #endif
+
+    // TEMP-PROBE: drain queue + read RDP busy counters. One line per 60
+    // frames. Valid on real hardware only.
+    {
+        rspq_wait();
+        const uint32_t dp_clock = *DP_CLOCK;
+        const uint32_t dp_pipe  = *DP_PIPE_BUSY;
+        const uint32_t dp_cmd   = *DP_BUSY;
+        const uint32_t dp_tmem  = *DP_TMEM_BUSY;
+        static uint32_t s_probe_frame = 0;
+        if ((s_probe_frame++ % 60) == 0) {
+            const uint32_t pipe_pct = dp_clock ? (uint32_t)((uint64_t)dp_pipe * 100u / dp_clock) : 0;
+            const uint32_t cmd_pct  = dp_clock ? (uint32_t)((uint64_t)dp_cmd  * 100u / dp_clock) : 0;
+            const uint32_t tmem_pct = dp_clock ? (uint32_t)((uint64_t)dp_tmem * 100u / dp_clock) : 0;
+            debugf("RDPbusy[%5lu] clock=%lu pipe=%lu (%lu%%) cmd=%lu (%lu%%) tmem=%lu (%lu%%)\n",
+                   (unsigned long)s_probe_frame,
+                   (unsigned long)dp_clock,
+                   (unsigned long)dp_pipe, (unsigned long)pipe_pct,
+                   (unsigned long)dp_cmd,  (unsigned long)cmd_pct,
+                   (unsigned long)dp_tmem, (unsigned long)tmem_pct);
+        }
+    }
 
     rdpq_detach_show();
     return true;
