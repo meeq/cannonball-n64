@@ -344,7 +344,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 // counters (then suspect RDP backpressure or DMA stalls).
                 // If chunks > 1 or evicts spike, the atlas/TLUT working set
                 // overflowed for this scene's tile diversity.
-                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu\n",
+                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu dma=%lu/%lu@%luus\n",
                        (unsigned long)n64_profile::tile_call_vis,
                        (unsigned long)n64_profile::tile_call_uniq_total,
                        (unsigned long)n64_profile::tile_call_chunks,
@@ -352,7 +352,10 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_prims,
                        (unsigned long)n64_profile::tile_call_pass1_us,
                        (unsigned long)n64_profile::tile_call_pass2_us,
-                       (unsigned long)n64_profile::raw_composite_us);
+                       (unsigned long)n64_profile::raw_composite_us,
+                       (unsigned long)n64_profile::tile_call_dma_misses,
+                       (unsigned long)n64_profile::tile_call_dma_fetches,
+                       (unsigned long)n64_profile::tile_call_dma_us);
                 debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu us=%lu\n",
                        (unsigned long)n64_profile::spr_call_vis,
                        (unsigned long)n64_profile::spr_call_prims,
@@ -442,7 +445,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 // chunks/evicts move on slow frames.
                 static uint32_t snap_comp_skipped = 0;
                 const uint32_t cur_comp_skipped = n64_profile::composite_skipped_frames;
-                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu skip=%lu/%lu\n",
+                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu skip=%lu/%lu dma=%lu/%lu@%luus\n",
                        (unsigned long)n64_profile::tile_call_vis,
                        (unsigned long)n64_profile::tile_call_uniq_total,
                        (unsigned long)n64_profile::tile_call_chunks,
@@ -452,7 +455,10 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_pass2_us,
                        (unsigned long)n64_profile::composite_us,
                        (unsigned long)(cur_comp_skipped - snap_comp_skipped),
-                       (unsigned long)wf);
+                       (unsigned long)wf,
+                       (unsigned long)n64_profile::tile_call_dma_misses,
+                       (unsigned long)n64_profile::tile_call_dma_fetches,
+                       (unsigned long)n64_profile::tile_call_dma_us);
                 debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu us=%lu\n",
                        (unsigned long)n64_profile::spr_call_vis,
                        (unsigned long)n64_profile::spr_call_prims,

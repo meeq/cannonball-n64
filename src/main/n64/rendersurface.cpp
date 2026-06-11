@@ -69,6 +69,9 @@ namespace n64_profile
     uint32_t tile_call_prims        = 0;
     uint32_t tile_call_pass1_us     = 0;
     uint32_t tile_call_pass2_us     = 0;
+    uint32_t tile_call_dma_fetches  = 0;
+    uint32_t tile_call_dma_us       = 0;
+    uint32_t tile_call_dma_misses   = 0;
 
     uint32_t spr_call_vis           = 0;
     uint32_t spr_call_prims         = 0;

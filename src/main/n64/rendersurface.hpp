@@ -57,6 +57,9 @@ namespace n64_profile
     extern uint32_t tile_call_prims;        // rdpq_texture_rectangle calls (post-coalesce)
     extern uint32_t tile_call_pass1_us;     // pass 1 (walk tilemap + build atlas) us
     extern uint32_t tile_call_pass2_us;     // pass 2 (chunk setup + emit) us
+    extern uint32_t tile_call_dma_fetches;  // hwtiles_fetch_tile invocations (cache lookups)
+    extern uint32_t tile_call_dma_us;       // us spent in hwtiles_fetch_tile (hits + misses)
+    extern uint32_t tile_call_dma_misses;   // PI-DMA actually issued (cache misses)
 
     // Per-call telemetry for hwsprites::render_rdp. Set at end of call,
     // consumed by the outlier logger to diagnose why spr peaks at ~6.5 ms

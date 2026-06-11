@@ -1,4 +1,5 @@
 #include <cstring> // memcpy
+#include <malloc.h> // memalign
 #include <libdragon.h>
 #include "globals.hpp"
 #include "romloader.hpp"
@@ -17,6 +18,9 @@ namespace n64_profile {
     extern uint32_t tile_call_prims;
     extern uint32_t tile_call_pass1_us;
     extern uint32_t tile_call_pass2_us;
+    extern uint32_t tile_call_dma_fetches;
+    extern uint32_t tile_call_dma_us;
+    extern uint32_t tile_call_dma_misses;
 }
 
 /***************************************************************************
@@ -90,23 +94,45 @@ namespace n64_profile {
  *
  *******************************************************************************************/
 
-// Per-tile DMA scratch shared between the BG/FG and text render paths.
-// One unique tile = 8 rows × 4 bytes = 32 bytes (one cache line on R4300
-// is 16 B, so this is two lines). dma_read does no cache management
-// (see feedback_dma_read_no_cache_mgmt), so each call invalidates the
-// range before issuing the DMA so subsequent reads pull fresh from RAM.
+// RAM-resident tile pixel cache. tile graphics live cart-side
+// ([[project-hwtiles-cart-side]]); a fresh PI-DMA per unique tile costs
+// ~22 us of setup latency, so ~150 fetches per frame in OUT ≈ 3-4 ms of
+// pass 1. Direct-mapped cache lets repeat tile codes skip the bus.
+//
+// One tile = 8 rows × 4 bytes = 32 bytes. Direct map by (Code & MASK):
+// 1024 slots × 32 B = 32 KiB pixels + 2 KiB tags. With ~150 uniques
+// across 8192 possible codes spread over 1024 slots, conflict misses
+// stay in single digits per frame in steady state.
+//
+// Heap-allocated in hwtiles::init() — has to run after roms.load on
+// 4 MiB (ROM load needs ~1 MiB contiguous; pre-roms BSS growth bumps
+// up against that ceiling). Slots double as DMA targets — invalidate
+// before issuing the PI-DMA so the CPU sees fresh bytes through the
+// cached alias. On a hit the inner pack loop reads through the same
+// cached alias; lines stay hot in L1 across the chunk's inner loop.
 namespace {
-    alignas(8) uint32_t s_tile_dma_scratch[8];
+    constexpr uint32_t TILE_CACHE_SLOTS = 1024;
+    constexpr uint32_t TILE_CACHE_MASK  = TILE_CACHE_SLOTS - 1;
+    constexpr uint32_t TILE_BYTES       = 32;
+
+    uint8_t*  s_tile_cache_pix = nullptr;  // [SLOTS * TILE_BYTES]
+    uint16_t* s_tile_cache_tag = nullptr;  // [SLOTS]
 
     inline const uint32_t* hwtiles_fetch_tile(uint32_t tiles_pi_addr,
                                               uint32_t code)
     {
-        data_cache_hit_writeback_invalidate(s_tile_dma_scratch,
-                                            sizeof(s_tile_dma_scratch));
-        dma_read(s_tile_dma_scratch,
-                 tiles_pi_addr + code * sizeof(s_tile_dma_scratch),
-                 sizeof(s_tile_dma_scratch));
-        return s_tile_dma_scratch;
+        const uint64_t t0 = get_ticks_us();
+        const uint32_t slot = code & TILE_CACHE_MASK;
+        uint8_t* line = s_tile_cache_pix + (size_t)slot * TILE_BYTES;
+        n64_profile::tile_call_dma_fetches++;
+        if (s_tile_cache_tag[slot] != (uint16_t)code) {
+            data_cache_hit_writeback_invalidate(line, TILE_BYTES);
+            dma_read(line, tiles_pi_addr + code * TILE_BYTES, TILE_BYTES);
+            s_tile_cache_tag[slot] = (uint16_t)code;
+            n64_profile::tile_call_dma_misses++;
+        }
+        n64_profile::tile_call_dma_us += (uint32_t)(get_ticks_us() - t0);
+        return (const uint32_t*)line;
     }
 }
 
@@ -136,6 +162,20 @@ void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
     assertf(tiles_pi_addr,
             "hwtiles: /tiles/tiles_native.bin missing from DFS — "
             "rebake required");
+
+    // Tile pixel cache lives on the heap (not BSS) so its 34 KiB doesn't
+    // squeeze the contiguous pre-roms heap that romloader needs for the
+    // ~1 MiB ROM allocation. hwtiles::init runs from video.init, after
+    // roms.load_revb_roms in main(), so the heap is past that pressure
+    // point here. memalign(8, ...) so dma_read targets meet PI alignment.
+    if (!s_tile_cache_pix) {
+        s_tile_cache_pix = (uint8_t*)memalign(8, TILE_CACHE_SLOTS * TILE_BYTES);
+        s_tile_cache_tag = (uint16_t*)memalign(2, TILE_CACHE_SLOTS * sizeof(uint16_t));
+        assertf(s_tile_cache_pix && s_tile_cache_tag,
+                "hwtiles: tile cache alloc failed (%u bytes)",
+                (unsigned)(TILE_CACHE_SLOTS * (TILE_BYTES + sizeof(uint16_t))));
+        std::memset(s_tile_cache_tag, 0xff, TILE_CACHE_SLOTS * sizeof(uint16_t));
+    }
 
     // The legacy SDL build dispatched CPU rendering through
     // render8x8_tile_mask{,_clip} function pointers (lores/hires variants).
@@ -276,6 +316,9 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // how effective the horizontal run coalesce is (vis vs. emitted rects).
     const uint32_t pre_tlut_uploads = n64_profile::tile_tlut_uploads;
     const uint32_t pre_prim_count   = n64_profile::prim_count;
+    n64_profile::tile_call_dma_fetches = 0;
+    n64_profile::tile_call_dma_us      = 0;
+    n64_profile::tile_call_dma_misses  = 0;
     const uint64_t pass1_t0 = get_ticks_us();
 
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
