@@ -111,9 +111,7 @@ namespace
     constexpr int DESC_BUF_BYTES = MAX_LINES * (int)sizeof(DescriptorRDP);
 
     uint32_t       overlay_id   = 0;
-    void*          desc_cached  = nullptr;
     DescriptorRDP* desc_uc      = nullptr;
-    void*          state_cached = nullptr;
     FrameStateRDP* state_uc     = nullptr;
 
     bool initialised   = false;
@@ -130,7 +128,6 @@ namespace
     // dispatcher copies into line[y].n_runs after rspq_wait. Sized to
     // 8-byte multiple so SP DMA's length encoding is clean.
     constexpr size_t N_RUNS_BYTES = ((size_t)MAX_LINES * 2 + 7) & ~7;
-    void*     n_runs_cached = nullptr;
     uint16_t* n_runs_uc     = nullptr;
 
     // Per-row OOB-colour array — populated by build_foreground_lores_rdp_rsp
@@ -140,7 +137,6 @@ namespace
     // sentinel simplifies the RSP walk: walking to MAX_LINES+1 catches the
     // closing edge of a run that extends to the last drawn row.
     constexpr size_t COOB_FILL_BYTES = (((size_t)MAX_LINES + 1) * 2 + 7) & ~7;
-    void*     coob_fill_cached    = nullptr;
     uint16_t* coob_fill_uc        = nullptr;
     bool      coob_fill_populated = false;
 
@@ -158,7 +154,6 @@ namespace
     static_assert(sizeof(EmitRowRDP) == 4, "EmitRowRDP must be 4 bytes");
 
     constexpr size_t EMIT_ROW_BYTES = ((size_t)MAX_LINES * sizeof(EmitRowRDP) + 7) & ~7;
-    void*       emit_row_cached     = nullptr;
     EmitRowRDP* emit_row_uc         = nullptr;
     bool        emit_runs_populated = false;
 
@@ -171,14 +166,16 @@ void init()
 
     overlay_id = rspq_overlay_register(&rsp_hwroad_rdp);
 
-    desc_cached  = memalign(16, DESC_BUF_BYTES);
-    assertf(desc_cached, "hwroad_rdp_rsp: descriptor alloc failed");
-    desc_uc      = (DescriptorRDP*)UncachedAddr(desc_cached);
+    // RSP/RDP-shared buffers live in the 0xA0… uncached segment so RSP DMA
+    // and CPU writes don't fight each other for cache coherency.
+    // malloc_uncached_aligned hands back an uncached-aliased pointer with
+    // no cacheline sharing — no manual writeback_invalidate required.
+    desc_uc = (DescriptorRDP*)malloc_uncached_aligned(16, DESC_BUF_BYTES);
+    assertf(desc_uc, "hwroad_rdp_rsp: descriptor alloc failed");
     std::memset(desc_uc, 0, DESC_BUF_BYTES);
 
-    state_cached = memalign(16, sizeof(FrameStateRDP));
-    assertf(state_cached, "hwroad_rdp_rsp: state alloc failed");
-    state_uc     = (FrameStateRDP*)UncachedAddr(state_cached);
+    state_uc = (FrameStateRDP*)malloc_uncached_aligned(16, sizeof(FrameStateRDP));
+    assertf(state_uc, "hwroad_rdp_rsp: state alloc failed");
     std::memset(state_uc, 0, sizeof(FrameStateRDP));
 
     // Shadow buffer for validate path — holds the CPU baseline runs[] while
@@ -188,22 +185,19 @@ void init()
     shadow_buf    = (uint8_t*)shadow_cached;
     std::memset(shadow_buf, 0, SHADOW_BYTES);
 
-    n_runs_cached = memalign(16, N_RUNS_BYTES);
-    assertf(n_runs_cached, "hwroad_rdp_rsp: n_runs alloc failed");
-    n_runs_uc     = (uint16_t*)UncachedAddr(n_runs_cached);
+    n_runs_uc = (uint16_t*)malloc_uncached_aligned(16, N_RUNS_BYTES);
+    assertf(n_runs_uc, "hwroad_rdp_rsp: n_runs alloc failed");
     std::memset(n_runs_uc, 0, N_RUNS_BYTES);
 
-    coob_fill_cached = memalign(16, COOB_FILL_BYTES);
-    assertf(coob_fill_cached, "hwroad_rdp_rsp: coob_fill alloc failed");
-    coob_fill_uc     = (uint16_t*)UncachedAddr(coob_fill_cached);
+    coob_fill_uc = (uint16_t*)malloc_uncached_aligned(16, COOB_FILL_BYTES);
+    assertf(coob_fill_uc, "hwroad_rdp_rsp: coob_fill alloc failed");
     std::memset(coob_fill_uc, 0xFF, COOB_FILL_BYTES);
 
-    emit_row_cached = memalign(16, EMIT_ROW_BYTES);
-    assertf(emit_row_cached, "hwroad_rdp_rsp: emit_row alloc failed");
-    emit_row_uc     = (EmitRowRDP*)UncachedAddr(emit_row_cached);
+    emit_row_uc = (EmitRowRDP*)malloc_uncached_aligned(16, EMIT_ROW_BYTES);
+    assertf(emit_row_uc, "hwroad_rdp_rsp: emit_row alloc failed");
     std::memset(emit_row_uc, 0, EMIT_ROW_BYTES);
 
-    state_uc->n_runs_phys = PhysicalAddr(n_runs_cached);
+    state_uc->n_runs_phys = PhysicalAddr(n_runs_uc);
 
     initialised = true;
 }
@@ -230,21 +224,13 @@ void shutdown()
     if (!initialised) return;
     rspq_overlay_unregister(overlay_id);
     overlay_id = 0;
-    free(desc_cached);   desc_cached  = nullptr; desc_uc  = nullptr;
-    free(state_cached);  state_cached = nullptr; state_uc = nullptr;
-    if (shadow_cached) { free(shadow_cached); shadow_cached = nullptr; shadow_buf = nullptr; }
-    if (n_runs_cached) { free(n_runs_cached); n_runs_cached = nullptr; n_runs_uc = nullptr; }
-    if (coob_fill_cached) {
-        free(coob_fill_cached);
-        coob_fill_cached = nullptr;
-        coob_fill_uc     = nullptr;
-    }
+    if (desc_uc)      { free_uncached(desc_uc);      desc_uc      = nullptr; }
+    if (state_uc)     { free_uncached(state_uc);     state_uc     = nullptr; }
+    if (shadow_cached){ free(shadow_cached);         shadow_cached = nullptr; shadow_buf = nullptr; }
+    if (n_runs_uc)    { free_uncached(n_runs_uc);    n_runs_uc    = nullptr; }
+    if (coob_fill_uc) { free_uncached(coob_fill_uc); coob_fill_uc = nullptr; }
     coob_fill_populated = false;
-    if (emit_row_cached) {
-        free(emit_row_cached);
-        emit_row_cached = nullptr;
-        emit_row_uc     = nullptr;
-    }
+    if (emit_row_uc)  { free_uncached(emit_row_uc);  emit_row_uc  = nullptr; }
     emit_runs_populated = false;
     initialised = false;
 }
@@ -261,7 +247,7 @@ void dispatch_coob_fill(int x_off, int y_off, int W)
     // another so the command fits the 12-byte rspq cmd budget. Both halves
     // are 16-bit signed/unsigned values bounded by the framebuffer extent.
     rspq_write(overlay_id, 1,
-               PhysicalAddr(coob_fill_cached),
+               PhysicalAddr(coob_fill_uc),
                ((uint32_t)(x_off & 0xFFFF) << 16) | ((uint32_t)(y_off & 0xFFFF)),
                ((uint32_t)(W     & 0xFFFF) << 16) | ((uint32_t)(MAX_LINES & 0xFFFF)));
     // Single-use per frame: emit phase consumed it.
@@ -278,11 +264,11 @@ void dispatch_emit_runs(int x_off, int y_off)
     using namespace n64::hwroad_rdp::detail;
     if (!emit_runs_ready()) return;
     // 16-byte command (4 user args): emit_row + n_runs + runs_base RDRAM
-    // pointers plus packed (x_off, y_off). runs_buf is the uncached alias of
-    // runs_buf_cached; PhysicalAddr masks the KSEG bits the same either way.
+    // pointers plus packed (x_off, y_off). All three buffers live in the
+    // uncached segment; PhysicalAddr masks the KSEG bits the same either way.
     rspq_write(overlay_id, 2,
-               PhysicalAddr(emit_row_cached),
-               PhysicalAddr(n_runs_cached),
+               PhysicalAddr(emit_row_uc),
+               PhysicalAddr(n_runs_uc),
                PhysicalAddr(runs_buf),
                ((uint32_t)(x_off & 0xFFFF) << 16) | ((uint32_t)(y_off & 0xFFFF)));
     emit_runs_populated = false;
@@ -541,8 +527,8 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
     // CPU work that queues road_bg + tile_layer rdpq commands.
     rspq_write(rsp::overlay_id, 0,
                MAX_LINES,
-               PhysicalAddr(rsp::desc_cached),
-               PhysicalAddr(rsp::state_cached));
+               PhysicalAddr(rsp::desc_uc),
+               PhysicalAddr(rsp::state_uc));
 
     uint64_t t_kick_end = get_ticks_us();
     rsp::last_us = (rsp::last_us * 7 + (uint32_t)(t_kick_end - t0)) >> 3;

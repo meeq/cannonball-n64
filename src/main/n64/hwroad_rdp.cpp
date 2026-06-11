@@ -92,13 +92,13 @@ namespace
     constexpr size_t RUNS_BUF_BYTES =
         (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run);
 
-    // Cached owner pointers (for free()). The CPU build writes runs_buf
-    // through its uncached alias; sequential 32-bit Run stores go through
-    // the R4300 store buffer and coalesce into 32-byte RDRAM bursts —
-    // same trick the CPU rasteriser uses for its KSEG1 scratch surface.
-    void*      mask_buf_cached = nullptr;
-    void*      tlut_buf_cached = nullptr;
-    void*      runs_buf_cached = nullptr;
+    // Buffers live in the 0xA0… uncached segment. The CPU build writes
+    // runs_buf through its uncached alias; sequential 32-bit Run stores
+    // go through the R4300 store buffer and coalesce into 32-byte RDRAM
+    // bursts — same trick the CPU rasteriser uses for its KSEG1 scratch
+    // surface. We allocate via malloc_uncached_aligned which guarantees
+    // no cache-line sharing with other heap regions, so there's no need
+    // to invalidate stale cached lines after malloc.
 
     inline color_t rgba32_from_5551(uint16_t p)
     {
@@ -165,21 +165,24 @@ namespace
 
 void init()
 {
-    if (!mask_buf_cached) {
-        mask_buf_cached = memalign(16, MASK_BUF_BYTES);
-        mask_buf        = (uint8_t*)UncachedAddr(mask_buf_cached);
+    if (!mask_buf) {
+        mask_buf = (uint8_t*)malloc_uncached_aligned(16, MASK_BUF_BYTES);
+        assertf(mask_buf, "hwroad_rdp: mask_buf alloc failed (%u bytes)",
+                (unsigned)MASK_BUF_BYTES);
     }
-    if (!tlut_buf_cached) {
-        tlut_buf_cached = memalign(16, TLUT_BUF_BYTES);
-        tlut_buf        = (uint16_t*)UncachedAddr(tlut_buf_cached);
+    if (!tlut_buf) {
+        tlut_buf = (uint16_t*)malloc_uncached_aligned(16, TLUT_BUF_BYTES);
+        assertf(tlut_buf, "hwroad_rdp: tlut_buf alloc failed (%u bytes)",
+                (unsigned)TLUT_BUF_BYTES);
     }
-    if (!runs_buf_cached) {
-        runs_buf_cached = memalign(16, RUNS_BUF_BYTES);
-        runs_buf        = (Run*)UncachedAddr(runs_buf_cached);
+    if (!runs_buf) {
+        runs_buf = (Run*)malloc_uncached_aligned(16, RUNS_BUF_BYTES);
+        assertf(runs_buf, "hwroad_rdp: runs_buf alloc failed (%u bytes)",
+                (unsigned)RUNS_BUF_BYTES);
     }
-    if (mask_buf) std::memset(mask_buf, 0, MASK_BUF_BYTES);
-    if (tlut_buf) std::memset(tlut_buf, 0, TLUT_BUF_BYTES);
-    if (runs_buf) std::memset(runs_buf, 0, RUNS_BUF_BYTES);
+    std::memset(mask_buf, 0, MASK_BUF_BYTES);
+    std::memset(tlut_buf, 0, TLUT_BUF_BYTES);
+    std::memset(runs_buf, 0, RUNS_BUF_BYTES);
     for (int y = 0; y < MAX_LINES; y++) {
         line[y].kind   = SKIP;
         line[y].n_runs = 0;
@@ -188,9 +191,9 @@ void init()
 
 void shutdown()
 {
-    if (mask_buf_cached) { free(mask_buf_cached); mask_buf_cached = nullptr; mask_buf = nullptr; }
-    if (tlut_buf_cached) { free(tlut_buf_cached); tlut_buf_cached = nullptr; tlut_buf = nullptr; }
-    if (runs_buf_cached) { free(runs_buf_cached); runs_buf_cached = nullptr; runs_buf = nullptr; }
+    if (mask_buf) { free_uncached(mask_buf); mask_buf = nullptr; }
+    if (tlut_buf) { free_uncached(tlut_buf); tlut_buf = nullptr; }
+    if (runs_buf) { free_uncached(runs_buf); runs_buf = nullptr; }
 }
 
 bool should_skip_cpu(uint8_t /*road_control*/)

@@ -74,8 +74,9 @@ namespace
     static_assert(offsetof(Descriptor, color_table) == 0x10, "");
 
     uint32_t   overlay_id = 0;
-    void*      desc_cached = nullptr;   // cached alias (for memalign / free)
-    Descriptor* desc_uc    = nullptr;   // KSEG1 alias used for writes
+    Descriptor* desc_uc   = nullptr;    // KSEG1 alias; allocated uncached so
+                                        // no cache-line aliasing with the RSP
+                                        // DMA reader. Free via free_uncached.
     bool       initialised = false;
     bool       roads_flushed = false;
 
@@ -83,7 +84,6 @@ namespace
     // surface (320×224 RGBA5551 = 143360 bytes). Allocated lazily the first
     // time validate is true.
     constexpr int SHADOW_BYTES = S16_WIDTH * S16_HEIGHT * 2;
-    void*     shadow_cached = nullptr;
     uint16_t* shadow_uc     = nullptr;
 
     constexpr uint8_t CTRL_SKIP = 0x80;
@@ -96,9 +96,8 @@ void init()
 
     overlay_id = rspq_overlay_register(&rsp_hwroad);
 
-    desc_cached = memalign(16, DESC_BUF_SIZE);
-    assertf(desc_cached != nullptr, "hwroad_rsp: failed to alloc descriptor buffer");
-    desc_uc = (Descriptor*)UncachedAddr(desc_cached);
+    desc_uc = (Descriptor*)malloc_uncached_aligned(16, DESC_BUF_SIZE);
+    assertf(desc_uc != nullptr, "hwroad_rsp: failed to alloc descriptor buffer");
     std::memset(desc_uc, 0, DESC_BUF_SIZE);
 
     initialised = true;
@@ -110,8 +109,7 @@ void shutdown()
         return;
     rspq_overlay_unregister(overlay_id);
     overlay_id = 0;
-    free(desc_cached);
-    desc_cached = nullptr;
+    free_uncached(desc_uc);
     desc_uc = nullptr;
     initialised = false;
 }
@@ -274,7 +272,7 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
     n64::hwroad_rsp::case_total    [control] = local_active + local_skipped;
 
     // dst_rgba lives in KSEG1 (scratch_uc_ptr). PhysicalAddr handles that.
-    uint32_t desc_phys    = PhysicalAddr(desc_cached);
+    uint32_t desc_phys    = PhysicalAddr(desc_uc);
     uint32_t scratch_phys = PhysicalAddr(dst_rgba);
 
     static int debug_once = 0;
@@ -285,8 +283,8 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
                (unsigned long)desc_phys,
                (unsigned long)scratch_phys,
                (int)S16_HEIGHT);
-        debugf("hwroad_rsp: desc_cached=%p desc_uc=%p dst_rgba=%p\n",
-               desc_cached, desc_uc, dst_rgba);
+        debugf("hwroad_rsp: desc_uc=%p dst_rgba=%p\n",
+               desc_uc, dst_rgba);
     }
 
     uint32_t t0 = TICKS_READ();
@@ -309,13 +307,12 @@ void HWRoad::render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb
     // assert that elsewhere via the non-widescreen default).
     if (n64::hwroad_rsp::validate)
     {
-        if (!n64::hwroad_rsp::shadow_cached)
+        if (!n64::hwroad_rsp::shadow_uc)
         {
-            n64::hwroad_rsp::shadow_cached = memalign(16, n64::hwroad_rsp::SHADOW_BYTES);
-            assertf(n64::hwroad_rsp::shadow_cached != nullptr,
+            n64::hwroad_rsp::shadow_uc = (uint16_t*)malloc_uncached_aligned(
+                16, n64::hwroad_rsp::SHADOW_BYTES);
+            assertf(n64::hwroad_rsp::shadow_uc != nullptr,
                     "hwroad_rsp: shadow alloc failed");
-            n64::hwroad_rsp::shadow_uc = (uint16_t*)UncachedAddr(
-                n64::hwroad_rsp::shadow_cached);
         }
 
         // Zero the shadow surface — render_foreground_lores only writes
