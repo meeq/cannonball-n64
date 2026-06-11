@@ -44,30 +44,21 @@ bool Roms::load_revb_roms(bool fixed_rom)
     status += LOAD(rom1, ("epr-10328a.75", 0x20000, 0x10000, 0xd5ec5e5d, RomLoader::INTERLEAVE2, VERBOSE));
     status += LOAD(rom1, ("epr-10330a.57", 0x20001, 0x10000, 0xba9ec82a, RomLoader::INTERLEAVE2, VERBOSE));
 
-    // Load Non-Interleaved Tile ROMs
-    tiles.init(0x30000);
-    status += LOAD(tiles, ("opr-10268.99", 0x00000, 0x08000, 0x95344b04, RomLoader::NORMAL, VERBOSE));
-    status += LOAD(tiles, ("opr-10232.102", 0x08000, 0x08000, 0x776ba1eb, RomLoader::NORMAL, VERBOSE));
-    status += LOAD(tiles, ("opr-10267.100", 0x10000, 0x08000, 0xa85bb823, RomLoader::NORMAL, VERBOSE));
-    status += LOAD(tiles, ("opr-10231.103", 0x18000, 0x08000, 0x8908bcbf, RomLoader::NORMAL, VERBOSE));
-    status += LOAD(tiles, ("opr-10266.101", 0x20000, 0x08000, 0x9f6f1a74, RomLoader::NORMAL, VERBOSE));
-    status += LOAD(tiles, ("opr-10230.104", 0x28000, 0x08000, 0x686f5e50, RomLoader::NORMAL, VERBOSE));
+    // Tile ROMs are not loaded on N64. The bake-sprites tool pre-decodes
+    // them into /tiles/tiles_native.bin (DFS), and hwtiles::init no longer
+    // reads src_tiles. Keeping the 192 KiB blob out of RAM frees that much
+    // from the load-time peak (was OOM on the 4 MiB base console).
 
     // Load Non-Interleaved Road ROMs (2 identical roms, 1 for each road)
     road.init(0x10000);
     status += LOAD(road, ("opr-10185.11", 0x000000, 0x08000, 0x22794426, RomLoader::NORMAL, VERBOSE));
     status += LOAD(road, ("opr-10186.47", 0x008000, 0x08000, 0x22794426, RomLoader::NORMAL, VERBOSE));
 
-    // Load Interleaved Sprite ROMs
-    sprites.init(0x100000);
-    status += LOAD(sprites, ("mpr-10371.9", 0x000000, 0x20000, 0x7cc86208, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10373.10", 0x000001, 0x20000, 0xb0d26ac9, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10375.11", 0x000002, 0x20000, 0x59b60bd7, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10377.12", 0x000003, 0x20000, 0x17a1b04a, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10372.13", 0x080000, 0x20000, 0xb557078c, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10374.14", 0x080001, 0x20000, 0x8051e517, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10376.15", 0x080002, 0x20000, 0xf3b8f318, RomLoader::INTERLEAVE4, VERBOSE));
-    status += LOAD(sprites, ("mpr-10378.16", 0x080003, 0x20000, 0xa1062984, RomLoader::INTERLEAVE4, VERBOSE));
+    // Sprite ROMs are not loaded on N64. The bake-sprites tool emits both
+    // a pre-decoded atlas (sprite_atlas.bin) and a native byte-swapped blob
+    // (sprites_native.bin) for the EOR-walk spillover path; hwsprites::init
+    // no longer reads src_sprites. Skipping the 1 MiB blob is the single
+    // biggest reclaim on the 4 MiB base console's load-time peak.
 
     // Load Z80 Sound ROM
     // Note: This is a deliberate decision to double the Z80 ROM Space to accomodate extra FM based music
