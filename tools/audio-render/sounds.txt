@@ -36,9 +36,9 @@
 # many high-AC peaks but couldn't distinguish musical phrase boundaries.
 #
 # Splice quality at the chosen (intro, period) (50 ms window RMS):
-#   BREEZE  intro=120.0000s  period=184.320s  ->  -14.7 dB RMS
-#   SPLASH  intro=  0.0000s  period=184.320s  ->  -17.4 dB RMS
-#   MAGICAL intro= 82.0000s  period=184.320s  ->  -30.7 dB RMS
+#   BREEZE  intro=120.0000s  period=184.3200s  ->  -14.7 dB RMS
+#   SPLASH  intro=  0.0000s  period=245.7655s  ->  see measure-splice
+#   MAGICAL intro= 82.0000s  period=184.3200s  ->  -30.7 dB RMS
 #
 # Splice clicks are louder than previous values because we now prioritise
 # musical phrasing over click silence. A future improvement would be a
@@ -50,7 +50,7 @@
 
 # --- Music tracks (long, looping; mix includes PCM drum channels) -----------
 0x81  music_loop      music_breeze.wav      120.0000  184.320
-0x82  music_loop      music_splash.wav        0.0000  184.320
+0x82  music_loop      music_splash.wav        0.0000  245.7655
 0x85  music_loop      music_magical.wav      82.0000  184.320
 
 # LASTWAVE is one-shot — the game re-dispatches it to repeat.
