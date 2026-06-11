@@ -110,8 +110,27 @@ namespace
         memcpy(dst, src, wlen);
     }
 
+    // SegaPCM samples ship unsigned-biased; the mixer needs signed PCM. We
+    // convert the ROM in place since SegaPCM::stream_update() is never
+    // called on N64 and nothing else reads roms.pcm.rom. The conversion
+    // must wait until roms.load_revb_roms() has run, which happens *after*
+    // audio.init() — so do it lazily on the first reconcile that finds the
+    // ROM loaded. Skipping this gate meant pcm_rom_len stayed 0 and every
+    // play attempt was silently rejected by the bank+length guard.
+    void pcm_rom_signed_ensure()
+    {
+        if (pcm_rom_signed || !roms.pcm.loaded) return;
+        pcm_rom_len = (int)roms.pcm.length;
+        for (int i = 0; i < pcm_rom_len; i++)
+            roms.pcm.rom[i] = (uint8_t)(roms.pcm.rom[i] ^ 0x80);
+        pcm_rom_signed = (int8_t*)roms.pcm.rom;
+    }
+
     void reconcile_pcm()
     {
+        pcm_rom_signed_ensure();
+        if (!pcm_rom_signed) return;  // ROMs not loaded yet — nothing to play
+
         for (int ch = 0; ch < N_PCM_CH; ch++)
         {
             uint8_t* regs = osoundint.pcm_ram + 8 * ch;
@@ -145,20 +164,30 @@ namespace
                 uint32_t base      = bank_off + addr_byte;
                 int      length    = (int)(end_byte - addr_byte);
 
-                if (length > 0 && (int)(base + length) <= pcm_rom_len)
-                {
-                    pcm_ctx[ch].base_byte   = base;
-                    pcm_wave[ch].len        = length;
-                    pcm_wave[ch].loop_len   = loop_off ? 0 : length;
+                // The previous version silently `continue`d when length
+                // <= 0 or base+length > pcm_rom_len. That hid the fact
+                // that pcm_rom_len was 0 (audio.init ran before roms
+                // loaded) — every PCM voice was dropped for months.
+                // Assert loudly per feedback_never_silent_drop_content.
+                assertf(length > 0,
+                        "pcm ch=%d: bad sample length %d (addr=%04x end=%02x)",
+                        ch, length, (unsigned)((addr_hi << 8) | addr_lo), end);
+                assertf((int)(base + length) <= pcm_rom_len,
+                        "pcm ch=%d: sample [%lu..%lu) past ROM end %d",
+                        ch, (unsigned long)base,
+                        (unsigned long)(base + length), pcm_rom_len);
 
-                    // Force the mixer to re-read len/loop_len from the
-                    // waveform. mixer_ch_play's fast path keeps the cached
-                    // channel state when uuid matches, which would mean
-                    // playing the *previous* sample's length on a retrigger.
-                    pcm_wave[ch].__uuid = 0;
-                    mixer_ch_play(ch, &pcm_wave[ch]);
-                    pcm_track[ch].playing = true;
-                }
+                pcm_ctx[ch].base_byte = base;
+                pcm_wave[ch].len      = length;
+                pcm_wave[ch].loop_len = loop_off ? 0 : length;
+
+                // Force the mixer to re-read len/loop_len from the
+                // waveform. mixer_ch_play's fast path keeps the cached
+                // channel state when uuid matches, which would mean
+                // playing the *previous* sample's length on a retrigger.
+                pcm_wave[ch].__uuid = 0;
+                mixer_ch_play(ch, &pcm_wave[ch]);
+                pcm_track[ch].playing = true;
             }
 
             if (pcm_track[ch].playing)
@@ -337,16 +366,9 @@ void Audio::init()
 
     mixer_init(N_MIXER_CH);
 
-    // SegaPCM samples ship unsigned-biased; the mixer needs signed PCM. We
-    // convert the ROM in place since SegaPCM::stream_update() is never
-    // called on N64 and nothing else reads roms.pcm.rom.
-    if (!pcm_rom_signed && roms.pcm.loaded)
-    {
-        pcm_rom_len = (int)roms.pcm.length;
-        for (int i = 0; i < pcm_rom_len; i++)
-            roms.pcm.rom[i] = (uint8_t)(roms.pcm.rom[i] ^ 0x80);
-        pcm_rom_signed = (int8_t*)roms.pcm.rom;
-    }
+    // The signed-conversion of roms.pcm.rom happens lazily in reconcile_pcm
+    // once the ROM is actually loaded — roms.load_revb_roms() runs after
+    // Audio::init() in n64main, so it's not loaded yet here.
 
     for (int ch = 0; ch < N_PCM_CH; ch++)
     {
