@@ -31,6 +31,15 @@ public:
     ~Audio();
 
     void   init();
+
+    // Pre-flush libdragon mixer's lazy per-channel sample-buffer alloc.
+    // Must run AFTER roms.load_revb_roms — the ~1 MiB ROM allocation needs
+    // a contiguous heap, and priming bites into that headroom. Calling
+    // from main() at the right point keeps the failure mode predictable:
+    // if 4 MiB can't fit all the per-channel buffers, OOM here at boot
+    // instead of during gameplay the first time an unused voice fires.
+    void   prime_mixer_buffers();
+
     void   tick();
     void   start_audio();
     void   stop_audio();

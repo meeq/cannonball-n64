@@ -78,6 +78,7 @@ namespace n64_profile
     uint32_t spr_call_loads         = 0;
     uint32_t spr_call_tlut_uploads  = 0;
     uint32_t spr_call_us            = 0;
+    uint32_t spr_call_ovf           = 0;
 
     uint32_t composite_us           = 0;
     uint32_t raw_composite_us       = 0;

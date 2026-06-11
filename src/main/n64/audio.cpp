@@ -42,9 +42,18 @@ namespace
 {
     // ---- Mixer channel layout -------------------------------------------
     //
-    // 0..15  SegaPCM voices (one mixer ch per chip voice)
-    // 16..17 wav64 music + music-channel jingles (stereo pair: 16=L, 17=R)
-    // 18..19 wav64 FM SFX (stereo pair: 18=L, 19=R)
+    // SegaPCM exposes 16 hardware voices but OutRun's observed peak is 7
+    // simultaneous; voice indices used cluster in the upper half (mask
+    // 0xfaa0 in 4 minutes of attract). Mapping each voice to its own
+    // mixer channel wastes ~32 KiB of heap (4 KiB × 8 idle channels) —
+    // critical on the 4 MiB build where post-roms+hwroad headroom is
+    // ~58 KiB. We keep 16 PcmTrack entries (matches the SegaPCM register
+    // file 1:1) but allocate mixer channels from a smaller pool, binding
+    // a slot at voice key-on and releasing on key-off.
+    //
+    // 0..7   SegaPCM voice pool (dynamically bound to active voices)
+    // 8..9   wav64 music + music-channel jingles (stereo pair: 8=L, 9=R)
+    // 10..11 wav64 FM SFX (stereo pair: 10=L, 11=R)
     //
     // The wav64s are stereo (rendered host-side from the SDL2 mix), and
     // libdragon's mixer represents a stereo waveform as TWO consecutive
@@ -56,10 +65,11 @@ namespace
     // wav64. The YM2151 object stays allocated so OSound can still call
     // ym->read_status() / ym->write_reg() (both cheap), but its
     // stream_update() is never invoked on N64.
-    constexpr int N_PCM_CH     = 16;
-    constexpr int WAV64_MUS_CH = N_PCM_CH;       // 16 (+17 stereo-sub)
-    constexpr int WAV64_SFX_CH = N_PCM_CH + 2;   // 18 (+19 stereo-sub)
-    constexpr int N_MIXER_CH   = N_PCM_CH + 4;   // 20
+    constexpr int N_PCM_CH     = 16;             // SegaPCM HW voice count
+    constexpr int N_PCM_SLOTS  = 8;              // mixer-channel pool size
+    constexpr int WAV64_MUS_CH = N_PCM_SLOTS;        // 8 (+9 stereo-sub)
+    constexpr int WAV64_SFX_CH = N_PCM_SLOTS + 2;    // 10 (+11 stereo-sub)
+    constexpr int N_MIXER_CH   = N_PCM_SLOTS + 4;    // 12
 
     // OutRun's SegaPCM is constructed with BANK_512 against the 512 KiB
     // PCM ROM. SegaPCM's constructor resolves these to fixed values that
@@ -77,26 +87,82 @@ namespace
         return ((uint32_t)flags86 & PCM_BANK_MASK) << PCM_BANK_SHIFT;
     }
 
-    struct PcmVoiceCtx
+    // Mixer-channel pool entry. `voice` is the bound SegaPCM voice index
+    // (0..15) or -1 if the slot is free. `base_byte` is the bank-adjusted
+    // ROM offset that pcm_voice_read streams from. `last_used_us` advances
+    // each tick the slot is active so LRU eviction can pick the stalest
+    // slot if peak concurrency ever exceeds N_PCM_SLOTS.
+    struct PcmSlot
     {
-        uint32_t base_byte; // ROM byte offset of waveform start (bank-adjusted)
+        int8_t   voice;
+        uint32_t base_byte;
+        uint64_t last_used_us;
     };
 
-    waveform_t   pcm_wave[N_PCM_CH];
-    PcmVoiceCtx  pcm_ctx[N_PCM_CH];
+    PcmSlot     pcm_slot[N_PCM_SLOTS];
+    waveform_t  pcm_wave[N_PCM_SLOTS];
 
-    // Last-seen register snapshot per voice. Used to detect "the Z80 just
-    // (re)triggered this voice" — there's no explicit trigger bit, so we
-    // diff the active flag and start/end address fields.
+    // Last-seen register snapshot per voice + the currently-bound slot.
+    // mix_slot == -1 means no mixer channel is currently rendering this
+    // voice (either inactive, or evicted under pool pressure).
     struct PcmTrack
     {
         uint8_t prev_flags86;
         uint8_t prev_addr_lo;
         uint8_t prev_addr_hi;
         uint8_t prev_end;
-        bool    playing;
+        int8_t  mix_slot;
     };
     PcmTrack pcm_track[N_PCM_CH];
+
+    // Counter for the dip log: how often did the pool overflow and force
+    // an eviction of an already-active voice? Should stay 0 in normal
+    // play (census peak = 7, pool = 8); non-zero means the pool is too
+    // small and the audible loss is real.
+    uint32_t pool_evictions = 0;
+
+    int8_t pcm_pool_claim(int voice, uint64_t now_us)
+    {
+        // Prefer a free slot.
+        for (int s = 0; s < N_PCM_SLOTS; s++)
+        {
+            if (pcm_slot[s].voice < 0)
+            {
+                pcm_slot[s].voice        = (int8_t)voice;
+                pcm_slot[s].last_used_us = now_us;
+                return (int8_t)s;
+            }
+        }
+        // Pool full — evict the LRU slot. The previously-bound voice
+        // loses its mixer channel; its next tick treats it as inactive
+        // and re-claims if still active. Audible result: a brief drop
+        // for the evicted voice.
+        int8_t  evict  = 0;
+        uint64_t oldest = pcm_slot[0].last_used_us;
+        for (int s = 1; s < N_PCM_SLOTS; s++)
+        {
+            if (pcm_slot[s].last_used_us < oldest)
+            {
+                oldest = pcm_slot[s].last_used_us;
+                evict  = (int8_t)s;
+            }
+        }
+        int v_old = pcm_slot[evict].voice;
+        mixer_ch_stop(evict);
+        if (v_old >= 0) pcm_track[v_old].mix_slot = -1;
+        pcm_slot[evict].voice        = (int8_t)voice;
+        pcm_slot[evict].last_used_us = now_us;
+        pool_evictions++;
+        return evict;
+    }
+
+    void pcm_pool_release(int slot)
+    {
+        int v = pcm_slot[slot].voice;
+        if (v >= 0) pcm_track[v].mix_slot = -1;
+        pcm_slot[slot].voice = -1;
+        mixer_ch_stop(slot);
+    }
 
     // PCM ROM converted from unsigned-biased to signed (one-time, in-place).
     int8_t* pcm_rom_signed = nullptr;
@@ -104,10 +170,25 @@ namespace
 
     void pcm_voice_read(void* ctx_, samplebuffer_t* sbuf, int wpos, int wlen, bool /*seeking*/)
     {
-        const PcmVoiceCtx* ctx = (const PcmVoiceCtx*)ctx_;
+        const PcmSlot* slot = (const PcmSlot*)ctx_;
         uint8_t* dst = (uint8_t*)samplebuffer_append(sbuf, wlen);
-        const int8_t* src = pcm_rom_signed + ctx->base_byte + wpos;
+        const int8_t* src = pcm_rom_signed + slot->base_byte + wpos;
         memcpy(dst, src, wlen);
+    }
+
+    // Silent read used only to prime mixer channel sample buffers at init.
+    // libdragon mixer_ch_play lazily malloc_uncached's a per-channel buffer
+    // sized by the channel's set_limits. Deferring that to mid-game means a
+    // 4 MiB heap shortfall manifests as an OOM the first time a never-yet-
+    // played voice fires (e.g. crash SFX after a long drive). Drain the lazy
+    // allocs at init so any OOM happens here, predictably.
+    void prime_silent_read(void*, samplebuffer_t* sbuf, int /*wpos*/, int wlen, bool)
+    {
+        void* dst = samplebuffer_append(sbuf, wlen);
+        // wlen is in samples; samplebuffer_append returns enough bytes for
+        // the channel's bit-depth × channel count. Zero it out — buffer is
+        // never actually consumed because we mixer_ch_stop right after.
+        memset(dst, 0, wlen * 4);
     }
 
     // SegaPCM samples ship unsigned-biased; the mixer needs signed PCM. We
@@ -131,29 +212,33 @@ namespace
         pcm_rom_signed_ensure();
         if (!pcm_rom_signed) return;  // ROMs not loaded yet — nothing to play
 
-        for (int ch = 0; ch < N_PCM_CH; ch++)
+        const uint64_t now_us = get_ticks_us();
+
+        for (int v = 0; v < N_PCM_CH; v++)
         {
-            uint8_t* regs = osoundint.pcm_ram + 8 * ch;
+            uint8_t* regs = osoundint.pcm_ram + 8 * v;
 
             uint8_t flags86 = regs[0x86];
             bool active     = (flags86 & 1) == 0;
-            bool was_active = (pcm_track[ch].prev_flags86 & 1) == 0;
+            bool was_active = (pcm_track[v].prev_flags86 & 1) == 0;
             bool loop_off   = (flags86 & 2) != 0;
 
             uint8_t addr_lo = regs[0x04];
             uint8_t addr_hi = regs[0x05];
             uint8_t end     = regs[0x06];
 
-            bool addr_changed = (addr_lo != pcm_track[ch].prev_addr_lo) ||
-                                (addr_hi != pcm_track[ch].prev_addr_hi) ||
-                                (end     != pcm_track[ch].prev_end);
+            bool addr_changed = (addr_lo != pcm_track[v].prev_addr_lo) ||
+                                (addr_hi != pcm_track[v].prev_addr_hi) ||
+                                (end     != pcm_track[v].prev_end);
+
+            int8_t slot = pcm_track[v].mix_slot;
 
             if (!active)
             {
-                if (pcm_track[ch].playing)
+                if (slot >= 0)
                 {
-                    mixer_ch_stop(ch);
-                    pcm_track[ch].playing = false;
+                    pcm_pool_release(slot);
+                    slot = -1;
                 }
             }
             else if (!was_active || addr_changed)
@@ -170,34 +255,44 @@ namespace
                 // loaded) — every PCM voice was dropped for months.
                 // Assert loudly per feedback_never_silent_drop_content.
                 assertf(length > 0,
-                        "pcm ch=%d: bad sample length %d (addr=%04x end=%02x)",
-                        ch, length, (unsigned)((addr_hi << 8) | addr_lo), end);
+                        "pcm v=%d: bad sample length %d (addr=%04x end=%02x)",
+                        v, length, (unsigned)((addr_hi << 8) | addr_lo), end);
                 assertf((int)(base + length) <= pcm_rom_len,
-                        "pcm ch=%d: sample [%lu..%lu) past ROM end %d",
-                        ch, (unsigned long)base,
+                        "pcm v=%d: sample [%lu..%lu) past ROM end %d",
+                        v, (unsigned long)base,
                         (unsigned long)(base + length), pcm_rom_len);
 
-                pcm_ctx[ch].base_byte = base;
-                pcm_wave[ch].len      = length;
-                pcm_wave[ch].loop_len = loop_off ? 0 : length;
+                // Claim a slot if we don't already own one (key-on, or
+                // re-acquire after a pool eviction). Retrigger on the
+                // same slot otherwise.
+                if (slot < 0)
+                {
+                    slot = pcm_pool_claim(v, now_us);
+                    pcm_track[v].mix_slot = slot;
+                }
+
+                pcm_slot[slot].base_byte = base;
+                pcm_wave[slot].len       = length;
+                pcm_wave[slot].loop_len  = loop_off ? 0 : length;
 
                 // Force the mixer to re-read len/loop_len from the
                 // waveform. mixer_ch_play's fast path keeps the cached
                 // channel state when uuid matches, which would mean
                 // playing the *previous* sample's length on a retrigger.
-                pcm_wave[ch].__uuid = 0;
-                mixer_ch_play(ch, &pcm_wave[ch]);
-                pcm_track[ch].playing = true;
+                pcm_wave[slot].__uuid = 0;
+                mixer_ch_play(slot, &pcm_wave[slot]);
             }
 
-            if (pcm_track[ch].playing)
+            if (slot >= 0)
             {
+                pcm_slot[slot].last_used_us = now_us;
+
                 // regs[7] is the per-sample increment at SegaPCM's native
                 // 32 kHz. delta=256 means "advance one source byte per
                 // 32 kHz tick" → playback rate = 32000 * delta/256.
                 float freq = 32000.0f * (float)regs[7] / 256.0f;
                 if (freq < 1.0f) freq = 1.0f;
-                mixer_ch_set_freq(ch, freq);
+                mixer_ch_set_freq(slot, freq);
 
                 // Per-voice attenuation. SegaPCM treats vol=0xFF as full
                 // scale per voice (sample = int8 × regs[2] in MAME), so
@@ -209,23 +304,23 @@ namespace
                 // clipping, and matches what the SDL mixer hears.
                 float lvol = (float)regs[2] / 255.0f;
                 float rvol = (float)regs[3] / 255.0f;
-                mixer_ch_set_vol(ch, lvol, rvol);
+                mixer_ch_set_vol(slot, lvol, rvol);
 
                 // One-shot completion: the chip-side stream_update would
                 // set bit 0 when a non-looping voice runs off the end of
                 // the sample. Replicate that so the Z80 polling code sees
                 // the voice as free.
-                if (!mixer_ch_playing(ch))
+                if (!mixer_ch_playing(slot))
                 {
                     regs[0x86] |= 1;
-                    pcm_track[ch].playing = false;
+                    pcm_pool_release(slot);
                 }
             }
 
-            pcm_track[ch].prev_flags86 = regs[0x86];
-            pcm_track[ch].prev_addr_lo = addr_lo;
-            pcm_track[ch].prev_addr_hi = addr_hi;
-            pcm_track[ch].prev_end     = end;
+            pcm_track[v].prev_flags86 = regs[0x86];
+            pcm_track[v].prev_addr_lo = addr_lo;
+            pcm_track[v].prev_addr_hi = addr_hi;
+            pcm_track[v].prev_end     = end;
         }
     }
 
@@ -370,30 +465,37 @@ void Audio::init()
     // once the ROM is actually loaded — roms.load_revb_roms() runs after
     // Audio::init() in n64main, so it's not loaded yet here.
 
-    for (int ch = 0; ch < N_PCM_CH; ch++)
+    for (int s = 0; s < N_PCM_SLOTS; s++)
     {
-        pcm_wave[ch].name       = "segapcm_voice";
-        pcm_wave[ch].bits       = 8;
-        pcm_wave[ch].channels   = 1;
-        pcm_wave[ch].frequency  = 32000.0f;
-        pcm_wave[ch].len        = 0;
-        pcm_wave[ch].loop_len   = 0;
-        pcm_wave[ch].start      = nullptr;
-        pcm_wave[ch].read       = pcm_voice_read;
-        pcm_wave[ch].ctx        = &pcm_ctx[ch];
-        pcm_wave[ch].state_size = 0;
-        pcm_wave[ch].__uuid     = 0;
+        pcm_wave[s].name       = "segapcm_slot";
+        pcm_wave[s].bits       = 8;
+        pcm_wave[s].channels   = 1;
+        pcm_wave[s].frequency  = 32000.0f;
+        pcm_wave[s].len        = 0;
+        pcm_wave[s].loop_len   = 0;
+        pcm_wave[s].start      = nullptr;
+        pcm_wave[s].read       = pcm_voice_read;
+        pcm_wave[s].ctx        = &pcm_slot[s];
+        pcm_wave[s].state_size = 0;
+        pcm_wave[s].__uuid     = 0;
+
+        pcm_slot[s].voice        = -1;
+        pcm_slot[s].base_byte    = 0;
+        pcm_slot[s].last_used_us = 0;
 
         // Pin each channel to its actual upper bound (8-bit @ 32 kHz),
         // so the mixer doesn't allocate the default 16-bit-at-output-rate
         // sized sample buffer.
-        mixer_ch_set_limits(ch, 8, 32000.0f, 0);
+        mixer_ch_set_limits(s, 8, 32000.0f, 0);
+    }
 
-        pcm_track[ch].prev_flags86 = 1;     // "inactive" so first active
-        pcm_track[ch].prev_addr_lo = 0;     // edge triggers a play
-        pcm_track[ch].prev_addr_hi = 0;
-        pcm_track[ch].prev_end     = 0;
-        pcm_track[ch].playing      = false;
+    for (int v = 0; v < N_PCM_CH; v++)
+    {
+        pcm_track[v].prev_flags86 = 1;      // "inactive" so first active
+        pcm_track[v].prev_addr_lo = 0;      // edge triggers a play
+        pcm_track[v].prev_addr_hi = 0;
+        pcm_track[v].prev_end     = 0;
+        pcm_track[v].mix_slot     = -1;
     }
 
     // wav64 channels: 16-bit, native wav64 sample rate (22050 Hz from the
@@ -429,8 +531,65 @@ void Audio::init()
 
     sound_enabled = true;
 
-    debugf("audio: init rate=%d, mixer up with %d PCM ch + %d/%d wav64 loaded\n",
-           audio_get_frequency(), N_PCM_CH, n_wav64_ok, N_WAV64);
+    debugf("audio: init rate=%d, mixer up with %d PCM-pool ch (%d HW voices) + %d/%d wav64 loaded\n",
+           audio_get_frequency(), N_PCM_SLOTS, N_PCM_CH, n_wav64_ok, N_WAV64);
+}
+
+// See header comment. Plays a silent dummy waveform on each mixer channel
+// so libdragon's mixer_ch_play allocates the lazy per-channel sample
+// buffer up-front. Covers both the SegaPCM slot pool (N_PCM_SLOTS @ 8-bit
+// mono) AND the wav64 stereo pairs (16-bit, 2 channels each) — without
+// the wav64 prime the first jingle/SFX fire OOMs mid-game when only
+// ~18 KiB remains. Buffer sizes are set by mixer_ch_set_limits in
+// Audio::init; priming just realises them.
+void Audio::prime_mixer_buffers()
+{
+    if (!dac_initialised) return;
+
+    // Order matters under tight 4 MiB heap: alloc the two big stereo wav64
+    // buffers (~11 KiB each, 16-byte aligned) *first*, while one contiguous
+    // ~58 KiB free block still exists. The 8× ~4 KiB PCM-pool blocks slot
+    // in afterward without trouble. The reverse order leaves the second
+    // wav64 alloc looking for 11 KiB contiguous in a heap already split by
+    // 8 pool blocks, and asserts inside mixer_ch_play.
+    //
+    // wav64 channels are primed with a real wav64 file (not a stub) so the
+    // mixer allocates a sample buffer sized for the actual VADPCM
+    // state_size (~48 B). A state_size=0 stub would trigger a realloc on
+    // first real wav64_play, defeating the prime.
+    int primed_mus = -1, primed_sfx = -1;
+    for (int i = 0; i < N_WAV64 && (primed_mus < 0 || primed_sfx < 0); i++)
+    {
+        if (!wav64_loaded[i]) continue;
+        if (WAV64_TABLE[i].is_music && primed_mus < 0)
+        {
+            wav64_play(&wav64_files[i], WAV64_MUS_CH);
+            mixer_ch_stop(WAV64_MUS_CH);
+            primed_mus = i;
+        }
+        else if (!WAV64_TABLE[i].is_music && primed_sfx < 0)
+        {
+            wav64_play(&wav64_files[i], WAV64_SFX_CH);
+            mixer_ch_stop(WAV64_SFX_CH);
+            primed_sfx = i;
+        }
+    }
+
+    // SegaPCM pool — re-uses the per-slot waveform with read fn swapped.
+    for (int s = 0; s < N_PCM_SLOTS; s++)
+    {
+        const WaveformRead real_read = pcm_wave[s].read;
+        pcm_wave[s].read = prime_silent_read;
+        pcm_wave[s].len  = 16;
+        mixer_ch_play(s, &pcm_wave[s]);
+        mixer_ch_stop(s);
+        pcm_wave[s].read = real_read;
+        pcm_wave[s].len  = 0;
+        pcm_wave[s].__uuid = 0;  // force re-cache on real first play
+    }
+
+    debugf("audio: primed %d PCM-pool + wav64 mus=%d sfx=%d\n",
+           N_PCM_SLOTS, primed_mus, primed_sfx);
 }
 
 // Config::set_fps() bounces stop_audio/start_audio around osoundint.init().

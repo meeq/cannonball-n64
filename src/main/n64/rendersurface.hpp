@@ -74,6 +74,7 @@ namespace n64_profile
     extern uint32_t spr_call_loads;
     extern uint32_t spr_call_tlut_uploads;
     extern uint32_t spr_call_us;
+    extern uint32_t spr_call_ovf;       // atlas overflows this call (drives bimodality)
 
     // Scratch composite blit (320×224 RGBA5551 with alpha-compare). Skipped
     // when CPU road_fg path didn't run; instrumented to confirm that's a real

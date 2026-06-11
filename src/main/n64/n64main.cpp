@@ -210,11 +210,22 @@ int main(int /*argc*/, char* /*argv*/[])
     if (!omusic.load_widescreen_map(config.data.res_path))
         debugf("Widescreen tilemaps not loaded\n");
 
+    // video.init runs before audio.prime_mixer_buffers so the hwtiles tile
+    // pixel cache claims a contiguous block first. mixer_ch_play allocates
+    // via malloc_uncached, which fragments the free heap as 16 separate
+    // ~4 KiB blocks — afterward there's enough free *bytes* for the cache
+    // but no single contiguous run that fits it.
     if (!video.init(&roms, &config.video))
     {
         debugf("video.init failed\n");
         while (1) { /* halt */ }
     }
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-video: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
 
     // Bring up the hwroad RSP overlay. Cheap (one rspq_overlay_register +
     // a 14 KB malloc) — leave the runtime switch off so the CPU path stays
@@ -222,6 +233,22 @@ int main(int /*argc*/, char* /*argv*/[])
     n64::hwroad_rsp::init();
     n64::hwroad_rdp::init();
     n64::hwroad_rdp_rsp::init();
+
+    // Pre-flush the libdragon mixer's lazy per-channel sample buffers as
+    // the LAST init step, so every other large alloc (video atlas/cache,
+    // hwroad descriptors) has claimed its contiguous region before the
+    // mixer fragments the remainder into 16 ~4 KiB blocks. Without this,
+    // each SegaPCM channel malloc_uncached's its buffer on first play —
+    // a 4 MiB OOM could surface mid-game the first time an unused voice
+    // fires (e.g. crash SFX after a long drive). Surface any shortfall
+    // here predictably instead.
+    audio.prime_mixer_buffers();
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-audio-prime: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
 
     input.init(config.controls.pad_id,
                config.controls.keyconfig, config.controls.padconfig,
@@ -356,11 +383,12 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_dma_misses,
                        (unsigned long)n64_profile::tile_call_dma_fetches,
                        (unsigned long)n64_profile::tile_call_dma_us);
-                debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu us=%lu\n",
+                debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu ovf=%lu us=%lu\n",
                        (unsigned long)n64_profile::spr_call_vis,
                        (unsigned long)n64_profile::spr_call_prims,
                        (unsigned long)n64_profile::spr_call_loads,
                        (unsigned long)n64_profile::spr_call_tlut_uploads,
+                       (unsigned long)n64_profile::spr_call_ovf,
                        (unsigned long)n64_profile::spr_call_us);
             }
         }
@@ -459,11 +487,12 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_dma_misses,
                        (unsigned long)n64_profile::tile_call_dma_fetches,
                        (unsigned long)n64_profile::tile_call_dma_us);
-                debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu us=%lu\n",
+                debugf("    spr.call:  vis=%4lu prims=%lu loads=%lu tlut=%lu ovf=%lu us=%lu\n",
                        (unsigned long)n64_profile::spr_call_vis,
                        (unsigned long)n64_profile::spr_call_prims,
                        (unsigned long)n64_profile::spr_call_loads,
                        (unsigned long)n64_profile::spr_call_tlut_uploads,
+                       (unsigned long)n64_profile::spr_call_ovf,
                        (unsigned long)n64_profile::spr_call_us);
                 // Reset window aggregates after each emit so the next line
                 // describes the next window, not the run-to-date.

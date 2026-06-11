@@ -15,6 +15,7 @@ namespace n64_profile {
     extern uint32_t spr_call_loads;
     extern uint32_t spr_call_tlut_uploads;
     extern uint32_t spr_call_us;
+    extern uint32_t spr_call_ovf;
 }
 
 // Set to 1 to log heap stats around atlas_init. Useful when tuning the
@@ -750,6 +751,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // function exit so the OUT/PLS logger can correlate spr= cost against
     // sprite count, LOAD_BLOCK count, and TLUT cache miss count.
     const uint32_t spr_pre_prim_count = n64_profile::prim_count;
+    const uint32_t spr_pre_ovf        = atlas_overflows;
     const uint64_t spr_t0_us = get_ticks_us();
     uint32_t spr_vis = 0;
     uint32_t spr_loads = 0;
@@ -1337,5 +1339,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     n64_profile::spr_call_loads        = spr_loads;
     n64_profile::spr_call_tlut_uploads = spr_tlut_uploads;
     n64_profile::spr_call_prims        = n64_profile::prim_count - spr_pre_prim_count;
+    n64_profile::spr_call_ovf          = atlas_overflows - spr_pre_ovf;
     n64_profile::spr_call_us           = (uint32_t)(get_ticks_us() - spr_t0_us);
 }
