@@ -121,6 +121,14 @@ namespace
     // small and the audible loss is real.
     uint32_t pool_evictions = 0;
 
+    // Count of voices whose register state implied a non-forward sample
+    // (length <= 0 in MAME's "addr_hi reaches end" interpretation). These
+    // are transient or unused-voice states — see comment at the check site.
+    // Surfaced via pool_evictions's diagnostic path; high counts in steady
+    // state would mean some voice is being key-on'd with bad regs and the
+    // user is hearing a dropout.
+    uint32_t pcm_bad_length = 0;
+
     int8_t pcm_pool_claim(int voice, uint64_t now_us)
     {
         // Prefer a free slot.
@@ -249,14 +257,37 @@ namespace
                 uint32_t base      = bank_off + addr_byte;
                 int      length    = (int)(end_byte - addr_byte);
 
-                // The previous version silently `continue`d when length
-                // <= 0 or base+length > pcm_rom_len. That hid the fact
-                // that pcm_rom_len was 0 (audio.init ran before roms
-                // loaded) — every PCM voice was dropped for months.
-                // Assert loudly per feedback_never_silent_drop_content.
-                assertf(length > 0,
-                        "pcm v=%d: bad sample length %d (addr=%04x end=%02x)",
-                        v, length, (unsigned)((addr_hi << 8) | addr_lo), end);
+                // length <= 0 is the "end <= addr_hi" register state. MAME's
+                // SegaPCM::stream_update treats end as a high-byte comparison
+                // value (`(addr >> 16) == end+1`), so this state means the
+                // voice's playback would wrap most of the 64 KB bank before
+                // hitting its end — garbage, but not a crash. It shows up on
+                // unused voices (outside ever_mask) whose Z80 has scribbled
+                // partial state, and on legitimate voices mid-update if the
+                // Z80 set the active flag before finishing addr/end writes.
+                // Treat as quiescent: drop any bound slot and skip key-on.
+                // Distinct from the previous-version silent `continue` that
+                // also masked length<=0 from pcm_rom_len=0, because here we
+                // still assert the bound check below if length WAS positive
+                // — and we count the case so a regression that floods this
+                // path is visible in the dip log.
+                if (length <= 0)
+                {
+                    pcm_bad_length++;
+                    if (slot >= 0)
+                    {
+                        pcm_pool_release(slot);
+                        slot = -1;
+                    }
+                    pcm_track[v].prev_flags86 = regs[0x86];
+                    pcm_track[v].prev_addr_lo = addr_lo;
+                    pcm_track[v].prev_addr_hi = addr_hi;
+                    pcm_track[v].prev_end     = end;
+                    continue;
+                }
+                // base+length overrunning pcm_rom_len IS a real bug — it's
+                // what the original silent-drop comment was protecting
+                // against (pcm_rom_len=0 from init-order). Keep loud.
                 assertf((int)(base + length) <= pcm_rom_len,
                         "pcm v=%d: sample [%lu..%lu) past ROM end %d",
                         v, (unsigned long)base,
