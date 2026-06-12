@@ -34,11 +34,15 @@
 
     Cache management
     ----------------
-    Every CPU write to either the pixel buffer (one-time re-index) or
-    the TLUT scratch (per frame) goes through UncachedAddr so the store
-    lands in RDRAM directly. The RDP DMAs the same physical address;
-    no data_cache_hit_writeback is needed (the established hwsprites
-    pattern, src/main/hwvideo/hwsprites.cpp:1202-1205).
+    Both the sprite pixel buffer (sprite_load → asset_load malloc) and
+    the per-frame TLUT scratch live in cached CPU memory. We write to
+    them through the normal cached pointer and call
+    data_cache_hit_writeback on the touched range before the RDP DMA
+    reads it (once after the pixel re-index, once per frame for the
+    TLUT). Going through UncachedAddr while the cache still holds
+    shadow values trips ares' "uncached write to cached line" warning
+    and risks any later cached read seeing stale bytes — explicit
+    writeback sidesteps both.
 ***************************************************************************/
 
 #include "splash.hpp"
@@ -115,10 +119,10 @@ namespace
 
     // Walk the sweep sprite's CI8 pixel buffer once, mapping every hue
     // pixel (anything not the original white slot) to a unique stripe
-    // slot keyed by x. Returns the number of stripes detected. Writes go
-    // through the uncached alias so the RDP DMA picks up the new indices
-    // on the first sweep-phase blit.
-    int reindex_pixels(uint8_t* data_uc, int W, int H, int stride,
+    // slot keyed by x. Returns the number of stripes detected. The
+    // caller is responsible for the writeback that publishes the new
+    // indices to RDRAM before the first blit.
+    int reindex_pixels(uint8_t* data, int W, int H, int stride,
                        uint8_t orig_white_slot)
     {
         int n_stripes     = 0;
@@ -128,15 +132,15 @@ namespace
             int hue_at_x = -1;
             for (int y = 0; y < H; ++y)
             {
-                const int idx = data_uc[y * stride + x];
+                const int idx = data[y * stride + x];
                 if (idx != orig_white_slot) { hue_at_x = idx; break; }
             }
             if (hue_at_x < 0)
             {
                 // Pure background column.
                 for (int y = 0; y < H; ++y)
-                    if (data_uc[y * stride + x] == orig_white_slot)
-                        data_uc[y * stride + x] = SLOT_WHITE;
+                    if (data[y * stride + x] == orig_white_slot)
+                        data[y * stride + x] = SLOT_WHITE;
                 continue;
             }
             if (hue_at_x != last_hue_slot)
@@ -150,8 +154,8 @@ namespace
             const uint8_t new_slot = (uint8_t)(SLOT_STRIPE_BASE + (n_stripes - 1));
             for (int y = 0; y < H; ++y)
             {
-                const int idx = data_uc[y * stride + x];
-                data_uc[y * stride + x] =
+                const int idx = data[y * stride + x];
+                data[y * stride + x] =
                     (idx == orig_white_slot) ? SLOT_WHITE : new_slot;
             }
         }
@@ -159,7 +163,7 @@ namespace
     }
 
     // Phase 1 — write the sweep TLUT into the scratch.
-    void compute_sweep_palette(int f, int n_stripes, uint16_t* tlut_uc)
+    void compute_sweep_palette(int f, int n_stripes, uint16_t* tlut)
     {
         const int step       = f / FRAMES_PER_STEP;
         const int sweep_left = step - (SWEEP_LEN - 1);
@@ -169,16 +173,24 @@ namespace
                 (i >= sweep_left && i < sweep_left + SWEEP_LEN)
                     ? SWEEP_SHAPE[i - sweep_left]
                     : WHITE_RGB;
-            tlut_uc[SLOT_STRIPE_BASE + i] = rgb_to_rgba16(rgb);
+            tlut[SLOT_STRIPE_BASE + i] = rgb_to_rgba16(rgb);
         }
-        tlut_uc[SLOT_WHITE] = rgb_to_rgba16(WHITE_RGB);
+        tlut[SLOT_WHITE] = rgb_to_rgba16(WHITE_RGB);
     }
 
     // Phases 2/3 — copy the active fade palette into the scratch.
-    void copy_fade_palette(int frame_idx, uint16_t* tlut_uc)
+    void copy_fade_palette(int frame_idx, uint16_t* tlut)
     {
         const uint16_t* src = SPLASH_FADE_PALETTES[frame_idx];
-        for (int i = 0; i < 16; ++i) tlut_uc[i] = src[i];
+        for (int i = 0; i < 16; ++i) tlut[i] = src[i];
+    }
+
+    // Round a byte count up to a full 16-byte cache line so
+    // data_cache_hit_writeback covers every line the touched range
+    // straddles.
+    inline size_t cacheline_round_up(size_t n)
+    {
+        return (n + 15u) & ~size_t{15};
     }
 }
 
@@ -210,10 +222,16 @@ void run()
         "splash: white (#FCFCFC) missing from sega_sweep.sprite TLUT");
 
     surface_t sweep_pix     = sprite_get_pixels(sweep_sprite);
-    uint8_t*  sweep_buf  = (uint8_t*)UncachedAddr(sweep_pix.buffer);
+    uint8_t*  sweep_buf     = (uint8_t*)sweep_pix.buffer;
     const int n_stripes     = reindex_pixels(
         sweep_buf, sweep_pix.width, sweep_pix.height, sweep_pix.stride,
         (uint8_t)orig_white);
+    // Publish the re-indexed pixels to RDRAM so rdpq_tex_blit's DMA reads
+    // the new indices. CI8 stride matches width (320), and surface_make
+    // returns 16-byte-aligned buffers, so the whole range is cache-line
+    // aligned.
+    data_cache_hit_writeback(sweep_buf,
+                             (size_t)sweep_pix.height * sweep_pix.stride);
 
     // ---- fade sprite: load only (palette comes from the generated header)
 
@@ -231,7 +249,13 @@ void run()
     const int sweep_tlut_count = SLOT_STRIPE_BASE + n_stripes;
 
     alignas(16) uint16_t scratch_tlut[SCRATCH_TLUT_ENTRIES];
-    uint16_t* tlut_uc = (uint16_t*)UncachedAddr(scratch_tlut);
+
+    // Per-frame writeback covers the largest TLUT we ever touch (sweep
+    // phase: SLOT_WHITE + sweep_tlut_count entries); round up to a full
+    // 16-byte cache line so the writeback covers every dirty line.
+    const size_t sweep_wb_bytes =
+        cacheline_round_up((size_t)sweep_tlut_count * sizeof(uint16_t));
+    const size_t fade_wb_bytes = 16 * sizeof(uint16_t);  // 32, already aligned
 
     for (int f = 0; f < total_frames; ++f)
     {
@@ -257,7 +281,8 @@ void run()
 
         if (f < phase_sweep_end)
         {
-            compute_sweep_palette(f, n_stripes, tlut_uc);
+            compute_sweep_palette(f, n_stripes, scratch_tlut);
+            data_cache_hit_writeback(scratch_tlut, sweep_wb_bytes);
             rdpq_tex_upload_tlut(scratch_tlut, 0, sweep_tlut_count);
             rdpq_tex_blit(&sweep_pix, 0, 0, NULL);
         }
@@ -269,7 +294,8 @@ void run()
             const int idx = (rel < SPLASH_FADE_FRAMES * FRAMES_PER_FADE)
                             ? rel / FRAMES_PER_FADE
                             : SPLASH_FADE_FRAMES - 1;
-            copy_fade_palette(idx, tlut_uc);
+            copy_fade_palette(idx, scratch_tlut);
+            data_cache_hit_writeback(scratch_tlut, fade_wb_bytes);
             rdpq_tex_upload_tlut(scratch_tlut, 0, 16);
             rdpq_tex_blit(&fade_pix, 0, 0, NULL);
         }
