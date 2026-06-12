@@ -143,6 +143,7 @@ set(src_n64
     "${main_cpp_base}/n64/timer.hpp"
     "${main_cpp_base}/n64/rendersurface.hpp"
     "${main_cpp_base}/n64/save.hpp"
+    "${main_cpp_base}/n64/splash.hpp"
     "${main_cpp_base}/n64/hwroad_rsp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp_internal.hpp"
@@ -154,6 +155,7 @@ set(src_n64
     "${main_cpp_base}/n64/timer.cpp"
     "${main_cpp_base}/n64/rendersurface.cpp"
     "${main_cpp_base}/n64/save.cpp"
+    "${main_cpp_base}/n64/splash.cpp"
     "${main_cpp_base}/n64/hwroad_rsp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp_rsp.cpp"
@@ -225,6 +227,14 @@ include(bake-sprites.cmake)
 target_sources(cannonball PRIVATE "${BAKE_SPRITES_INDEX_SRC}")
 add_dependencies(cannonball bake-sprites)
 
+# Pre-boot SEGA splash: CI8 sweep sprite baked from assets/sega_sweep.png +
+# CI4 fade sprite baked from assets/sega_fade/*.png (via build_fade.py +
+# mksprite). The generated palette header lives in SPLASH_FADE_HEADER_DIR
+# and is consumed by src/main/n64/splash.cpp. See cmake/bake-splash.cmake.
+include(bake-splash.cmake)
+add_dependencies(cannonball bake-splash)
+target_include_directories(cannonball PRIVATE "${SPLASH_FADE_HEADER_DIR}")
+
 n64_create_rom(cannonball
     TITLE "CannonBall"
     DFS_ROOT "${N64_DFS_ROOT}"
@@ -232,4 +242,7 @@ n64_create_rom(cannonball
                    "${BAKE_SPRITES_STAGED_BLOB}"
                    "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
                    "${BAKE_TILES_STAGED_NATIVE_BLOB}"
+                   "${SPLASH_STAGED_SWEEP_SPRITE}"
+                   "${SPLASH_STAGED_FADE_SPRITE}"
+                   "${SPLASH_STAGED_AUDIO}"
 )

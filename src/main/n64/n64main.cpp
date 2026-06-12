@@ -11,6 +11,7 @@
 
 #include "platform.hpp"
 #include "save.hpp"
+#include "splash.hpp"
 #include "rendersurface.hpp"
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
@@ -183,6 +184,11 @@ int main(int /*argc*/, char* /*argv*/[])
         debugf("heap post-display: used=%d free=%d\n", hs.used, hs.total - hs.used);
     }
 #endif
+
+    // Pre-boot SEGA splash — ~3.5 s palette-cycled intro animation.
+    // Allocates a sprite_t for the duration and frees it before returning,
+    // so the boot menu's font load lands on a clean heap.
+    n64::splash::run();
 
     audio.init();
 #if CANNONBALL_LOG_HEAP
