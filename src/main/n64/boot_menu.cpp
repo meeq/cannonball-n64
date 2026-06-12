@@ -856,6 +856,18 @@ void run()
         save_to_eeprom();
         free_title_sprites();
         stop_music();
+
+        // Scrub both framebuffer pages to black before engine init takes
+        // over. The engine only paints the 320×224 playfield, leaving the
+        // top/bottom letterbox stripes untouched — without this clear the
+        // residual title-screen pixels flash through the letterbox on the
+        // first few engine frames.
+        for (int i = 0; i < 2; ++i)
+        {
+            surface_t* fb = display_get();
+            rdpq_attach_clear(fb, nullptr);
+            rdpq_detach_show();
+        }
         return;
     }
 }
