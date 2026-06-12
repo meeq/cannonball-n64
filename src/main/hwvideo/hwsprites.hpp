@@ -81,13 +81,17 @@ private:
     static constexpr uint32_t ATLAS_SEGMENTS   = 4;
     // Atlas pool size is picked at atlas_init() from get_memory_size():
     //   8 MiB (Expansion Pak)  -> ATLAS_POOL_BYTES_EXPANSION (2 MiB)
-    //   4 MiB (base console)   -> ATLAS_POOL_BYTES_BASE      (256 KiB)
+    //   4 MiB (base console)   -> ATLAS_POOL_BYTES_BASE      (512 KiB)
     // Single value per session — no MIN/MAX fallback at runtime, just a
     // one-time branch on detected RAM.
-    // 4 MiB sizing: 256 KiB total / 4 segments = 64 KiB/segment. The largest
+    // 4 MiB sizing: 512 KiB total / 4 segments = 128 KiB/segment. The largest
     // OutRun sprite (max width 32 words × 8 = 256 px, max height 256 rows,
-    // CI4 = 32 KiB) fits in one segment with margin.
-    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 256u << 10;        // 256 KiB
+    // CI4 = 32 KiB) fits in one segment with room for several siblings, so
+    // segment retires invalidate far fewer working-set entries than at 64
+    // KiB/segment. Sized against the 469 KiB of free heap measured at
+    // post-audio-prime on 4 MiB — leaves ~213 KiB cushion for any runtime
+    // allocations the engine still makes lazily.
+    static constexpr uint32_t ATLAS_POOL_BYTES_BASE      = 512u << 10;        // 512 KiB
     static constexpr uint32_t ATLAS_POOL_BYTES_EXPANSION = 2u << 20;          // 2 MiB
     struct AtlasEntry
     {
