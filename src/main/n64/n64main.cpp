@@ -12,6 +12,7 @@
 #include "platform.hpp"
 #include "save.hpp"
 #include "splash.hpp"
+#include "boot_menu.hpp"
 #include "rendersurface.hpp"
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
@@ -175,8 +176,20 @@ int main(int /*argc*/, char* /*argv*/[])
     //   5. video.init          (small allocs only — display + rdpq already up)
     config.load();
     platform_overrides();
+    // Overlay persisted user choices over the platform defaults *before* any
+    // subsystem reads them (audio.init keys off sound.rate, roms.load keys
+    // off engine.jap). No-op on first boot — the menu below will write a
+    // record if the user confirms one.
+    n64::boot_menu::apply_saved_settings();
 
-    video.sprite_layer->atlas_init();
+    // Bring up the framebuffer + rdpq first because both the SEGA splash
+    // and the boot menu render through it. Atlas + every other heap
+    // consumer waits until after the menu so the menu's sprite allocations
+    // sit at the wilderness top and dlmalloc reabsorbs them cleanly when
+    // the next big single-chunk alloc (atlas_init's 256 KiB pool) extends
+    // the boundary. Headroom on a 4 MiB cart is ~69 KiB after ROM load —
+    // any small free-list scatter from the menu would block one of the
+    // larger ROM allocations (pcm.init = 0x60000 = 384 KiB single chunk).
     video.boot_display();
 #if CANNONBALL_LOG_HEAP
     {
@@ -189,6 +202,27 @@ int main(int /*argc*/, char* /*argv*/[])
     // Allocates a sprite_t for the duration and frees it before returning,
     // so the boot menu's font load lands on a clean heap.
     n64::splash::run();
+
+    // Pre-engine title + options menu. The player picks ARCADE /
+    // CONTINUOUS / TIME TRIALS (with an inline laps editor) or steps into
+    // OPTIONS to adjust persisted settings. On confirm the choice sets
+    // outrun.cannonball_mode and writes the live config back to EEPROM,
+    // then the engine init pipeline runs and the chosen mode kicks off.
+    n64::boot_menu::run();
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-bootmenu: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
+
+    video.sprite_layer->atlas_init();
+#if CANNONBALL_LOG_HEAP
+    {
+        heap_stats_t hs; sys_get_heap_stats(&hs);
+        debugf("heap post-atlas: used=%d free=%d\n", hs.used, hs.total - hs.used);
+    }
+#endif
 
     audio.init();
 #if CANNONBALL_LOG_HEAP

@@ -144,6 +144,7 @@ set(src_n64
     "${main_cpp_base}/n64/rendersurface.hpp"
     "${main_cpp_base}/n64/save.hpp"
     "${main_cpp_base}/n64/splash.hpp"
+    "${main_cpp_base}/n64/boot_menu.hpp"
     "${main_cpp_base}/n64/hwroad_rsp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp_internal.hpp"
@@ -156,6 +157,7 @@ set(src_n64
     "${main_cpp_base}/n64/rendersurface.cpp"
     "${main_cpp_base}/n64/save.cpp"
     "${main_cpp_base}/n64/splash.cpp"
+    "${main_cpp_base}/n64/boot_menu.cpp"
     "${main_cpp_base}/n64/hwroad_rsp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp_rsp.cpp"
@@ -235,6 +237,13 @@ include(bake-splash.cmake)
 add_dependencies(cannonball bake-splash)
 target_include_directories(cannonball PRIVATE "${SPLASH_FADE_HEADER_DIR}")
 
+# Pre-engine title + options menu sprites: PNG → .sprite (CI4 for text labels
+# and pills so the runtime can re-tint them via the rdpq combiner; RGBA16 for
+# the *_bg full-colour chrome). Staged into rom:/menu/ and consumed by
+# src/main/n64/boot_menu.cpp. See cmake/bake-menu.cmake.
+include(bake-menu.cmake)
+add_dependencies(cannonball bake-menu)
+
 n64_create_rom(cannonball
     TITLE "CannonBall"
     DFS_ROOT "${N64_DFS_ROOT}"
@@ -245,4 +254,5 @@ n64_create_rom(cannonball
                    "${SPLASH_STAGED_SWEEP_SPRITE}"
                    "${SPLASH_STAGED_FADE_SPRITE}"
                    "${SPLASH_STAGED_AUDIO}"
+                   ${MENU_STAGED_SPRITES}
 )
