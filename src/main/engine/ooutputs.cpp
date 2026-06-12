@@ -17,8 +17,8 @@
     See license.txt for more details.
 ***************************************************************************/
 
-#include <iostream>
 #include <cstdlib> // abs
+#include <libdragon.h>
 
 #include "utils.hpp"
 
@@ -122,14 +122,14 @@ void OOutputs::writeDigitalToConsole()
     if (config.smartypi.enabled && config.smartypi.ouputs)
     {
         if ((dig_out & D_BRAKE_LAMP) != (dig_out_old & D_BRAKE_LAMP))
-            std::cout << "brake_lamp = " << is_set(D_BRAKE_LAMP) << std::endl;
+            debugf("brake_lamp = %d\n", is_set(D_BRAKE_LAMP));
         if ((dig_out & D_START_LAMP) != (dig_out_old & D_START_LAMP))
-            std::cout << "start_lamp = " << is_set(D_START_LAMP) << std::endl;
+            debugf("start_lamp = %d\n", is_set(D_START_LAMP));
         if ((dig_out & D_MOTOR) != (dig_out_old & D_MOTOR))
-            std::cout << "wheel_motor = " << is_set(D_MOTOR) << std::endl;
+            debugf("wheel_motor = %d\n", is_set(D_MOTOR));
 
         if (hw_motor_control != hw_motor_control_old)
-            std::cout << "bank_motor_speed = " << (int) hw_motor_control << std::endl;
+            debugf("bank_motor_speed = %d\n", (int) hw_motor_control);
 
         dig_out_old = dig_out;
         hw_motor_control_old = hw_motor_control;

@@ -1,16 +1,22 @@
 /***************************************************************************
-    Binary File Loader. 
-    
+    Binary File Loader.
+
     Handles loading an individual binary file to memory.
     Supports reading bytes, words and longs from this area of memory.
 
     Copyright Chris White.
     See license.txt for more details.
+
+    N64 port: replaced <fstream>/<iostream> with C stdio. The newlib + DFS
+    integration in libdragon routes fopen("rom:/...") through the DFS
+    filesystem driver, so the cart-side asset semantics are preserved.
+    Dropping iostream alone reclaims ~80 KiB of .text (std::time_get /
+    std::money_get / locale / strftime machinery that <fstream> drags in).
 ***************************************************************************/
 
-#include <iostream>
-#include <fstream>
-#include <cstddef>       // for std::size_t
+#include <cstdio>
+#include <cstring>
+#include <libdragon.h>
 
 #include "stdint.hpp"
 #include "romloader.hpp"
@@ -52,41 +58,35 @@ int RomLoader::load_rom(const char* filename, const int offset, const int length
     std::string path = config.data.rom_path;
     path += std::string(filename);
 
-    // Open rom file
-    std::ifstream src(path.c_str(), std::ios::in | std::ios::binary);
+    FILE* src = std::fopen(path.c_str(), "rb");
     if (!src)
     {
-        if (verbose) std::cout << "cannot open rom: " << path << std::endl;
+        if (verbose) debugf("cannot open rom: %s\n", path.c_str());
         loaded = false;
         return 1; // fail
     }
 
-    // Read file
     char* buffer = new char[length];
-    src.read(buffer, length);
+    const size_t bytes_read = std::fread(buffer, 1, length, src);
 
-    // Check CRC on file
     Crc32 result;
-    result.process_bytes(buffer, (size_t) src.gcount());
+    result.process_bytes(buffer, bytes_read);
 
-    if (expected_crc != result.checksum())
+    if (expected_crc != (int)result.checksum())
     {
-        if (verbose) 
-        std::cout << std::hex << 
-            filename << " has incorrect checksum.\nExpected: " << expected_crc << " Found: " << result.checksum() << std::endl;
-
+        if (verbose)
+            debugf("%s has incorrect checksum.\nExpected: %x Found: %x\n",
+                   filename, expected_crc, result.checksum());
+        delete[] buffer;
+        std::fclose(src);
         return 1;
     }
 
-    // Interleave file as necessary
     for (int i = 0; i < length; i++)
-    {
         rom[(i * interleave) + offset] = buffer[i];
-    }
 
-    // Clean Up
     delete[] buffer;
-    src.close();
+    std::fclose(src);
     loaded = true;
     return 0; // success
 }
@@ -97,23 +97,21 @@ int RomLoader::load_rom(const char* filename, const int offset, const int length
 
 int RomLoader::load_binary(const char* filename)
 {
-    std::ifstream src(filename, std::ios::in | std::ios::binary);
+    FILE* src = std::fopen(filename, "rb");
     if (!src)
     {
-        std::cout << "cannot open file: " << filename << std::endl;
+        debugf("cannot open file: %s\n", filename);
         loaded = false;
         return 1; // fail
     }
 
     length = filesize(filename);
 
-    // Read file
     char* buffer = new char[length];
-    src.read(buffer, length);
+    std::fread(buffer, 1, length, src);
     rom = (uint8_t*) buffer;
 
-    // Clean Up
-    src.close();
+    std::fclose(src);
 
     loaded = true;
     return 0; // success
@@ -121,9 +119,10 @@ int RomLoader::load_binary(const char* filename)
 
 int RomLoader::filesize(const char* filename)
 {
-    std::ifstream in(filename, std::ifstream::in | std::ifstream::binary);
-    in.seekg(0, std::ifstream::end);
-    int size = (int) in.tellg();
-    in.close();
-    return size; 
+    FILE* in = std::fopen(filename, "rb");
+    if (!in) return 0;
+    std::fseek(in, 0, SEEK_END);
+    const int size = (int) std::ftell(in);
+    std::fclose(in);
+    return size;
 }

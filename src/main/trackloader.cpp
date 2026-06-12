@@ -12,7 +12,7 @@
     See license.txt for more details.
 ***************************************************************************/
 
-#include <iostream>
+#include <libdragon.h>
 #include "trackloader.hpp"
 #include "roms.hpp"
 #include "engine/outrun.hpp"
@@ -167,7 +167,7 @@ void TrackLoader::init_layout_tracks(bool jap)
     // --------------------------------------------------------------------------------------------
     if (layout->read32(LayOut::HEADER) != LayOut::EXPECTED_VERSION)
     {
-        std::cout << "Incompatible LayOut Version Detected. Try upgrading CannonBall to the latest version" << std::endl;
+        debugf("Incompatible LayOut Version Detected. Try upgrading CannonBall to the latest version\n");
         init_original_tracks(jap);
         return;
     }

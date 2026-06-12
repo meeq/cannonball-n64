@@ -5,8 +5,8 @@
     See license.txt for more details.
 ***************************************************************************/
 
-#include <iostream>
 #include <cstring>
+#include <libdragon.h>
 #include "stdint.hpp"
 #include "roms.hpp"
 
@@ -137,7 +137,7 @@ bool Roms::load_ym_data(const char* filename)
         }
         else
         {
-            std::cout << "YM Data is too large: " << filename << std::endl;
+            debugf("YM Data is too large: %s\n", filename);
         }
     }
     return false;

@@ -8,8 +8,6 @@
     See license.txt for more details.
 ***************************************************************************/
 
-#include <iostream>
-
 #include "engine/ocrash.hpp"
 #include "engine/oinputs.hpp"
 #include "engine/ostats.hpp"
