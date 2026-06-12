@@ -566,6 +566,34 @@ void Audio::init()
            audio_get_frequency(), N_PCM_SLOTS, N_PCM_CH, n_wav64_ok, N_WAV64);
 }
 
+void Audio::shutdown()
+{
+    if (!dac_initialised) return;
+
+    osoundint.set_intercept(nullptr);
+
+    for (int s = 0; s < N_PCM_SLOTS; s++)
+    {
+        mixer_ch_stop(s);
+        pcm_slot[s].voice = -1;
+        pcm_slot[s].base_byte = 0;
+    }
+    mixer_ch_stop(WAV64_MUS_CH);
+    mixer_ch_stop(WAV64_SFX_CH);
+
+    for (int i = 0; i < N_WAV64; i++)
+    {
+        if (!wav64_loaded[i]) continue;
+        wav64_close(&wav64_files[i]);
+        wav64_loaded[i] = false;
+    }
+
+    mixer_close();
+    audio_close();
+    dac_initialised = false;
+    sound_enabled   = false;
+}
+
 // See header comment. Plays a silent dummy waveform on each mixer channel
 // so libdragon's mixer_ch_play allocates the lazy per-channel sample
 // buffer up-front. Covers both the SegaPCM slot pool (N_PCM_SLOTS @ 8-bit

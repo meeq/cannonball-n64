@@ -29,8 +29,12 @@
 #include "../engine/oinputs.hpp"
 #include "../engine/ooutputs.hpp"
 #include "../engine/omusic.hpp"
+#include "../engine/otiles.hpp"
+#include "../engine/audio/osoundint.hpp"
+#include "../engine/audio/commands.hpp"
 
 #include "../frontend/config.hpp"
+#include "../frontend/ttrial.hpp"
 
 using namespace cannonball;
 
@@ -43,11 +47,31 @@ int    cannonball::fps_counter = 0;
 Audio  cannonball::audio;
 Input  input;
 bool   pause_engine = false;
+static TTrial g_ttrial(config.ttrial.best_times);
 
 // Set to 1 to log heap stats at key boot milestones (post-ROM load,
 // post-audio init). Useful for diagnosing OOM in the 4 MiB build; off in
 // shipping builds so the ISViewer log isn't cluttered.
 #define CANNONBALL_LOG_HEAP 0
+
+// CANNONBALL_LOG_PROFILE: dump per-frame timing breakdown to debugf on every
+// FPS dip below 30 (post-warmup). Set to 0 to silence the USB log during
+// extended play sessions. Cost is one display_get_fps() + a branch per frame.
+#define CANNONBALL_LOG_PROFILE 1
+
+// Warm up the engine before the first render. The OutRun attract sequence
+// fades the sky palette in via opalette.cycle_sky_palette over several
+// vints and populates the tilemap incrementally. SDL hides this behind
+// ~60 fps frames so it's imperceptible; on N64 the first second runs at
+// ~5 fps (atlas extraction + heavy startup work), which stretches the
+// warm-up into a visible brown-sky / partial-tilemap flash.
+//
+// Override via -DCANNONBALL_WARMUP_TICKS=N to skip ahead in attract — e.g.
+// ~1800 lands the AI near the stage-1 road split (case 0) for testing
+// the hwroad_rdp prototype without watching a minute of demo.
+#ifndef CANNONBALL_WARMUP_TICKS
+#define CANNONBALL_WARMUP_TICKS 0
+#endif
 
 namespace
 {
@@ -145,10 +169,85 @@ namespace
                 state = STATE_GAME;
                 break;
 
+            case STATE_INIT_TTRIAL_SELECT:
+                // Engine subsystems the TT screen depends on but doesn't set
+                // up itself. The desktop Menu::init prelude does these for
+                // free; on N64 we skip Menu entirely so we cover them here.
+                otiles.setup_palette_hud();
+                osoundint.has_booted = true;
+                osoundint.init();
+                cannonball::audio.clear_wav();
+                g_ttrial.init();
+                state = STATE_TTRIAL_SELECT;
+                // fall through
+            case STATE_TTRIAL_SELECT:
+            {
+                // Drive TTrial::tick at the engine's logic rate (30Hz),
+                // matching what the desktop frontend does. Calling it on
+                // every render frame at 60Hz doubles the steering / input
+                // response speed.
+                if (tick_frame)
+                {
+                    // Menu SFX: queue before TTrial::tick consumes the press.
+                    // Engine audio is already up so these route through the
+                    // wav64 SFX channel without needing the boot menu's mixer.
+                    const bool nav  = input.has_pressed(Input::LEFT)
+                                   || input.has_pressed(Input::RIGHT);
+                    const bool go   = input.has_pressed(Input::START)
+                                   || input.has_pressed(Input::ACCEL);
+                    const bool back = input.has_pressed(Input::BRAKE);
+                    if (nav)  osoundint.queue_sound(sound::BEEP1);
+                    if (go)   osoundint.queue_sound(sound::COIN_IN);
+                    if (back) osoundint.queue_sound(sound::BEEP2);
+
+                    if (back)
+                    {
+                        // Hand control back to the N64 boot menu so the
+                        // player can pick a different mode. Audio gets torn
+                        // down + brought back up around the re-entry — the
+                        // boot menu owns audio init while it runs.
+                        state = STATE_REENTER_BOOT_MENU;
+                    }
+                    else
+                    {
+                        int r = g_ttrial.tick();
+                        if (r == TTrial::INIT_GAME)
+                        {
+                            osoundint.queue_clear();
+                            state = STATE_INIT_GAME;
+                        }
+                    }
+                    input.frame_done();
+                }
+                break;
+            }
+
+            case STATE_REENTER_BOOT_MENU:
+                cannonball::audio.shutdown();
+                n64::boot_menu::run();
+                cannonball::audio.init();
+                cannonball::audio.prime_mixer_buffers();
+                state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
+                          ? STATE_INIT_TTRIAL_SELECT
+                          : STATE_INIT_GAME;
+                break;
+
             case STATE_MENU:
             case STATE_INIT_MENU:
-                // Menu disabled in Phase 1 — boot straight into attract.
-                state = STATE_INIT_GAME;
+                // No in-engine menu on N64 — STATE_INIT_MENU is the engine's
+                // "we're done with this game, what next?" hand-off. Persist
+                // a new TT best to EEPROM (via TTrial::update_best_time so
+                // the right level index is used), then route MODE_TTRIAL
+                // back to the course-map select screen instead of restarting
+                // the same stage through attract.
+                if (outrun.ttrial.new_high_score)
+                {
+                    outrun.ttrial.new_high_score = false;
+                    g_ttrial.update_best_time();
+                }
+                state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
+                          ? STATE_INIT_TTRIAL_SELECT
+                          : STATE_INIT_GAME;
                 break;
         }
 
@@ -295,25 +394,11 @@ int main(int /*argc*/, char* /*argv*/[])
                config.controls.analog,    config.controls.axis,
                config.controls.invert,    config.controls.asettings);
 
-    state = STATE_INIT_GAME;
+    state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
+              ? STATE_INIT_TTRIAL_SELECT
+              : STATE_INIT_GAME;
 
-    // Warm up the engine before the first render. The OutRun attract sequence
-    // fades the sky palette in via opalette.cycle_sky_palette over several
-    // vints and populates the tilemap incrementally. SDL hides this behind
-    // ~60 fps frames so it's imperceptible; on N64 the first second runs at
-    // ~5 fps (atlas extraction + heavy startup work), which stretches the
-    // warm-up into a visible brown-sky / partial-tilemap flash.
-    //
-    // Override via -DCANNONBALL_WARMUP_TICKS=N to skip ahead in attract — e.g.
-    // ~1800 lands the AI near the stage-1 road split (case 0) for testing
-    // the hwroad_rdp prototype without watching a minute of demo.
-#ifndef CANNONBALL_WARMUP_TICKS
-#define CANNONBALL_WARMUP_TICKS 8
-#endif
-// CANNONBALL_LOG_PROFILE: dump per-frame timing breakdown to debugf on every
-// FPS dip below 30 (post-warmup). Set to 0 to silence the USB log during
-// extended play sessions. Cost is one display_get_fps() + a branch per frame.
-#define CANNONBALL_LOG_PROFILE 1
+    // Warm up the engine by ticking before the first frame
     for (int i = 0; i < CANNONBALL_WARMUP_TICKS; i++)
         tick_engine();
 

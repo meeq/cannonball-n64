@@ -25,6 +25,9 @@ namespace cannonball
         STATE_MENU,
         STATE_INIT_GAME,
         STATE_GAME,
+        STATE_INIT_TTRIAL_SELECT,
+        STATE_TTRIAL_SELECT,
+        STATE_REENTER_BOOT_MENU,
         STATE_QUIT
     };
 }

@@ -162,11 +162,14 @@ void Config::save_scores(bool original_mode)
 
 void Config::load_tiletrial_scores()
 {
-    static const uint16_t COUNTER_1M_15 = 0x11D0;
-    if (n64save::load_ttrial(engine.jap != 0, ttrial.best_times))
-        return;
+    static const uint16_t COUNTER_DEFAULT = 0x1590; // displays 1'30"00 via convert_counter_to_time
+    bool loaded = n64save::load_ttrial(engine.jap != 0, ttrial.best_times);
     for (int i = 0; i < 15; i++)
-        ttrial.best_times[i] = COUNTER_1M_15;
+        // 0 = freshly-formatted EEPROM cell. > 0x7FFF = pre-saturation-fix
+        // garbage from a >9-minute lap that overflowed int16_t and got
+        // saved as a "negative" record. Both should fall back to default.
+        if (!loaded || ttrial.best_times[i] == 0 || ttrial.best_times[i] > 0x7FFF)
+            ttrial.best_times[i] = COUNTER_DEFAULT;
 }
 
 void Config::save_tiletrial_scores()
@@ -179,9 +182,9 @@ bool Config::clear_scores()
     ohiscore.init_def_scores();
     // Re-seed the engine's in-RAM ttrial table too — Config::load_tiletrial_scores
     // already does this from defaults when EEPROM read fails.
-    static const uint16_t COUNTER_1M_15 = 0x11D0;
+    static const uint16_t COUNTER_DEFAULT = 0x1590; // displays 1'30"00 via convert_counter_to_time
     for (int i = 0; i < 15; i++)
-        ttrial.best_times[i] = COUNTER_1M_15;
+        ttrial.best_times[i] = COUNTER_DEFAULT;
     n64save::wipe();
     return true;
 }

@@ -32,6 +32,12 @@ public:
 
     void   init();
 
+    // Stop all playback, close every open wav64 + the mixer + libdragon
+    // audio output. Lets the boot menu re-init audio with its own params
+    // when the player backs out from the TT select screen, after which
+    // init() can be called again to bring the engine mixer back up.
+    void   shutdown();
+
     // Pre-flush libdragon mixer's lazy per-channel sample-buffer alloc.
     // Must run AFTER roms.load_revb_roms — the ~1 MiB ROM allocation needs
     // a contiguous heap, and priming bites into that headroom. Calling

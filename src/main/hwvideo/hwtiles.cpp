@@ -100,18 +100,14 @@ namespace n64_profile {
 // pass 1. Direct-mapped cache lets repeat tile codes skip the bus.
 //
 // One tile = 8 rows × 4 bytes = 32 bytes. Direct map by (Code & MASK):
-// 256 slots × 32 B = 8 KiB pixels + 0.5 KiB tags. 4 MiB heap budget
-// is the binding constraint: with the atlas pool (256 KiB), display
-// FBs (307 KiB), ROM data (~1 MiB), and the audio mixer's per-channel
-// buffers (4 KiB × 16 ch = 64 KiB priming alloc, see
-// Audio::prime_mixer_buffers), post-roms free heap is ~80 KiB and
-// 1024 slots × 32B = 32 KiB starves the audio prime.
+// 1024 slots × 32 B = 32 KiB pixels + 2 KiB tags. Originally pinned to
+// 256 when post-prime heap was ~4 KiB on 4 MiB; subsequent memory
+// optimisation work loosened that budget to ~210 KiB free post-prime,
+// so the cache can hold its original-measured working set again.
 //
-// Hit rate scales with slots / working_set. At 256 slots vs ~150
-// unique codes per frame, conflict misses are noticeable (~50%
-// collision rate) but still cut DMA cost roughly in half vs no cache.
-// 8 MiB consoles would have room for 1024 but the size is currently
-// pinned to keep heap math identical across both targets.
+// Hit rate scales with slots / working_set. At 1024 slots vs ~150
+// unique codes per frame, conflict misses are negligible — original
+// measurement was 91% hits, pass 1 from ~4640 us → ~2549 us in OUT.
 //
 // Heap-allocated in hwtiles::init() — has to run after roms.load on
 // 4 MiB (ROM load needs ~1 MiB contiguous; pre-roms BSS growth bumps
@@ -120,7 +116,7 @@ namespace n64_profile {
 // cached alias. On a hit the inner pack loop reads through the same
 // cached alias; lines stay hot in L1 across the chunk's inner loop.
 namespace {
-    constexpr uint32_t TILE_CACHE_SLOTS = 256;
+    constexpr uint32_t TILE_CACHE_SLOTS = 1024;
     constexpr uint32_t TILE_CACHE_MASK  = TILE_CACHE_SLOTS - 1;
     constexpr uint32_t TILE_BYTES       = 32;
 

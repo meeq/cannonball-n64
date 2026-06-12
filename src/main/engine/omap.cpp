@@ -45,6 +45,10 @@ void OMap::init()
     osprites.spr_cnt_shadow   = 0;
     oroad.road_ctrl           = ORoad::ROAD_BOTH_P0;
     oroad.horizon_base        = ORoad::HORIZON_OFF;
+    // horizon_set=1 pins horizon_base so setup_road_y doesn't overwrite our
+    // HORIZON_OFF on the next tick. The desktop path got away without this
+    // only because Menu::init happened to set horizon_set=1 first.
+    oroad.horizon_set         = 1;
     otiles.fill_tilemap_color(0xABD); //  Paint pinkish colour on tilemap 16
     init_sprites = true;
 }

@@ -77,10 +77,9 @@ void OStats::do_timers()
 {
     if (outrun.game_state != GS_INGAME) return;
 
-    inc_lap_timer();
-
     if (outrun.cannonball_mode == Outrun::MODE_ORIGINAL || outrun.cannonball_mode == Outrun::MODE_CONT)
     {
+        inc_lap_timer();
         // Each stage has a standard counter that just increments. Do this here.
         stage_counters[cur_stage]++;
         ohud.draw_lap_timer(0x11016C, stage_times[cur_stage], ms_value);
@@ -88,7 +87,17 @@ void OStats::do_timers()
 
     else if (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
     {
-        stage_counters[outrun.ttrial.current_lap]++;
+        // Saturate at INT16_MAX (~9m06 at 60 Hz logic). Past that the lap
+        // is already worse than any plausible record, and letting the
+        // counter wrap negative makes the `counter < best_lap_counter`
+        // check in oinitengine wrongly award a new high score. Freeze the
+        // visible BCD timer at the same threshold so the HUD doesn't keep
+        // ticking past what the internal counter is recording.
+        if (stage_counters[outrun.ttrial.current_lap] < 0x7FFF)
+        {
+            inc_lap_timer();
+            stage_counters[outrun.ttrial.current_lap]++;
+        }
         ohud.draw_stage_number(ohud.translate(30, 2 + outrun.ttrial.current_lap), (outrun.ttrial.current_lap + 1), OHud::GREY);
         ohud.draw_lap_timer(ohud.translate(32, 2 + outrun.ttrial.current_lap), stage_times[cur_stage], ms_value);
     }

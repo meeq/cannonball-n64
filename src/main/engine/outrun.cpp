@@ -96,7 +96,7 @@ void Outrun::boot()
     // Initialize default hi-score entries
     ohiscore.init_def_scores();
     // Load saved hi-score entries
-    config.load_scores(cannonball_mode == Outrun::MODE_ORIGINAL);        
+    config.load_scores(cannonball_mode == Outrun::MODE_ORIGINAL);
     ostats.init(cannonball_mode == MODE_TTRIAL);
     init_jump_table();
     oinitengine.init(cannonball_mode == MODE_TTRIAL ? ttrial.level : 0);
