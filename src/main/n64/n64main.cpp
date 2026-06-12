@@ -166,6 +166,17 @@ namespace
                 tick_frame   = true;
                 pause_engine = false;
                 outrun.init();
+                // Advance the engine through GS_INIT → GS_INIT_MUSIC →
+                // GS_MUSIC (and a few GS_MUSIC ticks) without rendering, so
+                // the first visible frame is the music-select scene with
+                // correct tilemap/palette. Without this, the previous screen's
+                // leftover tile RAM (sand-brown course-map background from
+                // TTrial::init, or boot menu pixels on a fresh start) renders
+                // through the music-select tilemap for ~5 ticks while
+                // omusic.enable() + opalette fade resolve. Same fix benefits
+                // both the boot → game and TT-select → game transitions.
+                for (int i = 0; i < 4; ++i)
+                    outrun.tick(true);
                 state = STATE_GAME;
                 break;
 
@@ -245,6 +256,12 @@ namespace
                     outrun.ttrial.new_high_score = false;
                     g_ttrial.update_best_time();
                 }
+                // Silence the in-game music before re-entering the stage
+                // selector. Without FM_RESET the selected track keeps
+                // looping under the course-map screen until the next stage
+                // launches.
+                osoundint.queue_sound(sound::FM_RESET);
+                cannonball::audio.clear_wav();
                 state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
                           ? STATE_INIT_TTRIAL_SELECT
                           : STATE_INIT_GAME;
