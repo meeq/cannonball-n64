@@ -74,7 +74,12 @@ void OMusic::enable()
     ostats.frame_counter      = ostats.frame_reset;  
      
     blit_music_select();
-    ohud.blit_text2(outrun.adr.text2_select_music); // Select Music By Steering
+    // "SELECT MUSIC BY STEERING" is a World rev-B addition; the Japanese
+    // rom has no matching blit_text2 record at the analogous offset, so
+    // skip the call in Japan mode rather than render whatever happens to
+    // sit there. The music-select interaction works either way.
+    if (!config.engine.jap)
+        ohud.blit_text2(outrun.adr.text2_select_music);
   
     osoundint.queue_sound(sound::RESET);
     if (!config.sound.preview)

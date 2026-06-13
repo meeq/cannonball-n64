@@ -51,8 +51,12 @@ const uint16_t TEXT2_GAMEOVER = 0xBCB0;
 const uint32_t TEXT2_GAMEOVER_J = 0xbaac; // (TEXT2_GAMEOVER -0x204 for Japan rom0)
 
 // Text: Select Music By Steering
+// World rev-B addition with no Japanese counterpart at the analogous offset.
+// omusic.cpp guards the blit_text2 call with !config.engine.jap so the _J
+// value below is never actually read; it stays at the cluster's -0x204 shift
+// purely so the field is populated consistently.
 const uint16_t TEXT2_SELECT_MUSIC = 0xBCBE;
-const uint32_t TEXT2_SELECT_MUSIC_J = 0xbaba; // (TEXT2_SELECT_MUSIC -0x204 for Japan rom0)
+const uint32_t TEXT2_SELECT_MUSIC_J = 0xbaba;
 
 // Text: 1986 Sega
 const uint16_t TEXT1_1986_SEGA = 0xBCF2;
