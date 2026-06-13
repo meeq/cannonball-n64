@@ -464,24 +464,19 @@ int main(int /*argc*/, char* /*argv*/[])
         while (1) { /* halt */ }
     }
 
-    // Japanese romset adds another 512 KiB (j_rom0 + j_rom1). Only load it on
-    // Expansion Pak, where headroom is plentiful; on baseline 4 MiB it would
-    // OOM at video.init / atlas. select_course gracefully degrades to World
-    // because config.engine.jap is forced to 0 in apply_saved_settings when
-    // !is_memory_expanded(). If the cart was built without the J roms in DFS
-    // we also clamp jap=0 so the engine doesn't dereference uninitialised
-    // j_rom0 via the rom0p indirection.
-    if (is_memory_expanded())
+    // Japanese ROMs overwrite rom0 / rom1 in place — only one master/slave
+    // CPU ROM set is resident at a time, so this fits on baseline 4 MiB. The
+    // engine code paths that depend on region-shifted offsets route through
+    // outrun.adr.*, which select_course populates from the _J family of
+    // constants when jap=1. If the DFS payload is missing the J chips, fall
+    // back to World rom0 / rom1 (which load_revb_roms left in place) and
+    // clear the flag so the engine never reads Japan offsets from a buffer
+    // that still holds World bytes.
+    if (config.engine.jap && !roms.load_japanese_roms())
     {
-        if (!roms.load_japanese_roms())
-        {
-            debugf("Japanese ROMs not found — Japan mode unavailable.\n");
-            config.engine.jap = 0;
-        }
-    }
-    else
-    {
+        debugf("Japanese ROMs not found — falling back to World.\n");
         config.engine.jap = 0;
+        roms.load_revb_roms(config.sound.fix_samples); // restore World rom0/1
     }
 
 #if CANNONBALL_LOG_HEAP

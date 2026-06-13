@@ -112,12 +112,14 @@ void TrackLoader::init_original_tracks(bool jap)
     scenerymap_offset = outrun.adr.sprite_master_table;
     scenerymap_data   = &roms.rom0p->rom[0]; 
 
-    // Palette Entries
-    pal_sky_offset    = PAL_SKY_TABLE;
-    pal_sky_data      = &roms.rom0.rom[0];
+    // Palette Entries — region-aware. PAL_SKY/GND_TABLE relocate by -0x5A0
+    // in Japan rom0, and the pointer entries they contain shift by the
+    // same delta; both the base address and the data follow that.
+    pal_sky_offset    = outrun.adr.pal_sky_table;
+    pal_sky_data      = &roms.rom0p->rom[0];
 
-    pal_gnd_offset    = PAL_GND_TABLE;
-    pal_gnd_data      = &roms.rom0.rom[0];
+    pal_gnd_offset    = outrun.adr.pal_gnd_table;
+    pal_gnd_data      = &roms.rom0p->rom[0];
 
     // --------------------------------------------------------------------------------------------
     // Iterate and setup 15 stages

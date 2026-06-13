@@ -836,11 +836,15 @@ void Outrun::init_best_outrunners()
 
 void Outrun::select_course(bool jap, bool prototype)
 {
+    // rom0p / rom1p always alias rom0 / rom1; the underlying buffers hold
+    // the region-correct ROM bytes after roms.load_japanese_roms() swaps
+    // them in place for Japan mode. (The previous codebase kept a separate
+    // j_rom0 / j_rom1 pair allocated, doubling the ROM footprint.)
+    roms.rom0p = &roms.rom0;
+    roms.rom1p = &roms.rom1;
+
     if (jap)
     {
-        roms.rom0p = &roms.j_rom0;
-        roms.rom1p = &roms.j_rom1;
-
         // Main CPU
         adr.tiles_def_lookup      = TILES_DEF_LOOKUP_J;
         adr.tiles_table           = TILES_TABLE_J;
@@ -932,14 +936,24 @@ void Outrun::select_course(bool jap, bool prototype)
         adr.road_seg_end          = ROAD_SEG_TABLE_END_J;
         adr.road_seg_split        = ROAD_SEG_TABLE_SPLIT_J;
 
+        adr.pal_sky_table         = PAL_SKY_TABLE_J;
+        adr.pal_gnd_table         = PAL_GND_TABLE_J;
+        adr.pal_hud_src           = PAL_HUD_SRC_J;
+        adr.pal_tilemap_src       = PAL_TILEMAP_SRC_J;
+        adr.pal_tilemap_data      = PAL_TILEMAP_DATA_J;
+        adr.tiles_page_fg1        = TILES_PAGE_FG1_J;
+        adr.tiles_page_bg1        = TILES_PAGE_BG1_J;
+        adr.tiles_page_fg2        = TILES_PAGE_FG2_J;
+        adr.tiles_page_bg2        = TILES_PAGE_BG2_J;
+        adr.tiles_minicars1       = TILES_MINICARS1_J;
+        adr.tiles_alphabet        = TILES_ALPHABET_J;
+        adr.map_route_lookup      = MAP_ROUTE_LOOKUP_J;
+
         // Sub CPU
         adr.road_height_lookup    = ROAD_HEIGHT_LOOKUP_J;
     }
     else
     {
-        roms.rom0p = &roms.rom0;
-        roms.rom1p = &roms.rom1;
-
         // Main CPU
         adr.tiles_def_lookup      = TILES_DEF_LOOKUP;
         adr.tiles_table           = TILES_TABLE;
@@ -1033,6 +1047,19 @@ void Outrun::select_course(bool jap, bool prototype)
         adr.road_seg_table        = ROAD_SEG_TABLE;
         adr.road_seg_end          = ROAD_SEG_TABLE_END;
         adr.road_seg_split        = ROAD_SEG_TABLE_SPLIT;
+
+        adr.pal_sky_table         = PAL_SKY_TABLE;
+        adr.pal_gnd_table         = PAL_GND_TABLE;
+        adr.pal_hud_src           = PAL_HUD_SRC;
+        adr.pal_tilemap_src       = PAL_TILEMAP_SRC;
+        adr.pal_tilemap_data      = PAL_TILEMAP_DATA;
+        adr.tiles_page_fg1        = TILES_PAGE_FG1;
+        adr.tiles_page_bg1        = TILES_PAGE_BG1;
+        adr.tiles_page_fg2        = TILES_PAGE_FG2;
+        adr.tiles_page_bg2        = TILES_PAGE_BG2;
+        adr.tiles_minicars1       = TILES_MINICARS1;
+        adr.tiles_alphabet        = TILES_ALPHABET;
+        adr.map_route_lookup      = MAP_ROUTE_LOOKUP;
 
         // Sub CPU
         adr.road_height_lookup    = ROAD_HEIGHT_LOOKUP;

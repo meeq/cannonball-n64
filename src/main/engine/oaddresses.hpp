@@ -142,9 +142,13 @@ const uint32_t HW_FG_HSCROLL    = 0xE98;
 
 // In-Game Tilemap Defaults
 const uint32_t TILES_PAGE_FG1     = 0x17E4C;
+const uint32_t TILES_PAGE_FG1_J   = 0x178AC;  // -0x5A0 from World, verified by byte match
 const uint32_t TILES_PAGE_BG1     = 0x17E5C;
+const uint32_t TILES_PAGE_BG1_J   = 0x178BC;
 const uint32_t TILES_PAGE_FG2     = 0x17E68;  // Used for road split
+const uint32_t TILES_PAGE_FG2_J   = 0x178C8;
 const uint32_t TILES_PAGE_BG2     = 0x17E78;  // Used for road split
+const uint32_t TILES_PAGE_BG2_J   = 0x178D8;
 const uint32_t TILES_DEF_LOOKUP   = 0x17E84;  // Tilemap default lookup indexes, for values in table below
 const uint32_t TILES_DEF_LOOKUP_J = 0x178E4;
 const uint32_t TILES_TABLE        = 0x17EAC;  // Stage Tilemap Default Values
@@ -170,10 +174,22 @@ const uint32_t TILEMAP_PALS = 0xDF9C;
 const uint32_t PAL_MUSIC_SELECT = 0x175CC;
 
 // Table of long addresses of ground colours
-const uint32_t PAL_GND_TABLE = 0x17350;
+const uint32_t PAL_GND_TABLE   = 0x17350;
+const uint32_t PAL_GND_TABLE_J = 0x16DB0;  // -0x5A0; entries are pointers that also shift by -0x5A0
 
 // Table of palette addresses
-const uint32_t PAL_SKY_TABLE = 0x17590;
+const uint32_t PAL_SKY_TABLE   = 0x17590;
+const uint32_t PAL_SKY_TABLE_J = 0x16FF0;  // -0x5A0; entries are pointers that also shift by -0x5A0
+
+// HUD palette source (32 longs)
+const uint32_t PAL_HUD_SRC     = 0x16ED8;
+const uint32_t PAL_HUD_SRC_J   = 0x16938;
+
+// Tilemap palette index/data, used by setup_palette_tilemap.
+const uint32_t PAL_TILEMAP_SRC    = 0x16FD8;
+const uint32_t PAL_TILEMAP_SRC_J  = 0x16A38;
+const uint32_t PAL_TILEMAP_DATA   = 0x17050;
+const uint32_t PAL_TILEMAP_DATA_J = 0x16AB0;
 
 // Palette Data: Best Outrunners Name Entry
 const uint32_t PAL_BESTOR = 0x17DCC;
@@ -550,7 +566,8 @@ const uint32_t SPRITE_MINICAR_UP_J    = SPRITE_MINICAR_UP - 0x5A0;
 const uint32_t SPRITE_MINICAR_DOWN_J  = SPRITE_MINICAR_DOWN - 0x5A0;
 
 // Convert route information to piece index to colour
-const uint32_t MAP_ROUTE_LOOKUP = 0x3636;
+const uint32_t MAP_ROUTE_LOOKUP   = 0x3636;
+const uint32_t MAP_ROUTE_LOOKUP_J = 0x362A;  // -0xC shift in early code section
 
 // X and Y Movement table for Minicar
 const uint32_t MAP_MOVEMENT_LEFT = 0x3A34;
@@ -561,14 +578,16 @@ const uint32_t MAP_MOVEMENT_RIGHT = 0x3AB4;
 // ----------------------------------------------------------------------------
 
 // Tiles for minicars that run across the text layer
-const uint32_t TILES_MINICARS1 = 0xD62A;
-const uint32_t TILES_MINICARS2 = 0xD670; // smoke tiles
+const uint32_t TILES_MINICARS1   = 0xD62A;
+const uint32_t TILES_MINICARS1_J = 0xD3E8;  // -0x242 shift; same shift as TILES_ALPHABET
+const uint32_t TILES_MINICARS2   = 0xD670; // smoke tiles
 
 // Default Score Data
 const uint32_t DEFAULT_SCORES  = 0xD676;
 
 // Alphabet characters for initial entry
-const uint32_t TILES_ALPHABET  = 0xD5A4;
+const uint32_t TILES_ALPHABET   = 0xD5A4;
+const uint32_t TILES_ALPHABET_J = 0xD362;  // -0x242 shift
 
 // ----------------------------------------------------------------------------
 // Music Selection Data

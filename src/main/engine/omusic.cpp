@@ -222,7 +222,7 @@ void OMusic::tick()
     // Animated EQ Sprite (Cycle the graphical equalizer on the radio)
     oentry *e = &osprites.jump_table[entry_start + 1];
     e->reload++; // Increment palette entry
-    e->pal_src = roms.rom0.read8((e->reload & 0x3E) >> 1 | MUSIC_EQ_PAL);
+    e->pal_src = roms.rom0p->read8((e->reload & 0x3E) >> 1 | MUSIC_EQ_PAL);
     osprites.map_palette(e);
     osprites.do_spr_order_shadows(e);
 
@@ -416,7 +416,7 @@ void OMusic::blit_music_select()
 
     // Write 32 Palette Longs to Palette RAM
     for (int i = 0; i < 32; i++)
-        video.write_pal32(&dst_addr, roms.rom0.read32(&src_addr));
+        video.write_pal32(&dst_addr, roms.rom0p->read32(&src_addr));
 
     // Set Tilemap Scroll
     otiles.set_scroll(config.s16_x_off);
@@ -454,7 +454,7 @@ void OMusic::blit_music_select()
             for (int x = 0; x < 40;)
             {
                 // get next tile
-                uint32_t data = roms.rom0.read16(&src_addr);
+                uint32_t data = roms.rom0p->read16(&src_addr);
                 // No Compression: write tile directly to tile ram
                 if (data != 0)
                 {
@@ -464,8 +464,8 @@ void OMusic::blit_music_select()
                 // Compression
                 else
                 {
-                    uint16_t value = roms.rom0.read16(&src_addr); // tile index to copy
-                    uint16_t count = roms.rom0.read16(&src_addr); // number of times to copy value
+                    uint16_t value = roms.rom0p->read16(&src_addr); // tile index to copy
+                    uint16_t count = roms.rom0p->read16(&src_addr); // number of times to copy value
 
                     for (uint16_t i = 0; i <= count; i++)
                     {

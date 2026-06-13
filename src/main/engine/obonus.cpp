@@ -107,10 +107,10 @@ void OBonus::init_bonus_text()
     // Blit big 100K number
     uint32_t src_addr = TEXT1_BONUS_100K;
     uint32_t dst_addr = 0x11065A;
-    int8_t count = roms.rom0.read8(&src_addr);
+    int8_t count = roms.rom0p->read8(&src_addr);
 
     for (int8_t i = 0; i <= count; i++)
-        ohud.blit_large_digit(&dst_addr, (roms.rom0.read8(&src_addr) - 0x30) << 1);
+        ohud.blit_large_digit(&dst_addr, (roms.rom0p->read8(&src_addr) - 0x30) << 1);
 
     blit_bonus_secs();
 }

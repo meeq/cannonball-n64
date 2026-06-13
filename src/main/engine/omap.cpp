@@ -78,7 +78,7 @@ void OMap::tick()
         // Initialise Route Info
         case MAP_INIT:
             video.sprite_layer->set_x_clip(false); // Don't clip the area in wide-screen mode
-            map_route  = roms.rom0.read8(MAP_ROUTE_LOOKUP + ostats.routes[1]);
+            map_route  = roms.rom0p->read8(outrun.adr.map_route_lookup + ostats.routes[1]);
             map_pos    = 0;
             map_stage1 = 0;
             map_stage2 = ostats.cur_stage;
@@ -102,11 +102,11 @@ void OMap::tick()
                     uint16_t route_info = ostats.routes[1 + map_stage1];
                     if (route_info)
                     {
-                        map_route = roms.rom0.read8(MAP_ROUTE_LOOKUP + route_info);                      
+                        map_route = roms.rom0p->read8(outrun.adr.map_route_lookup + route_info);                      
                     }
                     else
                     {
-                        map_route = roms.rom0.read8(MAP_ROUTE_LOOKUP + ostats.routes[0 + map_stage1] + 0x10);
+                        map_route = roms.rom0p->read8(outrun.adr.map_route_lookup + ostats.routes[0 + map_stage1] + 0x10);
                     }
 
                     map_state = MAP_ROUTE_FINAL;
@@ -116,7 +116,7 @@ void OMap::tick()
                 {
                     map_pos = 0;
                     map_stage1++;
-                    map_route = roms.rom0.read8(MAP_ROUTE_LOOKUP + ostats.routes[1 + map_stage1]);
+                    map_route = roms.rom0p->read8(outrun.adr.map_route_lookup + ostats.routes[1 + map_stage1]);
                 }
             }
             break;
@@ -376,8 +376,8 @@ void OMap::move_mini_car(oentry* sprite)
         int16_t pos = (map_stage1 < 4) ? map_pos : map_pos >> 1;
         pos <<= 1; // do not try to merge with previous line
 
-        sprite->x += roms.rom0.read16(movement_table + pos);
-        int16_t y_change = roms.rom0.read16(movement_table + pos + 0x40);
+        sprite->x += roms.rom0p->read16(movement_table + pos);
+        int16_t y_change = roms.rom0p->read16(movement_table + pos + 0x40);
         sprite->y -= y_change;
 
         if (y_change == 0)

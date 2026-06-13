@@ -14,9 +14,8 @@ Roms roms;
 
 Roms::Roms()
 {
-    jap_rom_status = -1;
-    rom0p = NULL;
-    rom1p = NULL;
+    rom0p = &rom0;
+    rom1p = &rom1;
 }
 
 Roms::~Roms(void)
@@ -81,29 +80,26 @@ bool Roms::load_revb_roms(bool fixed_rom)
 
 bool Roms::load_japanese_roms()
 {
-    // Only attempt to initalize the arrays once.
-    if (jap_rom_status == -1)
-    {
-        j_rom0.init(0x40000);
-        j_rom1.init(0x40000);
-    }
+    // Overwrites rom0 / rom1 with the Japanese chip data. Caller is expected
+    // to have already run load_revb_roms (rom0 / rom1 .init() needs to have
+    // happened; the buffers are reused in place). Engine code that depends
+    // on region-shifted offsets routes them through Outrun::Adr — see
+    // select_course(jap=true) for the constant fan-out.
+    int status = 0;
 
-    // If incremented, a rom has failed to load.
-    jap_rom_status = 0;
+    // Master CPU ROMs
+    status += LOAD(rom0, ("epr-10380.133", 0x00000, 0x10000, 0xe339e87a, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10382.118", 0x00001, 0x10000, 0x65248dd5, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10381.132", 0x20000, 0x10000, 0xbe8c412b, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10383.117", 0x20001, 0x10000, 0xdcc586e7, RomLoader::INTERLEAVE2, VERBOSE));
 
-    // Load Master CPU ROMs     
-    jap_rom_status += LOAD(j_rom0, ("epr-10380.133", 0x00000, 0x10000, 0xe339e87a, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom0, ("epr-10382.118", 0x00001, 0x10000, 0x65248dd5, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom0, ("epr-10381.132", 0x20000, 0x10000, 0xbe8c412b, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom0, ("epr-10383.117", 0x20001, 0x10000, 0xdcc586e7, RomLoader::INTERLEAVE2, VERBOSE));
+    // Slave CPU ROMs
+    status += LOAD(rom1, ("epr-10327.76", 0x00000, 0x10000, 0xda99d855, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10329.58", 0x00001, 0x10000, 0xfe0fa5e2, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10328.75", 0x20000, 0x10000, 0x3c0e9a7f, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10330.57", 0x20001, 0x10000, 0x59786e99, RomLoader::INTERLEAVE2, VERBOSE));
 
-    // Load Slave CPU ROMs        
-    jap_rom_status += LOAD(j_rom1, ("epr-10327.76", 0x00000, 0x10000, 0xda99d855, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom1, ("epr-10329.58", 0x00001, 0x10000, 0xfe0fa5e2, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom1, ("epr-10328.75", 0x20000, 0x10000, 0x3c0e9a7f, RomLoader::INTERLEAVE2, VERBOSE));
-    jap_rom_status += LOAD(j_rom1, ("epr-10330.57", 0x20001, 0x10000, 0x59786e99, RomLoader::INTERLEAVE2, VERBOSE));
-    // If status has been incremented, a rom has failed to load.
-    return jap_rom_status == 0;
+    return status == 0;
 }
 
 int Roms::load_pcm_rom(bool fixed_rom)

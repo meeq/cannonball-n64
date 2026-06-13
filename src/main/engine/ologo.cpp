@@ -211,7 +211,7 @@ void OLogo::sprite_logo_bird1()
 
     // Set Bird X Value
     uint16_t index = (e->counter << 1) & 0xFF;
-    int8_t bird_x = roms.rom0.read8(DATA_MOVEMENT + index); // Note we sign the value here
+    int8_t bird_x = roms.rom0p->read8(DATA_MOVEMENT + index); // Note we sign the value here
     int8_t zoom = bird_x >> 3;
     e->x = (bird_x >> 3) + 8;
 
@@ -220,7 +220,7 @@ void OLogo::sprite_logo_bird1()
 
     // Set Bird Y Value
     index = (index << 1) & 0xFF;
-    int8_t bird_y = roms.rom0.read8(DATA_MOVEMENT + index); // Note we sign the value here
+    int8_t bird_y = roms.rom0p->read8(DATA_MOVEMENT + index); // Note we sign the value here
     e->y = (bird_y >> 5) + 0x4E - y_off;
 
     // Set Frame
@@ -237,7 +237,7 @@ void OLogo::sprite_logo_bird2()
 
     // Set Bird X Value
     uint16_t index = (e->counter << 1) & 0xFF;
-    int8_t bird_x = roms.rom0.read8(DATA_MOVEMENT + index); // Note we sign the value here
+    int8_t bird_x = roms.rom0p->read8(DATA_MOVEMENT + index); // Note we sign the value here
     int8_t zoom = bird_x >> 3;
     e->x = (bird_x >> 3) - 2; // Different from sprite_logo_bird1
 
@@ -246,7 +246,7 @@ void OLogo::sprite_logo_bird2()
 
     // Set Bird Y Value
     index = (index << 1) & 0xFF;
-    int8_t bird_y = roms.rom0.read8(DATA_MOVEMENT + index); // Note we sign the value here
+    int8_t bird_y = roms.rom0p->read8(DATA_MOVEMENT + index); // Note we sign the value here
     e->y = (bird_y >> 5) + 0x52 - y_off; // Different from sprite_logo_bird1
 
     // Set Frame

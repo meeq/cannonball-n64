@@ -890,7 +890,7 @@ void OSprites::set_hrender(oentry* input, osprite* output, uint16_t offset, uint
 void OSprites::move_sprite(oentry* sprite, uint8_t shift)
 {
     uint32_t addr = SPRITE_ZOOM_LOOKUP + (((sprite->z >> 16) << 2) | sprite_scroll_speed);
-    uint32_t value = roms.rom0.read32(addr) >> shift;
+    uint32_t value = roms.rom0p->read32(addr) >> shift;
 
     if (config.tick_fps == 60)
         value >>= 1;

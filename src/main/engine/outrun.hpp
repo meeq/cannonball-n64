@@ -169,7 +169,26 @@ struct adr_t
     uint32_t road_seg_table;
     uint32_t road_seg_end;
     uint32_t road_seg_split;
-    
+
+    // Direct-access constants whose Japan offsets differ from World. Routed
+    // through here so the engine can read region-correct values when rom0
+    // holds Japanese data. Tables that are physically identical between
+    // regions (DATA_MOVEMENT, MOVEMENT_LOOKUP_Z, MAP_Y_TO_FRAME,
+    // H_SCROLL_TABLE — all in upper-half rom0) intentionally don't appear
+    // here; the bare constants remain valid in both regions.
+    uint32_t pal_sky_table;
+    uint32_t pal_gnd_table;
+    uint32_t pal_hud_src;
+    uint32_t pal_tilemap_src;
+    uint32_t pal_tilemap_data;
+    uint32_t tiles_page_fg1;
+    uint32_t tiles_page_bg1;
+    uint32_t tiles_page_fg2;
+    uint32_t tiles_page_bg2;
+    uint32_t tiles_minicars1;
+    uint32_t tiles_alphabet;
+    uint32_t map_route_lookup;
+
     // CPU 1
     uint32_t road_height_lookup;
 };

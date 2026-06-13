@@ -506,7 +506,8 @@ void OCrash::do_bump()
     spr_ferrari->zoom = 0x80;           // Set Entry Number For Zoom Lookup Table
     spr_ferrari->priority = 0x1FD;
     
-    int16_t new_position = (int8_t) roms.rom0.read8(DATA_MOVEMENT + (lookup_index << 3));
+    // DATA_MOVEMENT is in upper-half rom0 — identical between regions.
+    int16_t new_position = (int8_t) roms.rom0p->read8(DATA_MOVEMENT + (lookup_index << 3));
 
     if (new_position)
         crash_z = spr_ferrari->counter;

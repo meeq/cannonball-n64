@@ -400,15 +400,15 @@ void OLevelObjs::sprite_normal(oentry *sprite, uint8_t zoom)
     // H-Flip - swap x co-ordinates
     if (sprite->control & OSprites::HFLIP)
     {
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
         x2 = -x2;
         x1 = -x1;
     }
     else
     {
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
     }
 
     // If off left hand side or off right hand side of screen
@@ -444,15 +444,15 @@ void OLevelObjs::sprite_lights(oentry *sprite)
     // H-Flip - swap x co-ordinates
     if (sprite->control & OSprites::HFLIP)
     {
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
         x2 = -x2;
         x1 = -x1;
     }
     else
     {
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
     }
 
     // If off left hand side or off right hand side of screen
@@ -566,15 +566,15 @@ void OLevelObjs::sprite_collision_z1c(oentry* sprite)
     // H-Flip - swap x co-ordinates
     if (sprite-> control & OSprites::HFLIP)
     {
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
         x2 = -x2;
         x1 = -x1;
     }
     else
     {
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
     }
 
     int16_t centre = (x2 - x1) >> 1; // d0
@@ -753,8 +753,8 @@ void OLevelObjs::sprite_minitree(oentry* sprite)
     else
     {
         z <<= 1; // Note we can't use original z16, so don't try to optimize this
-        uint8_t offset = roms.rom0.read8(MAP_Y_TO_FRAME + z);
-        sprite->zoom = roms.rom0.read8(MAP_Y_TO_FRAME + z + 1);
+        uint8_t offset = roms.rom0p->read8(MAP_Y_TO_FRAME + z);
+        sprite->zoom = roms.rom0p->read8(MAP_Y_TO_FRAME + z + 1);
         sprite->addr = roms.rom0p->read32(outrun.adr.sprite_minitree + offset);
     }
     // order_sprites
@@ -780,15 +780,15 @@ void OLevelObjs::sprite_debris(oentry* sprite)
     // H-Flip - swap x co-ordinates
     if (sprite->control & OSprites::HFLIP)
     {
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
         x2 = -x2;
         x1 = -x1;
     }
     else
     {
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
     }
 
     // If off left hand side or off right hand side of screen
@@ -880,9 +880,9 @@ void OLevelObjs::sprite_clouds(oentry* sprite)
     {
         // 41f8
         z <<= 1;
-        uint8_t lookup_z = roms.rom0.read8(MOVEMENT_LOOKUP_Z + z);
+        uint8_t lookup_z = roms.rom0p->read8(MOVEMENT_LOOKUP_Z + z);
         sprite->addr = roms.rom0p->read32(outrun.adr.sprite_cloud + lookup_z);
-        sprite->zoom = roms.rom0.read8(MOVEMENT_LOOKUP_Z + z + 1);
+        sprite->zoom = roms.rom0p->read8(MOVEMENT_LOOKUP_Z + z + 1);
     }
     // end
     osprites.map_palette(sprite);
@@ -976,15 +976,15 @@ void OLevelObjs::sprite_rocks(oentry *sprite)
     // H-Flip - swap x co-ordinates
     if (sprite->control & OSprites::HFLIP)
     {
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
         x2 = -x2;
         x1 = -x1;
     }
     else
     {
-        x1 = (int16_t) roms.rom0.read16(&offset_addr);
-        x2 = (int16_t) roms.rom0.read16(&offset_addr);
+        x1 = (int16_t) roms.rom0p->read16(&offset_addr);
+        x2 = (int16_t) roms.rom0p->read16(&offset_addr);
     }
 
     // If off left hand side or off right hand side of screen

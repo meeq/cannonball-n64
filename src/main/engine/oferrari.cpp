@@ -913,8 +913,8 @@ void OFerrari::set_passenger_sprite(oentry* sprite)
 
     sprite->pal_src = pal;
     uint32_t offset_table = ((sprite == spr_pass1) ? PASS1_OFFSET : PASS2_OFFSET) + frame;
-    sprite->x = spr_ferrari->x + roms.rom0.read16(&offset_table);
-    sprite->y = spr_ferrari->y + roms.rom0.read16(offset_table);
+    sprite->x = spr_ferrari->x + roms.rom0p->read16(&offset_table);
+    sprite->y = spr_ferrari->y + roms.rom0p->read16(offset_table);
     
     sprite->zoom = 0x7F;
     sprite->draw_props = 8;
