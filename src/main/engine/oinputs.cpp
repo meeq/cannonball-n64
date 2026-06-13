@@ -46,6 +46,13 @@ void OInputs::init()
     coin2       = false;
 }
 
+void OInputs::reset_press_state()
+{
+    input_acc   = 0;
+    input_brake = 0;
+    delay1 = delay2 = delay3 = DELAY_RESET;
+}
+
 void OInputs::tick()
 {
     // Digital Controls: Simulate Analog

@@ -185,6 +185,15 @@ void HWRoad::decode_road(const uint8_t* src_road)
     }
 }
 
+void HWRoad::reset()
+{
+    for (uint16_t i = 0; i < ROAD_RAM_SIZE / 2; i++)
+    {
+        ram[i] = 0;
+        ramBuff[i] = 0;
+    }
+}
+
 // Writes go to RAM, but we read from the RAM Buffer.
 void HWRoad::write16(uint32_t adr, const uint16_t data)
 {

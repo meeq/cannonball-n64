@@ -112,6 +112,12 @@ namespace
         T_COUNT
     };
 
+    // REGION (jap/world toggle) is gated behind is_memory_expanded() — Japan
+    // mode needs both World + Japanese rom0/rom1 loaded simultaneously because
+    // the engine reads palette tables off the World rom (no per-region offsets
+    // exist for many constants) while the CPU code paths use the Japanese set.
+    // Two 256 KiB rom sets blow the 4 MiB budget; on 8 MiB (Expansion Pak) the
+    // headroom is fine. O_REGION stays at index 0 so menu layout stays stable.
     enum opt_row_t
     {
         O_REGION = 0,
@@ -122,6 +128,8 @@ namespace
         O_CHEATS,
         O_COUNT
     };
+
+    inline bool region_row_visible() { return is_memory_expanded(); }
 
     enum pill_t
     {
@@ -273,13 +281,20 @@ namespace
     {
         g_options.bg                       = load_named("options_bg");
         g_options.caret                    = load_named("caret");
-        g_options.labels[O_REGION]         = load_named("region");
+        // REGION sprites only load when Expansion Pak is present — saves ~20 KiB
+        // peak transient on 4 MiB consoles, and means the row index 0 slot in
+        // labels[] is intentionally null on baseline. draw_options skips it
+        // when region_row_visible() is false.
+        if (region_row_visible())
+        {
+            g_options.labels[O_REGION]     = load_named("region");
+            g_options.world                = load_named("world");
+            g_options.japan                = load_named("japan");
+        }
         g_options.labels[O_TIME]           = load_named("time");
         g_options.labels[O_TRAFFIC]        = load_named("traffic");
         g_options.labels[O_COLOR]          = load_named("color");
         g_options.labels[O_TRANSMISSION]   = load_named("transmission");
-        g_options.world                    = load_named("world");
-        g_options.japan                    = load_named("japan");
         g_options.off                      = load_named("off");
         g_options.diff[0]                  = load_named("easy");
         g_options.diff[1]                  = load_named("normal");
@@ -357,7 +372,10 @@ namespace
     {
         std::memset(&s, 0, sizeof(s));
         s.version          = 1;
-        s.jap              = config.engine.jap        ? 1 : 0;
+        // jap only persists on Expansion Pak — on baseline the field is forced
+        // to 0 so a console that loses its Expansion Pak between boots can't
+        // wake up in Japan mode with only World roms loaded.
+        s.jap              = (region_row_visible() && config.engine.jap) ? 1 : 0;
         s.prototype        = config.engine.prototype  ? 1 : 0;
         s.fps_mode         = config.video.fps & 0x3;
         s.widescreen       = config.video.widescreen  ? 1 : 0;
@@ -663,10 +681,16 @@ namespace
         rdpq_set_prim_color(COL_WHITE);
         rdpq_sprite_blit(g_options.bg, 0, 0, nullptr);
 
-        // Top 5 rows.
-        for (int i = 0; i < 5; ++i)
+        // Top rows. REGION (i=0) only paints on Expansion Pak; on baseline the
+        // remaining rows shift up by one slot so TIME sits at the top instead
+        // of leaving a blank row. CHEATS keeps its absolute Y (PILL_Y = 193).
+        const int first_row = region_row_visible() ? O_REGION : O_TIME;
+        auto row_y = [&](int row) {
+            return OPT_Y0 + (row - first_row) * OPT_STRIDE;
+        };
+        for (int i = first_row; i < 5; ++i)
         {
-            const float y = OPT_Y0 + i * OPT_STRIDE;
+            const float y = row_y(i);
             const color_t tint = (selected == i) ? COL_HIGHLIGHT : COL_WHITE;
             blit_tinted(g_options.labels[i], OPT_X, y, tint);
             sprite_t* val = options_value(i);
@@ -679,11 +703,10 @@ namespace
             }
         }
 
-        // Row caret on the active top-5 row (left side, ▶).
+        // Row caret on the active top-row (left side, ▶).
         if (selected < 5)
         {
-            const float row_y  = OPT_Y0 + selected * OPT_STRIDE;
-            const float row_cy = row_y + OPT_LABEL_H * 0.5f;
+            const float row_cy = row_y(selected) + OPT_LABEL_H * 0.5f;
             const float cx     = OPT_X - CARET_GAP - CARET_DIM * 0.5f;
             blit_caret(g_options.caret, cx, row_cy, CARET_RIGHT, COL_HIGHLIGHT);
         }
@@ -715,7 +738,12 @@ namespace
 
     void run_options()
     {
-        int selected = O_REGION;
+        // REGION row is the first selection only when it's actually rendered.
+        // Wraparound skips it on baseline so DOWN→DOWN→…→UP from O_CHEATS lands
+        // on O_TRANSMISSION (not the hidden REGION) and UP from O_TIME wraps to
+        // O_CHEATS.
+        const int first_row = region_row_visible() ? O_REGION : O_TIME;
+        int selected = first_row;
         int pill_selected = 0;
 
         while (true)
@@ -725,12 +753,14 @@ namespace
 
             if (input.has_pressed(Input::DOWN))
             {
-                selected = (selected + 1) % O_COUNT;
+                selected += 1;
+                if (selected >= O_COUNT) selected = first_row;
                 play_sfx(&g_sfx_beep1);
             }
             else if (input.has_pressed(Input::UP))
             {
-                selected = (selected + O_COUNT - 1) % O_COUNT;
+                selected -= 1;
+                if (selected < first_row) selected = O_COUNT - 1;
                 play_sfx(&g_sfx_beep1);
             }
 
@@ -792,7 +822,7 @@ void apply_saved_settings()
     saved_settings_v1 s;
     if (!n64save::load_settings(s)) return;
 
-    config.engine.jap             = s.jap;
+    config.engine.jap             = region_row_visible() ? s.jap : 0;
     config.engine.prototype       = 0;
     config.video.fps              = s.fps_mode;
     config.video.widescreen       = 0;

@@ -9,6 +9,11 @@ public:
     ~HWRoad();
 
     void init(const uint8_t*, const bool hires);
+    // Zero both halves of road RAM. ORoad::clear_road_ram only writes
+    // scanlines 0..0xDF on the engine-write side, so the read-side data1
+    // region (and any unscanned slots) keeps prior-session values whose
+    // 0x800 solid-fill bit makes render_rdp_background paint stale bands.
+    void reset();
     void write16(uint32_t adr, const uint16_t data);
     void write16(uint32_t* adr, const uint16_t data);
     void write32(uint32_t* adr, const uint32_t data);

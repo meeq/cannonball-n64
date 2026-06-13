@@ -17,6 +17,7 @@
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
 #include "hwroad_rdp_rsp.hpp"
+#include "../hwvideo/hwroad.hpp"
 #include "../hwvideo/hwsprites.hpp"
 
 #include "../main.hpp"
@@ -29,6 +30,8 @@
 #include "../engine/oinputs.hpp"
 #include "../engine/ooutputs.hpp"
 #include "../engine/omusic.hpp"
+#include "../engine/oroad.hpp"
+#include "../engine/ostats.hpp"
 #include "../engine/otiles.hpp"
 #include "../engine/audio/osoundint.hpp"
 #include "../engine/audio/commands.hpp"
@@ -148,6 +151,49 @@ namespace
                     if (input.has_pressed(Input::TIMER)) outrun.freeze_timer = !outrun.freeze_timer;
                     if (input.has_pressed(Input::PAUSE)) pause_engine = !pause_engine;
                     if (input.has_pressed(Input::MENU))  state = STATE_INIT_MENU;
+
+                    // B = "back" while the engine is in attract or music
+                    // select. Once gameplay starts (GS_INIT_GAME onward) B
+                    // reverts to its arcade role (BRAKE), so the predicate
+                    // intentionally excludes everything past GS_MUSIC.
+                    if (input.has_pressed(Input::BRAKE))
+                    {
+                        const int gs = outrun.game_state;
+                        const bool in_attract =
+                            (gs == GS_INIT      || gs == GS_ATTRACT
+                          || gs == GS_INIT_BEST1 || gs == GS_BEST1
+                          || gs == GS_INIT_LOGO  || gs == GS_LOGO);
+                        const bool in_music   =
+                            (gs == GS_INIT_MUSIC || gs == GS_MUSIC);
+                        if (in_attract)
+                        {
+                            // Attract loop → boot menu.
+                            osoundint.queue_sound(sound::FM_RESET);
+                            cannonball::audio.clear_wav();
+                            state = STATE_REENTER_BOOT_MENU;
+                        }
+                        else if (in_music)
+                        {
+                            osoundint.queue_sound(sound::BEEP2);
+                            osoundint.queue_sound(sound::FM_RESET);
+                            cannonball::audio.clear_wav();
+                            if (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
+                            {
+                                // TT music select → stage selector.
+                                state = STATE_INIT_TTRIAL_SELECT;
+                            }
+                            else
+                            {
+                                // Arcade/continuous music select → attract.
+                                // Tear down music-select sprites/palette,
+                                // drop the credit that brought us here, and
+                                // re-enter init_attract via GS_INIT.
+                                omusic.disable();
+                                ostats.credits = 0;
+                                outrun.game_state = GS_INIT;
+                            }
+                        }
+                    }
                 }
                 if (!pause_engine || input.has_pressed(Input::STEP))
                 {
@@ -165,6 +211,15 @@ namespace
             case STATE_INIT_GAME:
                 tick_frame   = true;
                 pause_engine = false;
+                // Continuous mode reads otraffic.cpp's per-stage density from
+                // outrun.custom_traffic (set_max_traffic falls through to it
+                // for any non-ORIGINAL mode). The desktop sets this in
+                // frontend/menu.cpp before launching CONT, but menu.cpp isn't
+                // in the N64 build — so without this line, dip_traffic gets
+                // ignored and CONT plays with whatever last touched it
+                // (0 = silent road on cold boot).
+                if (outrun.cannonball_mode == Outrun::MODE_CONT)
+                    outrun.custom_traffic = config.cont_traffic;
                 outrun.init();
                 // Advance the engine through GS_INIT → GS_INIT_MUSIC →
                 // GS_MUSIC (and a few GS_MUSIC ticks) without rendering, so
@@ -181,6 +236,14 @@ namespace
                 break;
 
             case STATE_INIT_TTRIAL_SELECT:
+                // Force the same iteration's STATE_TTRIAL_SELECT fall-through
+                // to call g_ttrial.tick (which runs INIT_COURSEMAP →
+                // omap.init → write_tilemap_hw). At 60Hz display / 30Hz
+                // engine we flip tick_frame every other frame; if we
+                // entered here on an off-tick, the first render would paint
+                // with text_ram still zeroed (no tile coverage), exposing
+                // whatever the previous mode left in the cycled framebuffer.
+                tick_frame = true;
                 // Engine subsystems the TT screen depends on but doesn't set
                 // up itself. The desktop Menu::init prelude does these for
                 // free; on N64 we skip Menu entirely so we cover them here.
@@ -188,8 +251,41 @@ namespace
                 osoundint.has_booted = true;
                 osoundint.init();
                 cannonball::audio.clear_wav();
+                // Wipe leftover engine + hardware state from a prior
+                // arcade/continuous session before painting the course-map
+                // screen. The desktop's Menu::init covers this in one place;
+                // on N64 we mirror its individual resets here. Without these,
+                // hwroad/hwsprites/hwtiles all keep replaying the attract
+                // mode's last frame underneath the course map (sky bands,
+                // cloud sprites, stage-1 tiles). On a fresh boot these are
+                // all no-ops because the buffers are already BSS-zero.
+                video.sprite_layer->reset();
+                hwroad.reset();
+                video.clear_tile_ram();
+                video.clear_text_ram();
+                oroad.init();
+                // OTiles::scroll_tilemaps runs (and writes a non-zero V-
+                // scroll from oroad.horizon_y_bak) for several game_state
+                // values including GS_ATTRACT. After arcade attract that's
+                // the engine's last-seen state; GS_INIT short-circuits the
+                // function so the tilemap stays at v=0 and fully covers
+                // the road background sand. Fresh-boot is safe because the
+                // BSS-zero default (GS_INIT) already trips the early-out.
+                outrun.game_state = GS_INIT;
                 g_ttrial.init();
                 state = STATE_TTRIAL_SELECT;
+                // Suppress carried-over presses so a button held since the
+                // boot menu (typically A confirming "TIME TRIALS") doesn't
+                // immediately confirm the default stage in TTrial::tick.
+                //   * Input::frame_done syncs keys_old←keys so has_pressed
+                //     reports false until the player releases + re-presses.
+                //   * OInputs::reset_press_state rearms the analog-accel
+                //     debounce so is_analog_select doesn't fire on its
+                //     first call (it counts down from delay3, which init()
+                //     leaves at 0). Player has DELAY_RESET ticks to release
+                //     A before the held-hold path also triggers.
+                input.frame_done();
+                oinputs.reset_press_state();
                 // fall through
             case STATE_TTRIAL_SELECT:
             {
@@ -238,6 +334,18 @@ namespace
                 n64::boot_menu::run();
                 cannonball::audio.init();
                 cannonball::audio.prime_mixer_buffers();
+                // boot_menu::run clears the framebuffers but leaves engine
+                // state (hwroad/hwsprites/hwtiles/text_ram) holding arcade
+                // attract leftovers. STATE_INIT_TTRIAL_SELECT /
+                // STATE_INIT_GAME run on the NEXT iteration, so the
+                // prepare/render pair that runs between them and this case
+                // would otherwise paint those leftovers into the freshly
+                // black framebuffer for one frame. Wipe the hardware
+                // buffers here so that intermediate paint is a no-op.
+                video.sprite_layer->reset();
+                hwroad.reset();
+                video.clear_tile_ram();
+                video.clear_text_ram();
                 state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
                           ? STATE_INIT_TTRIAL_SELECT
                           : STATE_INIT_GAME;
@@ -354,6 +462,26 @@ int main(int /*argc*/, char* /*argv*/[])
     {
         debugf("ROM load failed — DFS payload likely missing.\n");
         while (1) { /* halt */ }
+    }
+
+    // Japanese romset adds another 512 KiB (j_rom0 + j_rom1). Only load it on
+    // Expansion Pak, where headroom is plentiful; on baseline 4 MiB it would
+    // OOM at video.init / atlas. select_course gracefully degrades to World
+    // because config.engine.jap is forced to 0 in apply_saved_settings when
+    // !is_memory_expanded(). If the cart was built without the J roms in DFS
+    // we also clamp jap=0 so the engine doesn't dereference uninitialised
+    // j_rom0 via the rom0p indirection.
+    if (is_memory_expanded())
+    {
+        if (!roms.load_japanese_roms())
+        {
+            debugf("Japanese ROMs not found — Japan mode unavailable.\n");
+            config.engine.jap = 0;
+        }
+    }
+    else
+    {
+        config.engine.jap = 0;
     }
 
 #if CANNONBALL_LOG_HEAP

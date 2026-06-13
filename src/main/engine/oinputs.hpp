@@ -42,6 +42,13 @@ public:
     ~OInputs(void);
 
     void init();
+    // Reset the analog-press debounce so is_analog_l/r/select don't fire on
+    // the very next call. init() leaves delay1..3 at 0, so the first call
+    // with input_acc > 0x90 (eg. A still held from a menu transition)
+    // decrements straight to -1 and returns true immediately. Front-ends
+    // that drop the player into a screen reading is_analog_select call
+    // this on entry to enforce a fresh hold.
+    void reset_press_state();
     void tick();
     void adjust_inputs();
     void do_gear();
