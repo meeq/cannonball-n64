@@ -74,7 +74,7 @@ void OMusic::enable()
     ostats.frame_counter      = ostats.frame_reset;  
      
     blit_music_select();
-    ohud.blit_text2(TEXT2_SELECT_MUSIC); // Select Music By Steering
+    ohud.blit_text2(outrun.adr.text2_select_music); // Select Music By Steering
   
     osoundint.queue_sound(sound::RESET);
     if (!config.sound.preview)
@@ -222,7 +222,7 @@ void OMusic::tick()
     // Animated EQ Sprite (Cycle the graphical equalizer on the radio)
     oentry *e = &osprites.jump_table[entry_start + 1];
     e->reload++; // Increment palette entry
-    e->pal_src = roms.rom0p->read8((e->reload & 0x3E) >> 1 | MUSIC_EQ_PAL);
+    e->pal_src = roms.rom0p->read8((e->reload & 0x3E) >> 1 | outrun.adr.music_eq_pal);
     osprites.map_palette(e);
     osprites.do_spr_order_shadows(e);
 
@@ -303,7 +303,7 @@ void OMusic::tick_original(oentry* fm, oentry* dial, oentry* hand)
     if (oinputs.steering_adjust + 0x80 <= 0x55)
     {                
         set_hand(HAND_LEFT, fm, dial, hand);
-        ohud.blit_text2(TEXT2_MAGICAL);
+        ohud.blit_text2(outrun.adr.text2_magical);
         video.write_text32(0x1105C0, NOTE_TILES1);
         video.write_text32(0x110640, NOTE_TILES2);
         music_selected = 0;
@@ -312,7 +312,7 @@ void OMusic::tick_original(oentry* fm, oentry* dial, oentry* hand)
     else if (oinputs.steering_adjust + 0x80 <= 0xAA)
     {
         set_hand(HAND_CENTRE, fm, dial, hand);
-        ohud.blit_text2(TEXT2_BREEZE);
+        ohud.blit_text2(outrun.adr.text2_breeze);
         video.write_text32(0x1105C6, NOTE_TILES1);
         video.write_text32(0x110646, NOTE_TILES2);
         music_selected = 1;
@@ -321,7 +321,7 @@ void OMusic::tick_original(oentry* fm, oentry* dial, oentry* hand)
     else
     {
         set_hand(HAND_RIGHT, fm, dial, hand);
-        ohud.blit_text2(TEXT2_SPLASH);
+        ohud.blit_text2(outrun.adr.text2_splash);
         video.write_text32(0x1105C8, NOTE_TILES1);
         video.write_text32(0x110648, NOTE_TILES2);
         music_selected = 2;

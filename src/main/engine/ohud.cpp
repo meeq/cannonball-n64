@@ -36,37 +36,37 @@ OHud::~OHud(void)
 // Source: 0xB462
 void OHud::draw_main_hud()
 {
-    blit_text1(HUD_LAP1);
-    blit_text1(HUD_LAP2);
+    blit_text1(outrun.adr.hud_lap1);
+    blit_text1(outrun.adr.hud_lap2);
 
     if (outrun.cannonball_mode == Outrun::MODE_ORIGINAL)
     {
-        blit_text1(HUD_TIME1);
-        blit_text1(HUD_TIME2);
-        blit_text1(HUD_SCORE1);
-        blit_text1(HUD_SCORE2);
-        blit_text1(HUD_STAGE1);
-        blit_text1(HUD_STAGE2);
-        blit_text1(HUD_ONE);
+        blit_text1(outrun.adr.hud_time1);
+        blit_text1(outrun.adr.hud_time2);
+        blit_text1(outrun.adr.hud_score1);
+        blit_text1(outrun.adr.hud_score2);
+        blit_text1(outrun.adr.hud_stage1);
+        blit_text1(outrun.adr.hud_stage2);
+        blit_text1(outrun.adr.hud_one);
         do_mini_map();
     }
     else if (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
     {
         draw_score(translate(3, 2), 0, 2);
-        blit_text1(2, 1, HUD_SCORE1);
-        blit_text1(2, 2, HUD_SCORE2);
+        blit_text1(2, 1, outrun.adr.hud_score1);
+        blit_text1(2, 2, outrun.adr.hud_score2);
         blit_text_big(4, "TIME TO BEAT");
         draw_lap_timer(translate(16, 7), outrun.ttrial.best_lap, outrun.ttrial.best_lap[2]);
     }
     else if (outrun.cannonball_mode == Outrun::MODE_CONT)
     {
-        blit_text1(HUD_TIME1);
-        blit_text1(HUD_TIME2);
-        blit_text1(HUD_SCORE1);
-        blit_text1(HUD_SCORE2);
-        blit_text1(HUD_STAGE1);
-        blit_text1(HUD_STAGE2);
-        blit_text1(HUD_ONE);
+        blit_text1(outrun.adr.hud_time1);
+        blit_text1(outrun.adr.hud_time2);
+        blit_text1(outrun.adr.hud_score1);
+        blit_text1(outrun.adr.hud_score2);
+        blit_text1(outrun.adr.hud_stage1);
+        blit_text1(outrun.adr.hud_stage2);
+        blit_text1(outrun.adr.hud_one);
     }
 }
 
@@ -115,7 +115,7 @@ uint32_t OHud::setup_mini_map()
         0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
     };
 
-    return TILES_MINIMAP + (ROUTE_MAPPING[ostats.route_info] << 2);
+    return outrun.adr.tiles_minimap + (ROUTE_MAPPING[ostats.route_info] << 2);
 } 
 
 void OHud::draw_mini_map(uint32_t tile_addr)
@@ -457,8 +457,8 @@ void OHud::blit_large_digit(uint32_t* addr, uint8_t digit)
 
 void OHud::draw_copyright_text()
 {
-    blit_text1(TEXT1_1986_SEGA);
-    blit_text1(TEXT1_COPYRIGHT);
+    blit_text1(outrun.adr.text1_1986_sega);
+    blit_text1(outrun.adr.text1_copyright);
 }
 
 // Draw Insert Coin text
@@ -474,12 +474,12 @@ void OHud::draw_insert_coin()
         {
             if (outrun.tick_counter & BIT_4)
             {
-                blit_text1(TEXT1_PRESS_START);
+                blit_text1(outrun.adr.text1_press_start);
                 outrun.outputs->set_digital(OOutputs::D_START_LAMP);
             }
             else
             {
-                blit_text1(TEXT1_CLEAR_START);
+                blit_text1(outrun.adr.text1_clear_start);
                 outrun.outputs->clear_digital(OOutputs::D_START_LAMP);
             }
         }
@@ -505,7 +505,7 @@ void OHud::draw_insert_coin()
             }
             else
             {
-                blit_text1((outrun.tick_counter & BIT_4) ? TEXT1_INSERT_COINS : TEXT1_CLEAR_COINS);
+                blit_text1((outrun.tick_counter & BIT_4) ? outrun.adr.text1_insert_coins : outrun.adr.text1_clear_coins);
             }
         }
     }
@@ -516,12 +516,12 @@ void OHud::draw_credits()
 {
     if (config.engine.freeplay)
     {
-        blit_text1(TEXT1_FREEPLAY);
+        blit_text1(outrun.adr.text1_freeplay);
     }
     else
     {
         video.write_text16(0x110D44, ostats.credits | 0x8630); // blit digit
-        blit_text1(ostats.credits >= 2 ? TEXT1_CREDITS : TEXT1_CREDIT);
+        blit_text1(ostats.credits >= 2 ? outrun.adr.text1_credits : outrun.adr.text1_credit);
     }
 }
 

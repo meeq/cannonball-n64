@@ -22,84 +22,123 @@
 
 // Text: Credits
 const uint16_t TEXT1_CREDIT  = 0x6D38;
+const uint32_t TEXT1_CREDIT_J = 0x6c6a; // (TEXT1_CREDIT -0xce for Japan rom0)
 const uint16_t TEXT1_CREDITS = 0x6D48;
+const uint32_t TEXT1_CREDITS_J = 0x6c7a; // (TEXT1_CREDITS -0xce for Japan rom0)
 const uint16_t TEXT1_CLEAR_CREDITS = 0x6D58;
+const uint32_t TEXT1_CLEAR_CREDITS_J = 0x6c8a; // (TEXT1_CLEAR_CREDITS -0xce for Japan rom0)
 const uint16_t TEXT1_FREEPLAY = 0x6D6C;
+const uint32_t TEXT1_FREEPLAY_J = 0x6c9e; // (TEXT1_FREEPLAY -0xce for Japan rom0)
 
 // Text: Course Map
 const uint16_t TEXT2_COURSEMAP = 0xBBC2;
+const uint32_t TEXT2_COURSEMAP_J = 0xb9be; // (TEXT2_COURSEMAP -0x204 for Japan rom0)
 
 // Text: Press Start
 const uint16_t TEXT1_PRESS_START = 0xBBD0;
+const uint32_t TEXT1_PRESS_START_J = 0xb9cc; // (TEXT1_PRESS_START -0x204 for Japan rom0)
 const uint16_t TEXT1_CLEAR_START = 0xBBEC;
+const uint32_t TEXT1_CLEAR_START_J = 0xb9e8; // (TEXT1_CLEAR_START -0x204 for Japan rom0)
 
 // Text: Insert Coins
 const uint16_t TEXT1_INSERT_COINS = 0xBC08;
+const uint32_t TEXT1_INSERT_COINS_J = 0xba04; // (TEXT1_INSERT_COINS -0x204 for Japan rom0)
 const uint16_t TEXT1_CLEAR_COINS  = 0xBC1E;
+const uint32_t TEXT1_CLEAR_COINS_J = 0xba1a; // (TEXT1_CLEAR_COINS -0x204 for Japan rom0)
 
 // Text: Game Over
 const uint16_t TEXT2_GAMEOVER = 0xBCB0;
+const uint32_t TEXT2_GAMEOVER_J = 0xbaac; // (TEXT2_GAMEOVER -0x204 for Japan rom0)
 
 // Text: Select Music By Steering
 const uint16_t TEXT2_SELECT_MUSIC = 0xBCBE;
+const uint32_t TEXT2_SELECT_MUSIC_J = 0xbaba; // (TEXT2_SELECT_MUSIC -0x204 for Japan rom0)
 
 // Text: 1986 Sega
 const uint16_t TEXT1_1986_SEGA = 0xBCF2;
+const uint32_t TEXT1_1986_SEGA_J = 0xbad2; // (TEXT1_1986_SEGA -0x220 for Japan rom0)
 
 // Text: Copyright Symbol
 const uint16_t TEXT1_COPYRIGHT = 0xBD04;
+const uint32_t TEXT1_COPYRIGHT_J = 0xbae4; // (TEXT1_COPYRIGHT -0x220 for Japan rom0)
 
 // Text: Magical Sound Shower
 const uint16_t TEXT2_MAGICAL = 0xCE04;
+const uint32_t TEXT2_MAGICAL_J = 0xcbe2; // (TEXT2_MAGICAL -0x222 for Japan rom0)
 
 // Text: Passing Breeze
 const uint16_t TEXT2_BREEZE = 0xCE1E;
+const uint32_t TEXT2_BREEZE_J = 0xcbfc; // (TEXT2_BREEZE -0x222 for Japan rom0)
 
 // Text: Splash Wave
 const uint16_t TEXT2_SPLASH = 0xCE38;
+const uint32_t TEXT2_SPLASH_J = 0xcc16; // (TEXT2_SPLASH -0x222 for Japan rom0)
 
 // Text: Your Score
 const uint16_t TEXT1_YOURSCORE = 0xD5E0;
+const uint32_t TEXT1_YOURSCORE_J = 0xd39e; // (TEXT1_YOURSCORE -0x242 for Japan rom0)
 
 // Text: Best OutRunners
 const uint16_t TEXT2_BEST_OR = 0xD5F2;
+const uint32_t TEXT2_BEST_OR_J = 0xd3b0; // (TEXT2_BEST_OR -0x242 for Japan rom0)
 
 // Text: Score, Name, Route, Record
 const uint16_t TEXT1_SCORE_ETC = 0xD606;
+const uint32_t TEXT1_SCORE_ETC_J = 0xd3c4; // (TEXT1_SCORE_ETC -0x242 for Japan rom0)
 
 // Text: ABCDEFGHIJKLMNOPQRSTUVWXYZ
 const uint16_t TEXT2_ALPHABET = 0xD5C2;
+const uint32_t TEXT2_ALPHABET_J = 0xd380; // (TEXT2_ALPHABET -0x242 for Japan rom0)
 
 // Text: Extend Time
 const uint16_t TEXT1_EXTEND1 = 0x90DC;
+const uint32_t TEXT1_EXTEND1_J = 0x8f02; // (TEXT1_EXTEND1 -0x1da for Japan rom0)
 const uint16_t TEXT1_EXTEND2 = 0x90F6;
+const uint32_t TEXT1_EXTEND2_J = 0x8f1c; // (TEXT1_EXTEND2 -0x1da for Japan rom0)
 
 // Text: Clear Extend Time
 const uint16_t TEXT1_EXTEND_CLEAR1 = 0x9110;
+const uint32_t TEXT1_EXTEND_CLEAR1_J = 0x8f36; // (TEXT1_EXTEND_CLEAR1 -0x1da for Japan rom0)
 const uint16_t TEXT1_EXTEND_CLEAR2 = 0x912A;
+const uint32_t TEXT1_EXTEND_CLEAR2_J = 0x8f50; // (TEXT1_EXTEND_CLEAR2 -0x1da for Japan rom0)
 
 // Text: Laptime
 const uint16_t TEXT1_LAPTIME1 = 0x9144;
+const uint32_t TEXT1_LAPTIME1_J = 0x8f6a; // (TEXT1_LAPTIME1 -0x1da for Japan rom0)
 const uint16_t TEXT1_LAPTIME2 = 0x9150;
+const uint32_t TEXT1_LAPTIME2_J = 0x8f76; // (TEXT1_LAPTIME2 -0x1da for Japan rom0)
 
 // Text: Clear Laptime
 const uint16_t TEXT1_LAPTIME_CLEAR1 = 0x915C;
+const uint32_t TEXT1_LAPTIME_CLEAR1_J = 0x8f82; // (TEXT1_LAPTIME_CLEAR1 -0x1da for Japan rom0)
 const uint16_t TEXT1_LAPTIME_CLEAR2 = 0x917A;
+const uint32_t TEXT1_LAPTIME_CLEAR2_J = 0x8fa0; // (TEXT1_LAPTIME_CLEAR2 -0x1da for Japan rom0)
 
 // Text: Easter Egg
 const uint16_t TEXT1_EASTER       = 0x91B4;
+const uint32_t TEXT1_EASTER_J = 0x8fda; // (TEXT1_EASTER -0x1da for Japan rom0)
 const uint16_t TEXT1_EASTER_CLEAR = 0x91D6;
+const uint32_t TEXT1_EASTER_CLEAR_J = 0x8ffc; // (TEXT1_EASTER_CLEAR -0x1da for Japan rom0)
 
 // Text: Bonus Points Section
 const uint16_t TEXT2_BONUS_POINTS = 0x9C0C;
+const uint32_t TEXT2_BONUS_POINTS_J = 0x9a32; // (TEXT2_BONUS_POINTS -0x1da for Japan rom0)
 const uint16_t TEXT1_BONUS_STOP   = 0x9C1C;
+const uint32_t TEXT1_BONUS_STOP_J = 0x9a42; // (TEXT1_BONUS_STOP -0x1da for Japan rom0)
 const uint16_t TEXT1_BONUS_SEC    = 0x9C26;
+const uint32_t TEXT1_BONUS_SEC_J = 0x9a4c; // (TEXT1_BONUS_SEC -0x1da for Japan rom0)
 const uint16_t TEXT1_BONUS_X      = 0x9C34;
+const uint32_t TEXT1_BONUS_X_J = 0x9a5a; // (TEXT1_BONUS_X -0x1da for Japan rom0)
 const uint16_t TEXT1_BONUS_PTS    = 0x9C3E;
+const uint32_t TEXT1_BONUS_PTS_J = 0x9a64; // (TEXT1_BONUS_PTS -0x1da for Japan rom0)
 const uint16_t TEXT1_BONUS_100K   = 0x9C4A;
+const uint32_t TEXT1_BONUS_100K_J = 0x9a70; // (TEXT1_BONUS_100K -0x1da for Japan rom0)
 const uint16_t TEXT2_BONUS_CLEAR1 = 0x9C52;
+const uint32_t TEXT2_BONUS_CLEAR1_J = 0x9a78; // (TEXT2_BONUS_CLEAR1 -0x1da for Japan rom0)
 const uint16_t TEXT2_BONUS_CLEAR2 = 0x9C64;
+const uint32_t TEXT2_BONUS_CLEAR2_J = 0x9a8a; // (TEXT2_BONUS_CLEAR2 -0x1da for Japan rom0)
 const uint16_t TEXT2_BONUS_CLEAR3 = 0x9C78;
+const uint32_t TEXT2_BONUS_CLEAR3_J = 0x9a9e; // (TEXT2_BONUS_CLEAR3 -0x1da for Japan rom0)
 
 // ----------------------------------------------------------------------------
 // HUD
@@ -107,26 +146,37 @@ const uint16_t TEXT2_BONUS_CLEAR3 = 0x9C78;
 
 // SCORE Graphic (2 Lines)
 const uint16_t HUD_SCORE1 = 0xBC3E;
+const uint32_t HUD_SCORE1_J = 0xba3a; // (HUD_SCORE1 -0x204 for Japan rom0)
 const uint16_t HUD_SCORE2 = 0xBC4C;
+const uint32_t HUD_SCORE2_J = 0xba48; // (HUD_SCORE2 -0x204 for Japan rom0)
 
 // TIME Graphic (2 Lines)
 const uint16_t HUD_TIME1 = 0xBC5A;
+const uint32_t HUD_TIME1_J = 0xba56; // (HUD_TIME1 -0x204 for Japan rom0)
 const uint16_t HUD_TIME2 = 0xBC66;
+const uint32_t HUD_TIME2_J = 0xba62; // (HUD_TIME2 -0x204 for Japan rom0)
 
 // KPH (2 Lines)
 const uint16_t HUD_KPH1 = 0xBC72;
+const uint32_t HUD_KPH1_J = 0xba6e; // (HUD_KPH1 -0x204 for Japan rom0)
 const uint16_t HUD_KPH2 = 0xBC7E;
+const uint32_t HUD_KPH2_J = 0xba7a; // (HUD_KPH2 -0x204 for Japan rom0)
 
 // STAGE (2 Lines)
 const uint16_t HUD_STAGE1 = 0xBC8A;
+const uint32_t HUD_STAGE1_J = 0xba86; // (HUD_STAGE1 -0x204 for Japan rom0)
 const uint16_t HUD_STAGE2 = 0xBC98;
+const uint32_t HUD_STAGE2_J = 0x8fcc; // (HUD_STAGE2 -0x2ccc for Japan rom0)
 
 // Number "1" to appear after stage
 const uint16_t HUD_ONE = 0xBCA6;
+const uint32_t HUD_ONE_J = 0xbaa2; // (HUD_ONE -0x204 for Japan rom0)
 
 // LAP (2 Lines)
 const uint16_t HUD_LAP1 = 0xBCDA;
+const uint32_t HUD_LAP1_J = 0xbaba; // (HUD_LAP1 -0x220 for Japan rom0)
 const uint16_t HUD_LAP2 = 0xBCE6;
+const uint32_t HUD_LAP2_J = 0xbac6; // (HUD_LAP2 -0x220 for Japan rom0)
 
 // ----------------------------------------------------------------------------
 // Tilemaps
@@ -155,6 +205,7 @@ const uint32_t TILES_TABLE        = 0x17EAC;  // Stage Tilemap Default Values
 const uint32_t TILES_TABLE_J      = 0x1790c;
 
 const uint32_t TILES_MINIMAP    = 0x8C04;
+const uint32_t TILES_MINIMAP_J = 0x8a54; // (TILES_MINIMAP -0x1b0 for Japan rom0)
 
 // Table of h_scroll offsets (words) for road split
 // Note the h_scroll is set manually during the road split from the actual road position
@@ -169,6 +220,7 @@ const uint32_t TILEMAP_MUSIC_SELECT = 0x383F2;
 
 // In-Game Tilemap Palettes
 const uint32_t TILEMAP_PALS = 0xDF9C;
+const uint32_t TILEMAP_PALS_J = 0xdc86; // (TILEMAP_PALS -0x316 for Japan rom0)
 
 // Palette: Music Select Screen
 const uint32_t PAL_MUSIC_SELECT = 0x175CC;
@@ -193,6 +245,7 @@ const uint32_t PAL_TILEMAP_DATA_J = 0x16AB0;
 
 // Palette Data: Best Outrunners Name Entry
 const uint32_t PAL_BESTOR = 0x17DCC;
+const uint32_t PAL_BESTOR_J = 0x1782c; // (PAL_BESTOR -0x5a0 for Japan rom0)
 
 // ----------------------------------------------------------------------------
 // Sprites
@@ -387,6 +440,7 @@ const uint32_t SPRITE_SHDW_SMALL_J = 0x1139C;
 // Word 1: X-Left Offset
 // Word 2: X-Right Offset
 const uint32_t SPRITE_X_OFFS = 0x1212A;
+const uint32_t SPRITE_X_OFFS_J = 0x11b8a; // (SPRITE_X_OFFS -0x5a0 for Japan rom0)
 
 // Sprite Zoom Lookup Table.
 // Table Of Longs that represent X & Y Zoom Value
@@ -595,6 +649,7 @@ const uint32_t TILES_ALPHABET_J = 0xD362;  // -0x242 shift
 
 // Palette to cycle the graphical equalizer on the radio
 const uint32_t MUSIC_EQ_PAL = 0xCCAA;
+const uint32_t MUSIC_EQ_PAL_J = 0xca8a; // (MUSIC_EQ_PAL -0x220 for Japan rom0)
 
 // ----------------------------------------------------------------------------
 // Data
@@ -614,7 +669,9 @@ const uint32_t MUSIC_EQ_PAL = 0xCCAA;
 //
 // etc.
 const uint32_t PASS1_OFFSET = 0xA6FC;
+const uint32_t PASS1_OFFSET_J = 0xa522; // (PASS1_OFFSET -0x1da for Japan rom0)
 const uint32_t PASS2_OFFSET = 0xA75C;
+const uint32_t PASS2_OFFSET_J = 0xa582; // (PASS2_OFFSET -0x1da for Japan rom0)
 
 // Map stage ID to number 0-14
 const uint32_t MAP_STAGE_ID = 0xDDB4;

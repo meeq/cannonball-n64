@@ -693,14 +693,14 @@ void OTiles::init_tilemap_palette(uint16_t stage_id)
 
         // Stage 2
         case 0x1E:
-            copy_to_palram(2, TILEMAP_PALS + 0xC0, 0x120780);
-            copy_to_palram(0, TILEMAP_PALS + 0x100, 0x1205F0);
+            copy_to_palram(2, outrun.adr.tilemap_pals + 0xC0, 0x120780);
+            copy_to_palram(0, outrun.adr.tilemap_pals + 0x100, 0x1205F0);
             break;
 
         case 0x3B:
         case 0x25:
-            copy_to_palram(0, TILEMAP_PALS + 0x60, 0x1205F0);
-            copy_to_palram(1, TILEMAP_PALS + 0x20, 0x1205A0);
+            copy_to_palram(0, outrun.adr.tilemap_pals + 0x60, 0x1205F0);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0x20, 0x1205A0);
             break;
 
         // Stage 3
@@ -708,7 +708,7 @@ void OTiles::init_tilemap_palette(uint16_t stage_id)
             return;
 
         case 0x2F:
-            copy_to_palram(3, TILEMAP_PALS + 0xE0, 0x120600);
+            copy_to_palram(3, outrun.adr.tilemap_pals + 0xE0, 0x120600);
             break;
 
         case 0x2A:
@@ -719,42 +719,42 @@ void OTiles::init_tilemap_palette(uint16_t stage_id)
             return;
 
         case 0x35:
-            copy_to_palram(3, TILEMAP_PALS, 0x1203C0);
-            copy_to_palram(7, TILEMAP_PALS + 0x10, 0x1200C0);
+            copy_to_palram(3, outrun.adr.tilemap_pals, 0x1203C0);
+            copy_to_palram(7, outrun.adr.tilemap_pals + 0x10, 0x1200C0);
             break;
 
         case 0x33:
             return;
 
         case 0x21:
-            copy_to_palram(3, TILEMAP_PALS + 0x120, 0x120600);
-            copy_to_palram(1, TILEMAP_PALS + 0x130, 0x1206C0);
+            copy_to_palram(3, outrun.adr.tilemap_pals + 0x120, 0x120600);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0x130, 0x1206C0);
             break;
 
         // Stage 5:
         case 0x32:
-            copy_to_palram(1, TILEMAP_PALS + 0xF0, 0x1202A0);
-            copy_to_palram(2, TILEMAP_PALS + 0x40, 0x120780);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0xF0, 0x1202A0);
+            copy_to_palram(2, outrun.adr.tilemap_pals + 0x40, 0x120780);
             break;
 
         case 0x23:
-            copy_to_palram(1, TILEMAP_PALS + 0x80, 0x1202A0);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0x80, 0x1202A0);
             break;
 
         case 0x38:
-            copy_to_palram(1, TILEMAP_PALS + 0x110, 0x1206C0);
-            copy_to_palram(1, TILEMAP_PALS + 0x30, 0x120780);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0x110, 0x1206C0);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0x30, 0x120780);
             break;
 
         case 0x22:
-            copy_to_palram(3, TILEMAP_PALS + 0x50, 0x120600);
-            copy_to_palram(7, TILEMAP_PALS + 0x90, 0x1200C0);
+            copy_to_palram(3, outrun.adr.tilemap_pals + 0x50, 0x120600);
+            copy_to_palram(7, outrun.adr.tilemap_pals + 0x90, 0x1200C0);
             break;
 
         case 0x26:
-            copy_to_palram(1, TILEMAP_PALS + 0xD0, 0x1202A0);
-            copy_to_palram(1, TILEMAP_PALS + 0xB0, 0x120720);
-            copy_to_palram(0, TILEMAP_PALS + 0xB0, 0x1207B0);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0xD0, 0x1202A0);
+            copy_to_palram(1, outrun.adr.tilemap_pals + 0xB0, 0x120720);
+            copy_to_palram(0, outrun.adr.tilemap_pals + 0xB0, 0x1207B0);
             break;
     }
 }

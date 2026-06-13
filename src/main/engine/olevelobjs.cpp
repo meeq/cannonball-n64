@@ -393,7 +393,7 @@ void OLevelObjs::sprite_normal(oentry *sprite, uint8_t zoom)
     // Check Collision with sprite
 
     // First read collision offsets from table
-    uint32_t offset_addr = SPRITE_X_OFFS + sprite->type;
+    uint32_t offset_addr = outrun.adr.sprite_x_offs + sprite->type;
     int16_t x1;
     int16_t x2; 
 
@@ -437,7 +437,7 @@ void OLevelObjs::sprite_lights(oentry *sprite)
     // Check Collision with sprite
 
     // First read collision offsets from table
-    uint32_t offset_addr = SPRITE_X_OFFS + sprite->type;
+    uint32_t offset_addr = outrun.adr.sprite_x_offs + sprite->type;
     int16_t x1;
     int16_t x2; 
 
@@ -559,7 +559,7 @@ void OLevelObjs::sprite_collision_z1c(oentry* sprite)
     // Check Collision with sprite
 
     // First read collision offsets from table
-    uint32_t offset_addr = SPRITE_X_OFFS + sprite->type;
+    uint32_t offset_addr = outrun.adr.sprite_x_offs + sprite->type;
     int16_t x1;
     int16_t x2; 
 
@@ -773,7 +773,7 @@ void OLevelObjs::sprite_debris(oentry* sprite)
     // Check Collision with sprite
 
     // First read collision offsets from table
-    uint32_t offset_addr = SPRITE_X_OFFS + sprite->type;
+    uint32_t offset_addr = outrun.adr.sprite_x_offs + sprite->type;
     int16_t x1;
     int16_t x2; 
 
@@ -969,7 +969,7 @@ void OLevelObjs::sprite_rocks(oentry *sprite)
     // Check Collision with sprite
 
     // First read collision offsets from table
-    uint32_t offset_addr = SPRITE_X_OFFS + sprite->type;
+    uint32_t offset_addr = outrun.adr.sprite_x_offs + sprite->type;
     int16_t x1;
     int16_t x2; 
 

@@ -50,9 +50,9 @@ void OBonus::do_bonus_text()
                 bonus_counter++;
             else
             {
-                ohud.blit_text2(TEXT2_BONUS_CLEAR1);
-                ohud.blit_text2(TEXT2_BONUS_CLEAR2);
-                ohud.blit_text2(TEXT2_BONUS_CLEAR3);
+                ohud.blit_text2(outrun.adr.text2_bonus_clear1);
+                ohud.blit_text2(outrun.adr.text2_bonus_clear2);
+                ohud.blit_text2(outrun.adr.text2_bonus_clear3);
             }
             break;
     }
@@ -98,14 +98,14 @@ void OBonus::init_bonus_text()
     bonus_secs = digit_bot + digit_mid + digit_top;
 
     // Write to text layer
-    ohud.blit_text2(TEXT2_BONUS_POINTS); // Print "BONUS POINTS"
-    ohud.blit_text1(TEXT1_BONUS_STOP);   // Print full stop after Bonus Points text
-    ohud.blit_text1(TEXT1_BONUS_SEC);    // Print "SEC"
-    ohud.blit_text1(TEXT1_BONUS_X);      // Print 'X' symbol after SEC
-    ohud.blit_text1(TEXT1_BONUS_PTS);    // Print "PTS"
+    ohud.blit_text2(outrun.adr.text2_bonus_points); // Print "BONUS POINTS"
+    ohud.blit_text1(outrun.adr.text1_bonus_stop);   // Print full stop after Bonus Points text
+    ohud.blit_text1(outrun.adr.text1_bonus_sec);    // Print "SEC"
+    ohud.blit_text1(outrun.adr.text1_bonus_x);      // Print 'X' symbol after SEC
+    ohud.blit_text1(outrun.adr.text1_bonus_pts);    // Print "PTS"
 
     // Blit big 100K number
-    uint32_t src_addr = TEXT1_BONUS_100K;
+    uint32_t src_addr = outrun.adr.text1_bonus_100k;
     uint32_t dst_addr = 0x11065A;
     int8_t count = roms.rom0p->read8(&src_addr);
 

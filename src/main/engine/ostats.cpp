@@ -176,10 +176,10 @@ void OStats::init_next_level()
         // End Extend Play: Clear Text From Screen
         if (--extend_play_timer <= 0)
         {
-            ohud.blit_text1(TEXT1_EXTEND_CLEAR1);
-            ohud.blit_text1(TEXT1_EXTEND_CLEAR2);
-            ohud.blit_text1(TEXT1_LAPTIME_CLEAR1);
-            ohud.blit_text1(TEXT1_LAPTIME_CLEAR2);
+            ohud.blit_text1(outrun.adr.text1_extend_clear1);
+            ohud.blit_text1(outrun.adr.text1_extend_clear2);
+            ohud.blit_text1(outrun.adr.text1_laptime_clear1);
+            ohud.blit_text1(outrun.adr.text1_laptime_clear2);
         }
         // Extend Play: Flash Text
         else
@@ -194,14 +194,14 @@ void OStats::init_next_level()
                         ohud.blit_text_new(15, 8, "BEST LAP!", OHud::PINK);
                     else
                     {
-                        ohud.blit_text1(TEXT1_EXTEND1);
-                        ohud.blit_text1(TEXT1_EXTEND2);
+                        ohud.blit_text1(outrun.adr.text1_extend1);
+                        ohud.blit_text1(outrun.adr.text1_extend2);
                     }
                 }
                 else
                 {
-                    ohud.blit_text1(TEXT1_EXTEND_CLEAR1);
-                    ohud.blit_text1(TEXT1_EXTEND_CLEAR2);
+                    ohud.blit_text1(outrun.adr.text1_extend_clear1);
+                    ohud.blit_text1(outrun.adr.text1_extend_clear2);
                 }
             }
         }
@@ -225,8 +225,8 @@ void OStats::init_next_level()
 
         // Draw last laptime
         // Note there is a bug in the original code here, where the current ms value is displayed, instead of the ms value from the last lap time
-        ohud.blit_text1(TEXT1_LAPTIME1);
-        ohud.blit_text1(TEXT1_LAPTIME2);
+        ohud.blit_text1(outrun.adr.text1_laptime1);
+        ohud.blit_text1(outrun.adr.text1_laptime2);
         ohud.draw_lap_timer(0x110554, stage_times[cur_stage-1], config.engine.fix_bugs ? lap_ms[stage_times[cur_stage-1][2]] : ms_value);
 
         otraffic.set_max_traffic();

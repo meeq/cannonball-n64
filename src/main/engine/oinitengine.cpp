@@ -286,8 +286,8 @@ void OInitEngine::update_engine()
     {
         // Convert & Blit Car Speed
         ohud.blit_speed(0x110CB6, car_increment >> 16);
-        ohud.blit_text1(HUD_KPH1);
-        ohud.blit_text1(HUD_KPH2);
+        ohud.blit_text1(outrun.adr.hud_kph1);
+        ohud.blit_text1(outrun.adr.hud_kph2);
 
         // Blit High/Low Gear
         if ((config.controls.gear == config.controls.GEAR_BUTTON ||
@@ -476,8 +476,8 @@ void OInitEngine::check_stage()
 
             // Draw best laptime
             ostats.extend_play_timer = 0x80;
-            ohud.blit_text1(TEXT1_LAPTIME1);
-            ohud.blit_text1(TEXT1_LAPTIME2);
+            ohud.blit_text1(outrun.adr.text1_laptime1);
+            ohud.blit_text1(outrun.adr.text1_laptime2);
             ohud.draw_lap_timer(0x110554, laptimes, ostats.lap_ms[laptimes[2]]);
 
             outrun.ttrial.new_high_score = true;

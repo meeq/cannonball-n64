@@ -410,8 +410,8 @@ void Outrun::main_switch()
 
             ostats.frame_counter = ostats.frame_reset + 50;
             ostats.credits--;                                   // Update Credits
-            ohud.blit_text1(TEXT1_CLEAR_START);
-            ohud.blit_text1(TEXT1_CLEAR_CREDITS);
+            ohud.blit_text1(outrun.adr.text1_clear_start);
+            ohud.blit_text1(outrun.adr.text1_clear_credits);
             osoundint.queue_sound(sound::INIT_CHEERS);
             video.enabled = true;
             game_state = GS_START1;
@@ -479,14 +479,14 @@ void Outrun::main_switch()
                 oferrari.car_inc_old = 0;
                 ostats.time_counter = 3;
                 ostats.frame_counter = ostats.frame_reset;
-                ohud.blit_text2(TEXT2_GAMEOVER);
+                ohud.blit_text2(outrun.adr.text2_gameover);
             }
             else
             {
                 ohud.blit_text_big(7, ttrial.new_high_score ? "NEW RECORD" : "BAD LUCK");
 
-                ohud.blit_text1(TEXT1_LAPTIME1);
-                ohud.blit_text1(TEXT1_LAPTIME2);
+                ohud.blit_text1(outrun.adr.text1_laptime1);
+                ohud.blit_text1(outrun.adr.text1_laptime2);
                 ohud.draw_lap_timer(0x110554, ttrial.best_lap, ttrial.best_lap[2]);
 
                 ohud.blit_text_new(9,  14, "OVERTAKES          - ");
@@ -513,9 +513,9 @@ void Outrun::main_switch()
             else if (cannonball_mode == MODE_TTRIAL)
             {
                 if (outrun.tick_counter & BIT_4)
-                    ohud.blit_text1(10, 20, TEXT1_PRESS_START);
+                    ohud.blit_text1(10, 20, outrun.adr.text1_press_start);
                 else
-                    ohud.blit_text1(10, 20, TEXT1_CLEAR_START);
+                    ohud.blit_text1(10, 20, outrun.adr.text1_clear_start);
 
                 if (input.is_pressed(Input::START))
                     cannonball::state = cannonball::STATE_INIT_MENU;
@@ -527,7 +527,7 @@ void Outrun::main_switch()
         // ----------------------------------------------------------------------------------------
         case GS_INIT_MAP:
             omap.init();
-            ohud.blit_text2(TEXT2_COURSEMAP);
+            ohud.blit_text2(outrun.adr.text2_coursemap);
             game_state = GS_MAP;
             // fall through
 
@@ -948,6 +948,63 @@ void Outrun::select_course(bool jap, bool prototype)
         adr.tiles_minicars1       = TILES_MINICARS1_J;
         adr.tiles_alphabet        = TILES_ALPHABET_J;
         adr.map_route_lookup      = MAP_ROUTE_LOOKUP_J;
+        adr.text1_credit               = TEXT1_CREDIT_J;
+        adr.text1_credits              = TEXT1_CREDITS_J;
+        adr.text1_clear_credits        = TEXT1_CLEAR_CREDITS_J;
+        adr.text1_freeplay             = TEXT1_FREEPLAY_J;
+        adr.text2_coursemap            = TEXT2_COURSEMAP_J;
+        adr.text1_press_start          = TEXT1_PRESS_START_J;
+        adr.text1_clear_start          = TEXT1_CLEAR_START_J;
+        adr.text1_insert_coins         = TEXT1_INSERT_COINS_J;
+        adr.text1_clear_coins          = TEXT1_CLEAR_COINS_J;
+        adr.hud_time1                  = HUD_TIME1_J;
+        adr.hud_time2                  = HUD_TIME2_J;
+        adr.hud_score1                 = HUD_SCORE1_J;
+        adr.hud_score2                 = HUD_SCORE2_J;
+        adr.hud_kph1                   = HUD_KPH1_J;
+        adr.hud_kph2                   = HUD_KPH2_J;
+        adr.hud_stage1                 = HUD_STAGE1_J;
+        adr.hud_stage2                 = HUD_STAGE2_J;
+        adr.hud_one                    = HUD_ONE_J;
+        adr.text2_gameover             = TEXT2_GAMEOVER_J;
+        adr.text2_select_music         = TEXT2_SELECT_MUSIC_J;
+        adr.text1_1986_sega            = TEXT1_1986_SEGA_J;
+        adr.hud_lap1                   = HUD_LAP1_J;
+        adr.hud_lap2                   = HUD_LAP2_J;
+        adr.music_eq_pal               = MUSIC_EQ_PAL_J;
+        adr.text1_copyright            = TEXT1_COPYRIGHT_J;
+        adr.text2_magical              = TEXT2_MAGICAL_J;
+        adr.text2_breeze               = TEXT2_BREEZE_J;
+        adr.text2_splash               = TEXT2_SPLASH_J;
+        adr.text1_yourscore            = TEXT1_YOURSCORE_J;
+        adr.text2_best_or              = TEXT2_BEST_OR_J;
+        adr.text1_score_etc            = TEXT1_SCORE_ETC_J;
+        adr.text2_alphabet             = TEXT2_ALPHABET_J;
+        adr.text1_extend1              = TEXT1_EXTEND1_J;
+        adr.text1_extend2              = TEXT1_EXTEND2_J;
+        adr.text1_extend_clear1        = TEXT1_EXTEND_CLEAR1_J;
+        adr.text1_extend_clear2        = TEXT1_EXTEND_CLEAR2_J;
+        adr.text1_laptime1             = TEXT1_LAPTIME1_J;
+        adr.text1_laptime2             = TEXT1_LAPTIME2_J;
+        adr.text1_laptime_clear1       = TEXT1_LAPTIME_CLEAR1_J;
+        adr.text1_laptime_clear2       = TEXT1_LAPTIME_CLEAR2_J;
+        adr.text1_easter               = TEXT1_EASTER_J;
+        adr.text1_easter_clear         = TEXT1_EASTER_CLEAR_J;
+        adr.text2_bonus_points         = TEXT2_BONUS_POINTS_J;
+        adr.text1_bonus_stop           = TEXT1_BONUS_STOP_J;
+        adr.text1_bonus_sec            = TEXT1_BONUS_SEC_J;
+        adr.text1_bonus_x              = TEXT1_BONUS_X_J;
+        adr.text1_bonus_pts            = TEXT1_BONUS_PTS_J;
+        adr.text1_bonus_100k           = TEXT1_BONUS_100K_J;
+        adr.text2_bonus_clear1         = TEXT2_BONUS_CLEAR1_J;
+        adr.text2_bonus_clear2         = TEXT2_BONUS_CLEAR2_J;
+        adr.text2_bonus_clear3         = TEXT2_BONUS_CLEAR3_J;
+        adr.pass1_offset               = PASS1_OFFSET_J;
+        adr.pass2_offset               = PASS2_OFFSET_J;
+        adr.tiles_minimap              = TILES_MINIMAP_J;
+        adr.tilemap_pals               = TILEMAP_PALS_J;
+        adr.pal_bestor                 = PAL_BESTOR_J;
+        adr.sprite_x_offs              = SPRITE_X_OFFS_J;
 
         // Sub CPU
         adr.road_height_lookup    = ROAD_HEIGHT_LOOKUP_J;
@@ -1060,6 +1117,63 @@ void Outrun::select_course(bool jap, bool prototype)
         adr.tiles_minicars1       = TILES_MINICARS1;
         adr.tiles_alphabet        = TILES_ALPHABET;
         adr.map_route_lookup      = MAP_ROUTE_LOOKUP;
+        adr.text1_credit               = outrun.adr.text1_credit;
+        adr.text1_credits              = outrun.adr.text1_credits;
+        adr.text1_clear_credits        = outrun.adr.text1_clear_credits;
+        adr.text1_freeplay             = outrun.adr.text1_freeplay;
+        adr.text2_coursemap            = outrun.adr.text2_coursemap;
+        adr.text1_press_start          = outrun.adr.text1_press_start;
+        adr.text1_clear_start          = outrun.adr.text1_clear_start;
+        adr.text1_insert_coins         = outrun.adr.text1_insert_coins;
+        adr.text1_clear_coins          = outrun.adr.text1_clear_coins;
+        adr.hud_time1                  = outrun.adr.hud_time1;
+        adr.hud_time2                  = outrun.adr.hud_time2;
+        adr.hud_score1                 = outrun.adr.hud_score1;
+        adr.hud_score2                 = outrun.adr.hud_score2;
+        adr.hud_kph1                   = outrun.adr.hud_kph1;
+        adr.hud_kph2                   = outrun.adr.hud_kph2;
+        adr.hud_stage1                 = outrun.adr.hud_stage1;
+        adr.hud_stage2                 = outrun.adr.hud_stage2;
+        adr.hud_one                    = outrun.adr.hud_one;
+        adr.text2_gameover             = outrun.adr.text2_gameover;
+        adr.text2_select_music         = outrun.adr.text2_select_music;
+        adr.text1_1986_sega            = outrun.adr.text1_1986_sega;
+        adr.hud_lap1                   = outrun.adr.hud_lap1;
+        adr.hud_lap2                   = outrun.adr.hud_lap2;
+        adr.music_eq_pal               = outrun.adr.music_eq_pal;
+        adr.text1_copyright            = outrun.adr.text1_copyright;
+        adr.text2_magical              = outrun.adr.text2_magical;
+        adr.text2_breeze               = outrun.adr.text2_breeze;
+        adr.text2_splash               = outrun.adr.text2_splash;
+        adr.text1_yourscore            = outrun.adr.text1_yourscore;
+        adr.text2_best_or              = outrun.adr.text2_best_or;
+        adr.text1_score_etc            = outrun.adr.text1_score_etc;
+        adr.text2_alphabet             = outrun.adr.text2_alphabet;
+        adr.text1_extend1              = outrun.adr.text1_extend1;
+        adr.text1_extend2              = outrun.adr.text1_extend2;
+        adr.text1_extend_clear1        = outrun.adr.text1_extend_clear1;
+        adr.text1_extend_clear2        = outrun.adr.text1_extend_clear2;
+        adr.text1_laptime1             = outrun.adr.text1_laptime1;
+        adr.text1_laptime2             = outrun.adr.text1_laptime2;
+        adr.text1_laptime_clear1       = outrun.adr.text1_laptime_clear1;
+        adr.text1_laptime_clear2       = outrun.adr.text1_laptime_clear2;
+        adr.text1_easter               = outrun.adr.text1_easter;
+        adr.text1_easter_clear         = outrun.adr.text1_easter_clear;
+        adr.text2_bonus_points         = outrun.adr.text2_bonus_points;
+        adr.text1_bonus_stop           = outrun.adr.text1_bonus_stop;
+        adr.text1_bonus_sec            = outrun.adr.text1_bonus_sec;
+        adr.text1_bonus_x              = outrun.adr.text1_bonus_x;
+        adr.text1_bonus_pts            = outrun.adr.text1_bonus_pts;
+        adr.text1_bonus_100k           = outrun.adr.text1_bonus_100k;
+        adr.text2_bonus_clear1         = outrun.adr.text2_bonus_clear1;
+        adr.text2_bonus_clear2         = outrun.adr.text2_bonus_clear2;
+        adr.text2_bonus_clear3         = outrun.adr.text2_bonus_clear3;
+        adr.pass1_offset               = outrun.adr.pass1_offset;
+        adr.pass2_offset               = outrun.adr.pass2_offset;
+        adr.tiles_minimap              = outrun.adr.tiles_minimap;
+        adr.tilemap_pals               = outrun.adr.tilemap_pals;
+        adr.pal_bestor                 = outrun.adr.pal_bestor;
+        adr.sprite_x_offs              = outrun.adr.sprite_x_offs;
 
         // Sub CPU
         adr.road_height_lookup    = ROAD_HEIGHT_LOOKUP;

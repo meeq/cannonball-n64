@@ -47,7 +47,7 @@ void OHiScore::init()
 // Source: 0x360C
 void OHiScore::setup_pal_best()
 {
-    uint32_t src = PAL_BESTOR;
+    uint32_t src = outrun.adr.pal_bestor;
     uint32_t dst = 0x120F00;
 
     for (int i = 0; i <= 0x1F; i++)
@@ -222,7 +222,7 @@ void OHiScore::check_name_entry()
     // No High Score
     if (score_pos == -1)
     {
-        ohud.blit_text1(TEXT1_YOURSCORE);
+        ohud.blit_text1(outrun.adr.text1_yourscore);
         ohud.draw_score(0x110BDA, ostats.score, 3); // Select font 3 and print score
         state = STATE_DONE;
     }
@@ -263,7 +263,7 @@ uint32_t OHiScore::get_score_adr()
 void OHiScore::blit_alphabet()
 {
     // Print Text: "ABCDEFGHIJK..."
-    ohud.blit_text2(TEXT2_ALPHABET); 
+    ohud.blit_text2(outrun.adr.text2_alphabet); 
 
     // Address in text ram for characters
     uint32_t adr = 0x110BF0;
@@ -588,8 +588,8 @@ void OHiScore::blit_score_table()
     for (int i = 0; i <= 0x3FF; i++)
         video.write_tile32(&tile_addr, 0x200020);
 
-    ohud.blit_text2(TEXT2_BEST_OR);   // Print "BEST OUTRUNNERS"
-    ohud.blit_text1(TEXT1_SCORE_ETC); // Print Score, Name, Route, Record
+    ohud.blit_text2(outrun.adr.text2_best_or);   // Print "BEST OUTRUNNERS"
+    ohud.blit_text1(outrun.adr.text1_score_etc); // Print Score, Name, Route, Record
     blit_digit();                     // Blit 1. 2. 3. etc.
     blit_scores();                    // Blit list of scores
     blit_initials();                  // Blit initials attached to those scores

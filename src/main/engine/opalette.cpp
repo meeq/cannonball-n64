@@ -77,7 +77,7 @@ void OPalette::setup_sky_change()
 
     // Easter Egg Code
     if (input.is_pressed(Input::START))
-        ohud.blit_text1(TEXT1_EASTER);
+        ohud.blit_text1(outrun.adr.text1_easter);
 }
 
 // Sets up the palette cycle for the sky.
@@ -235,7 +235,7 @@ void OPalette::cycle_sky_palette()
         sky_palette_index = 0;
         if (outrun.game_state == GS_BEST1) return;
         // Clear Easter Egg Code
-        ohud.blit_text1(TEXT1_EASTER_CLEAR);
+        ohud.blit_text1(outrun.adr.text1_easter_clear);
         return;
     }
     // Otherwise, use index to select relevant palette of sky colours (d0 << 7)
