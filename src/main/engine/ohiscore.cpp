@@ -69,7 +69,7 @@ void OHiScore::setup_road_best()
 // Source: 0xD17A
 void OHiScore::init_def_scores()
 {
-    uint32_t adr = DEFAULT_SCORES;
+    uint32_t adr = outrun.adr.default_scores;
 
     for (int i = 0; i < NO_SCORES; i++)
     {
@@ -513,7 +513,7 @@ void OHiScore::tick_minicars()
             uint32_t textram_adr = dst - pos;
 
             // Address for following smoke tiles
-            uint32_t tiles_smoke_adr = TILES_MINICARS2;
+            uint32_t tiles_smoke_adr = outrun.adr.tiles_minicars2;
 
             // The minicar is two tiles wide.
             // Two versions of routine, one that only blits the car in two tiles

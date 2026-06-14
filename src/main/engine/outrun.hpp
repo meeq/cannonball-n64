@@ -181,11 +181,14 @@ struct adr_t
     uint32_t pal_hud_src;
     uint32_t pal_tilemap_src;
     uint32_t pal_tilemap_data;
+    uint32_t pal_music_select;
     uint32_t tiles_page_fg1;
     uint32_t tiles_page_bg1;
     uint32_t tiles_page_fg2;
     uint32_t tiles_page_bg2;
     uint32_t tiles_minicars1;
+    uint32_t tiles_minicars2;
+    uint32_t default_scores;
     uint32_t tiles_alphabet;
     uint32_t map_route_lookup;
     uint32_t text1_credit;

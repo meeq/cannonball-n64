@@ -416,7 +416,7 @@ void OMusic::blit_music_select()
     // Palette Ram: 1F Long Entries For Sky Shade On Horizon, For Colour Change Effect
     const uint32_t PAL_RAM_SKY = 0x120F00;
 
-    uint32_t src_addr = PAL_MUSIC_SELECT;
+    uint32_t src_addr = outrun.adr.pal_music_select;
     uint32_t dst_addr = PAL_RAM_SKY;
 
     // Write 32 Palette Longs to Palette RAM

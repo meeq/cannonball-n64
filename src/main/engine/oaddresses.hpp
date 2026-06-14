@@ -227,7 +227,8 @@ const uint32_t TILEMAP_PALS = 0xDF9C;
 const uint32_t TILEMAP_PALS_J = 0xdc86; // (TILEMAP_PALS -0x316 for Japan rom0)
 
 // Palette: Music Select Screen
-const uint32_t PAL_MUSIC_SELECT = 0x175CC;
+const uint32_t PAL_MUSIC_SELECT   = 0x175CC;
+const uint32_t PAL_MUSIC_SELECT_J = 0x1702C; // (PAL_MUSIC_SELECT -0x5A0 for Japan rom0)
 
 // Table of long addresses of ground colours
 const uint32_t PAL_GND_TABLE   = 0x17350;
@@ -639,9 +640,11 @@ const uint32_t MAP_MOVEMENT_RIGHT = 0x3AB4;
 const uint32_t TILES_MINICARS1   = 0xD62A;
 const uint32_t TILES_MINICARS1_J = 0xD3E8;  // -0x242 shift; same shift as TILES_ALPHABET
 const uint32_t TILES_MINICARS2   = 0xD670; // smoke tiles
+const uint32_t TILES_MINICARS2_J = 0xD42E; // -0x242 shift
 
 // Default Score Data
-const uint32_t DEFAULT_SCORES  = 0xD676;
+const uint32_t DEFAULT_SCORES   = 0xD676;
+const uint32_t DEFAULT_SCORES_J = 0xD434; // -0x242 shift (region-specific defaults)
 
 // Alphabet characters for initial entry
 const uint32_t TILES_ALPHABET   = 0xD5A4;
