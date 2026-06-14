@@ -152,6 +152,39 @@ namespace
                     if (input.has_pressed(Input::PAUSE)) pause_engine = !pause_engine;
                     if (input.has_pressed(Input::MENU))  state = STATE_INIT_MENU;
 
+                    // C-Left / C-Right cycle the current music track during
+                    // gameplay. Gated on game_state being on the in-game side
+                    // (countdown through course map) — engine handles attract /
+                    // music select / best-outrunners with their own input maps.
+                    // Setting auto_cycle_disabled latches the player out of the
+                    // every-5-stages auto-DJ for the rest of the run, so a
+                    // mid-stage-4 pick isn't clobbered seconds later by the
+                    // stage-5 auto-cycle. omusic.enable() (next music-select
+                    // entry) re-arms it.
+                    {
+                        const int gs = outrun.game_state;
+                        const bool in_game =
+                            (gs >= GS_INIT_GAME && gs <= GS_MAP);
+                        if (in_game)
+                        {
+                            if (input.has_pressed(Input::MUSIC_NEXT))
+                            {
+                                omusic.cycle_music();
+                                omusic.auto_cycle_disabled = true;
+                            }
+                            else if (input.has_pressed(Input::MUSIC_PREV))
+                            {
+                                omusic.cycle_music_prev();
+                                omusic.auto_cycle_disabled = true;
+                            }
+                            // Drives the title-overlay countdown regardless of
+                            // whether C was pressed this tick — the engine's
+                            // stage-5/10 auto-cycle also arms it via
+                            // cycle_music, so the title gets shown either way.
+                            omusic.tick_track_overlay();
+                        }
+                    }
+
                     // B = "back" while the engine is in attract or music
                     // select. Once gameplay starts (GS_INIT_GAME onward) B
                     // reverts to its arcade role (BRAKE), so the predicate

@@ -535,12 +535,14 @@ void OInitEngine::check_stage()
             // Denote Checkpoint Passed
             checkpoint_marker = -1;
 
-            // Cycle Music every 5 stages
-            if (outrun.game_state == GS_INGAME)
+            // Cycle Music every 5 stages — unless the player has manually
+            // cycled tracks already this run (auto_cycle_disabled), in which
+            // case the auto-DJ stays out of the way.
+            if (outrun.game_state == GS_INGAME && !omusic.auto_cycle_disabled)
             {
                 if (ostats.cur_stage == 5 || ostats.cur_stage == 10)
                     omusic.cycle_music();
-            }              
+            }
         }
     }
 

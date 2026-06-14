@@ -21,8 +21,10 @@ OMusic omusic;
 
 OMusic::OMusic(void)
 {
-    tilemap    = NULL;
-    tile_patch = NULL;
+    tilemap             = NULL;
+    tile_patch          = NULL;
+    auto_cycle_disabled = false;
+    track_overlay_ticks = 0;
 }
 
 
@@ -69,6 +71,8 @@ void OMusic::enable()
     oroad.road_ctrl           = ORoad::ROAD_BOTH_P0;
     oroad.horizon_base        = ORoad::HORIZON_OFF;
     last_music_selected       = -1;
+    auto_cycle_disabled       = false;
+    track_overlay_ticks       = 0;
     preview_counter           = -20; // Delay before playing music
     ostats.time_counter       = config.sound.music_timer; // Move 30 seconds to timer countdown (note on the original roms this is 15 seconds)
     ostats.frame_counter      = ostats.frame_reset;  
@@ -289,11 +293,40 @@ void OMusic::play_music(int index)
     last_music_selected = index;
 }
 
+// In-game track-title overlay: row mirrors the music-select title (Y=11)
+// and the countdown runs ~2 seconds at the 30Hz engine tick.
+namespace { constexpr uint8_t TRACK_OVERLAY_TICKS = 60; }
+
 // Cycle music in continuous mode
 void OMusic::cycle_music()
 {
-    if (++music_selected > 2) music_selected = 0;
+    const int n = (int)config.sound.music.size();
+    if (n <= 0) return;
+    int idx = (int)music_selected + 1;
+    if (idx >= n) idx = 0;
+    music_selected = (uint8_t)idx;
     play_music();
+    ohud.blit_text_big(11, config.sound.music.at(music_selected).title.c_str(), true);
+    track_overlay_ticks = TRACK_OVERLAY_TICKS;
+}
+
+void OMusic::cycle_music_prev()
+{
+    const int n = (int)config.sound.music.size();
+    if (n <= 0) return;
+    int idx = (int)music_selected - 1;
+    if (idx < 0) idx = n - 1;
+    music_selected = (uint8_t)idx;
+    play_music();
+    ohud.blit_text_big(11, config.sound.music.at(music_selected).title.c_str(), true);
+    track_overlay_ticks = TRACK_OVERLAY_TICKS;
+}
+
+void OMusic::tick_track_overlay()
+{
+    if (track_overlay_ticks == 0) return;
+    if (--track_overlay_ticks == 0)
+        ohud.blit_text_big(11, ""); // empty string => clear-row pass only
 }
 
 // Original Version of Music Selection Screen With 3 Tracks. 

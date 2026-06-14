@@ -10,8 +10,10 @@
       D-pad  → directional UP/DOWN/LEFT/RIGHT
       Stick  → analog steering / accelerator when analog enabled
       Z      → VIEWPOINT
-      C-Up   → COIN (insert credit — relevant when freeplay is off)
-      C-Down → MENU
+      C-Up    → COIN (insert credit — relevant when freeplay is off)
+      C-Down  → MENU
+      C-Left  → MUSIC_PREV (in-game music cycle backward)
+      C-Right → MUSIC_NEXT (in-game music cycle forward)
 ***************************************************************************/
 
 #include "input.hpp"
@@ -74,6 +76,8 @@ void Input::poll()
     keys[STEP]      = false;
     keys[TIMER]     = false;
     keys[MENU]      = held.c_down;
+    keys[MUSIC_PREV] = held.c_left;
+    keys[MUSIC_NEXT] = held.c_right;
 
     // Analog steering: stick_x range roughly [-80, +80] → wheel 0..0xFF
     if (analog)

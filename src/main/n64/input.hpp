@@ -37,10 +37,15 @@ public:
         STEP  = 12,
         TIMER = 13,
         MENU  = 14,
+
+        // N64-only: C-Left / C-Right cycle the in-game music track. No
+        // analog in the SDL backend, so the enum is platform-specific.
+        MUSIC_PREV = 15,
+        MUSIC_NEXT = 16,
     };
 
-    bool keys[15];
-    bool keys_old[15];
+    bool keys[17];
+    bool keys_old[17];
 
     enum limits
     {
