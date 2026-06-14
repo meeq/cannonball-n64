@@ -205,9 +205,10 @@ namespace
                                 // frame shows the music-select sky over the
                                 // gameplay-attract scene. Magic 4 isn't
                                 // derived, it's copied from STATE_INIT_GAME.
-                                // Real fix: make "renderable" an explicit
-                                // engine signal so this and STATE_INIT_GAME
-                                // can stop burning ticks blindly.
+                                // Outstanding: see memory note
+                                // engine-init-warmup-hack for what's been
+                                // ruled out (tilemap, sky palette) and the
+                                // open leads (rgb[] desync, stale roadram).
                                 for (int i = 0; i < 4; ++i)
                                     outrun.tick(true);
                             }
