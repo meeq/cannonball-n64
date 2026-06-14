@@ -247,6 +247,14 @@ namespace
                 // Engine subsystems the TT screen depends on but doesn't set
                 // up itself. The desktop Menu::init prelude does these for
                 // free; on N64 we skip Menu entirely so we cover them here.
+                // select_course populates outrun.adr.* from the active region's
+                // constant family — must run before setup_palette_hud, which
+                // reads pal_hud_src out of adr. On a first entry adr is BSS-
+                // zero, so without this the palette is sourced from rom0[0]
+                // and the lap icon / "STEER TO SELECT TRACK" come out
+                // miscolored until the next round.
+                outrun.select_course(config.engine.jap != 0,
+                                     config.engine.prototype != 0);
                 otiles.setup_palette_hud();
                 osoundint.has_booted = true;
                 osoundint.init();
