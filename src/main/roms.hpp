@@ -37,11 +37,19 @@ public:
     // region-agnostic ROMs (road / z80 / pcm) untouched. Idempotent — a
     // second call (eg. boot-menu re-entry) reloads the same files.
     bool load_japanese_roms();
+    // Restores rom0 / rom1 from the World chip files. Used when toggling
+    // region back to World after Japanese bytes were loaded in place.
+    bool load_world_roms();
+    // No-op if the requested region is already resident, otherwise calls
+    // the appropriate loader. Returns false if the desired chips are
+    // missing from DFS.
+    bool ensure_region(bool jap);
     int load_pcm_rom(bool);
     bool load_ym_data(const char* filename);
 
 private:
     const static bool VERBOSE = true;
+    bool region_is_jap = false;
 };
 
 extern Roms roms;

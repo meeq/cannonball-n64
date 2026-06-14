@@ -99,7 +99,35 @@ bool Roms::load_japanese_roms()
     status += LOAD(rom1, ("epr-10328.75", 0x20000, 0x10000, 0x3c0e9a7f, RomLoader::INTERLEAVE2, VERBOSE));
     status += LOAD(rom1, ("epr-10330.57", 0x20001, 0x10000, 0x59786e99, RomLoader::INTERLEAVE2, VERBOSE));
 
+    if (status == 0) region_is_jap = true;
     return status == 0;
+}
+
+bool Roms::load_world_roms()
+{
+    // Restores rom0 / rom1 from the World (Rev B) chip files. Mirrors the
+    // chip-pair half of load_revb_roms — road / z80 / pcm are region-
+    // agnostic and don't need reloading.
+    int status = 0;
+
+    status += LOAD(rom0, ("epr-10380b.133", 0x00000, 0x10000, 0x1f6cadad, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10382b.118", 0x00001, 0x10000, 0xc4c3fa1a, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10381b.132", 0x20000, 0x10000, 0xbe8c412b, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom0, ("epr-10383b.117", 0x20001, 0x10000, 0x10a2014a, RomLoader::INTERLEAVE2, VERBOSE));
+
+    status += LOAD(rom1, ("epr-10327a.76", 0x00000, 0x10000, 0xe28a5baf, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10329a.58", 0x00001, 0x10000, 0xda131c81, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10328a.75", 0x20000, 0x10000, 0xd5ec5e5d, RomLoader::INTERLEAVE2, VERBOSE));
+    status += LOAD(rom1, ("epr-10330a.57", 0x20001, 0x10000, 0xba9ec82a, RomLoader::INTERLEAVE2, VERBOSE));
+
+    if (status == 0) region_is_jap = false;
+    return status == 0;
+}
+
+bool Roms::ensure_region(bool jap)
+{
+    if (jap == region_is_jap) return true;
+    return jap ? load_japanese_roms() : load_world_roms();
 }
 
 int Roms::load_pcm_rom(bool fixed_rom)

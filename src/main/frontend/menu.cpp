@@ -1055,9 +1055,10 @@ void Menu::display_message(std::string s)
 
 bool Menu::check_jap_roms()
 {
-    if (config.engine.jap && !roms.load_japanese_roms())
+    if (!roms.ensure_region(config.engine.jap != 0))
     {
-        display_message("JAPANESE ROMSET NOT FOUND");
+        display_message(config.engine.jap ? "JAPANESE ROMSET NOT FOUND"
+                                          : "WORLD ROMSET NOT FOUND");
         return false;
     }
     return true;
