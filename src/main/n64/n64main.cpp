@@ -185,12 +185,31 @@ namespace
                             else
                             {
                                 // Arcade/continuous music select → attract.
-                                // Tear down music-select sprites/palette,
-                                // drop the credit that brought us here, and
-                                // re-enter init_attract via GS_INIT.
-                                omusic.disable();
+                                // Re-run outrun.init(): same path the desktop
+                                // frontend takes between game sessions. It
+                                // calls select_course, clear_text_ram, then
+                                // boot() → oinitengine.init() → otiles.
+                                // reset_tiles_pal which queues TILEMAP_CLEAR
+                                // so the next render tick wipes tile RAM and
+                                // repopulates it from rom0. Drops credits +
+                                // resets jump table along the way so attract
+                                // comes back as a fresh boot, not patched up
+                                // around music-select leftovers.
                                 ostats.credits = 0;
-                                outrun.game_state = GS_INIT;
+                                outrun.init();
+                                // HACK: same 4-tick warmup STATE_INIT_GAME
+                                // uses. outrun.init queues a tilemap clear
+                                // that doesn't land until vint, and the sky
+                                // palette is mid-cycle/fade — without burning
+                                // a few engine ticks here, the first visible
+                                // frame shows the music-select sky over the
+                                // gameplay-attract scene. Magic 4 isn't
+                                // derived, it's copied from STATE_INIT_GAME.
+                                // Real fix: make "renderable" an explicit
+                                // engine signal so this and STATE_INIT_GAME
+                                // can stop burning ticks blindly.
+                                for (int i = 0; i < 4; ++i)
+                                    outrun.tick(true);
                             }
                         }
                     }
