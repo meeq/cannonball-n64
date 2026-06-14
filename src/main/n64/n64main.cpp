@@ -342,6 +342,16 @@ namespace
                 n64::boot_menu::run();
                 cannonball::audio.init();
                 cannonball::audio.prime_mixer_buffers();
+                // The boot menu can flip REGION between visits; rom0/rom1 hold
+                // one region's chip data in place, so resync the resident set
+                // to match the new config before the engine reads it. Fall
+                // back to World if the Japanese chips aren't in DFS.
+                if (!roms.ensure_region(config.engine.jap != 0))
+                {
+                    debugf("Region reload failed — falling back to World.\n");
+                    config.engine.jap = 0;
+                    roms.ensure_region(false);
+                }
                 // boot_menu::run clears the framebuffers but leaves engine
                 // state (hwroad/hwsprites/hwtiles/text_ram) holding arcade
                 // attract leftovers. STATE_INIT_TTRIAL_SELECT /
