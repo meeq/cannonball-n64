@@ -31,6 +31,7 @@
 #include "../engine/ooutputs.hpp"
 #include "../engine/omusic.hpp"
 #include "../engine/oroad.hpp"
+#include "../engine/ohud.hpp"
 #include "../engine/ostats.hpp"
 #include "../engine/otiles.hpp"
 #include "../engine/audio/osoundint.hpp"
@@ -128,6 +129,67 @@ namespace
         config.sound.rate    = 22050;
     }
 
+    // -----------------------------------------------------------------------
+    // In-game pause overlay
+    //
+    // Driven by Input::START while STATE_GAME is active and outrun.game_state
+    // is in the driving range (GS_START1..GS_BONUS). Three options:
+    //   Continue → resume engine + re-queue the active music track
+    //   Retry    → STATE_INIT_GAME (outrun.init restarts the chosen mode)
+    //   Quit     → STATE_REENTER_BOOT_MENU (existing audio-shutdown path)
+    //
+    // Engine is held frozen by skipping outrun.tick — every render frame
+    // repaints the same scene. We blit the menu onto the engine's text RAM
+    // and clear it on transition so the engine's next tick rewrites the HUD
+    // cleanly.
+    enum { PAUSE_CONTINUE = 0, PAUSE_RETRY = 1, PAUSE_QUIT = 2, PAUSE_COUNT = 3 };
+    int pause_cursor = 0;
+
+    // Visible screen is 40 cols × 28 rows (320×224). The text-RAM grid is
+    // 64 cols wide for hardware-tilemap reasons, but anything past col 39 is
+    // off-screen. Centering math runs against the visible 40.
+    // Title uses the big 8x16 font (blit_text_big auto-centers on a 40-col
+    // row). Options use the small font on rows 12/14/16, leaving a clean gap
+    // below the title (which occupies rows 9-10).
+    constexpr uint8_t  PAUSE_TITLE_ROW = 9;
+    constexpr uint16_t PAUSE_OPT_COL   = 15;  // "; CONTINUE" fits 15..24
+    constexpr uint16_t PAUSE_OPT_W     = 12;  // wipe width on option rows
+
+    void blit_pause_overlay(int cursor)
+    {
+        ohud.blit_text_big(PAUSE_TITLE_ROW, "PAUSED");
+
+        // OutRun's small HUD font has direction-marker glyphs at the standard
+        // ASCII punctuation slots — the shaft extends one way, the tip points
+        // the other. 0x3B (';') is right-pointing (tail on left); 0x3C ('<')
+        // is its left-pointing mirror; 0x3E ('>') is up-pointing.
+        static const char* labels[PAUSE_COUNT] = { "CONTINUE", "RETRY", "QUIT" };
+        for (int i = 0; i < PAUSE_COUNT; ++i)
+        {
+            const uint16_t row = PAUSE_TITLE_ROW + 3 + i * 2;
+            const uint16_t pal = (i == cursor) ? OHud::GREEN : OHud::GREY;
+            ohud.blit_text_new(PAUSE_OPT_COL,     row,
+                               (i == cursor) ? "; " : "  ");
+            ohud.blit_text_new(PAUSE_OPT_COL + 2, row, labels[i], pal);
+        }
+    }
+
+    // Wipe only the cells the overlay touched. video.clear_text_ram() would
+    // also remove HUD labels (TIME/SCORE/LAP), which the engine only blits on
+    // game-state init — they'd never come back on resume.
+    void clear_pause_overlay()
+    {
+        // blit_text_big with an empty string still runs its full-row clear,
+        // wiping both halves of the big text (rows 9 and 10).
+        ohud.blit_text_big(PAUSE_TITLE_ROW, "");
+        static const char blank[PAUSE_OPT_W + 1] = "            ";
+        for (int i = 0; i < PAUSE_COUNT; ++i)
+        {
+            const uint16_t row = PAUSE_TITLE_ROW + 3 + i * 2;
+            ohud.blit_text_new(PAUSE_OPT_COL, row, blank);
+        }
+    }
+
     void tick_engine()
     {
         frame++;
@@ -172,6 +234,25 @@ namespace
                     if (input.has_pressed(Input::TIMER)) outrun.freeze_timer = !outrun.freeze_timer;
                     if (input.has_pressed(Input::PAUSE)) pause_engine = !pause_engine;
                     if (input.has_pressed(Input::MENU))  state = STATE_INIT_MENU;
+
+                    // START brings up the in-game pause menu, but only during
+                    // actual driving (GS_START1 = countdown through GS_BONUS).
+                    // GS_MAP (course map between stages) and GS_GAMEOVER have
+                    // their own START semantics in the engine; don't poach.
+                    {
+                        const int gs = outrun.game_state;
+                        const bool driving = (gs >= GS_START1 && gs <= GS_BONUS);
+                        if (driving && input.has_pressed(Input::START))
+                        {
+                            osoundint.queue_sound(sound::FM_RESET);
+                            cannonball::audio.clear_wav();
+                            pause_cursor = PAUSE_CONTINUE;
+                            blit_pause_overlay(pause_cursor);
+                            input.frame_done();
+                            state = STATE_PAUSED;
+                            break;
+                        }
+                    }
 
                     // C-Left / C-Right cycle the current music track during
                     // gameplay. Gated on game_state being on the in-game side
@@ -280,6 +361,96 @@ namespace
                     // which warp music tempo.
                 }
                 else if (tick_frame) input.frame_done();
+                break;
+
+            case STATE_PAUSED:
+                // Engine is frozen — outrun.tick is not called, so the same
+                // scene paints each render frame. We just handle menu input
+                // and re-blit the overlay (cheap, ~50 cells).
+                if (tick_frame)
+                {
+                    bool nav   = false;
+                    bool back  = input.has_pressed(Input::BRAKE);
+                    bool sel   = input.has_pressed(Input::START)
+                              || input.has_pressed(Input::ACCEL);
+
+                    if (input.has_pressed(Input::UP))
+                    {
+                        pause_cursor = (pause_cursor + PAUSE_COUNT - 1) % PAUSE_COUNT;
+                        nav = true;
+                    }
+                    else if (input.has_pressed(Input::DOWN))
+                    {
+                        pause_cursor = (pause_cursor + 1) % PAUSE_COUNT;
+                        nav = true;
+                    }
+
+                    if (nav)  osoundint.queue_sound(sound::BEEP1);
+
+                    // B = quick resume — matches arcade muscle memory and
+                    // mirrors what BRAKE does on the title screens.
+                    const int choice = back ? PAUSE_CONTINUE
+                                     : (sel ? pause_cursor : -1);
+
+                    if (choice >= 0)
+                    {
+                        osoundint.queue_sound(choice == PAUSE_CONTINUE
+                                                ? sound::BEEP2
+                                                : sound::COIN_IN);
+                        // Targeted clear: only the cells the overlay wrote
+                        // need wiping. A full clear_text_ram would also drop
+                        // HUD labels (TIME/SCORE/LAP), which the engine only
+                        // blits at game-state init — they wouldn't come back
+                        // on resume. Retry/Quit transition through states that
+                        // re-init the HUD so the targeted clear is harmless
+                        // there too.
+                        clear_pause_overlay();
+
+                        switch (choice)
+                        {
+                            case PAUSE_CONTINUE:
+                                // Re-arm music from where the player paused.
+                                // play_music restarts the active track — not
+                                // sample-accurate resume, but the same path
+                                // the music-select cycle already uses.
+                                omusic.play_music();
+                                state = STATE_GAME;
+                                break;
+                            case PAUSE_RETRY:
+                                // STATE_INIT_GAME would put us through attract
+                                // because outrun.init()→boot() sets game_state =
+                                // GS_INIT. Skip that and jump straight to the
+                                // engine's countdown setup: GS_INIT_GAME inits
+                                // jump table + engine, queues GET_READY voice,
+                                // plays music, draws HUD, then falls through to
+                                // GS_START1. has_booted+credits are normally
+                                // primed by init_attract; we mirror those here
+                                // since we're bypassing it. Music selection,
+                                // auto_cycle_disabled, region etc. carry over
+                                // — matches "back to starting line" semantics.
+                                cannonball::audio.clear_wav();
+                                outrun.init();
+                                osoundint.has_booted = true;
+                                ostats.credits       = 1;
+                                outrun.game_state    = GS_INIT_GAME;
+                                pause_engine         = false;
+                                for (int i = 0; i < 4; ++i)
+                                    outrun.tick(true);
+                                state = STATE_GAME;
+                                break;
+                            case PAUSE_QUIT:
+                                cannonball::audio.clear_wav();
+                                state = STATE_REENTER_BOOT_MENU;
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        blit_pause_overlay(pause_cursor);
+                    }
+
+                    input.frame_done();
+                }
                 break;
 
             case STATE_INIT_GAME:
