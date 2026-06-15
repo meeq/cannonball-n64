@@ -35,9 +35,12 @@
 
 // ----------------------------------------------------------------------------
 // ROM addresses (REV B / Western set). Sourced from oaddresses.hpp.
-// JP-only addresses are not walked — the runtime swap path uses the same
-// underlying sprite ROM, so the W set is a superset of the descriptor
-// addresses that the engine can hand to hwsprites.
+//
+// The default walk uses these. To cover the Japan region, callers also walk
+// kTablesJ[] (below) — that set is NOT a subset of the World tuple output:
+// an empirical audit (bake-sprites --japan + tools/bake-sprites diff) found
+// ~180 phase-1 sprite descriptors reachable only from Japan tables, so the
+// production bake unions both region's table walks. See walker.hpp.
 // ----------------------------------------------------------------------------
 
 static const uint32_t WH_TABLE          = 0x20000u;
@@ -200,6 +203,122 @@ static const TableDesc kTables[] = {
     {"traffic_data",          0x5424,  Kind::Long,   4, 0, 48},
 };
 static const int kNumTables = sizeof(kTables) / sizeof(kTables[0]);
+
+// Japan-region mirror of kTables[]. Every address pulled from the _J
+// variants in src/main/engine/oaddresses.hpp — there are no genuinely
+// region-agnostic descriptor tables in this set; every World entry has a
+// corresponding _J variant (verified by grep).
+//
+// Index ordering MUST match kTables[] so a side-by-side diff is meaningful.
+static const TableDesc kTablesJ[] = {
+    {"sprite_porsche",        0xED22,  Kind::Imm,    0, 0, 1},   // SPRITE_PORSCHE_J (NOT -0x5A0)
+
+    // Logo: SPRITE_LOGO_*_J = World - 0x5A0.
+    {"sprite_logo_bg",        0x10BC2, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_car",       0x10CEE, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_bird1",     0x10D20, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_bird2",     0x10D52, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_base",      0x10CBC, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_text",      0x10BF4, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_palm1",     0x10C26, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_palm2",     0x10C58, Kind::Imm,    0, 0, 1},
+    {"sprite_logo_palm3",     0x10C8A, Kind::Imm,    0, 0, 1},
+
+    // Music-select: SPRITE_FM/DIAL/EQ/RADIO/HAND_*_J = World - 0x5A0.
+    {"sprite_fm_left",        0x112F2, Kind::Imm,    0, 0, 1},
+    {"sprite_fm_centre",      0x112FC, Kind::Imm,    0, 0, 1},
+    {"sprite_fm_right",       0x11306, Kind::Imm,    0, 0, 1},
+    {"sprite_dial_left",      0x11310, Kind::Imm,    0, 0, 1},
+    {"sprite_dial_centre",    0x1131A, Kind::Imm,    0, 0, 1},
+    {"sprite_dial_right",     0x11324, Kind::Imm,    0, 0, 1},
+    {"sprite_eq",             0x1132E, Kind::Imm,    0, 0, 1},
+    {"sprite_radio",          0x11338, Kind::Imm,    0, 0, 1},
+    {"sprite_hand_left",      0x11342, Kind::Imm,    0, 0, 1},
+    {"sprite_hand_centre",    0x1134C, Kind::Imm,    0, 0, 1},
+    {"sprite_hand_right",     0x11356, Kind::Imm,    0, 0, 1},
+
+    // SPRITE_SHDW_SMALL_J = 0x1139C; SPRITE_SHADOW_DATA_J = 0xFE16.
+    {"sprite_shdw_small",     0x1139C, Kind::Imm,    0, 0, 1},
+    {"sprite_shadow_data_imm",0xFE16,  Kind::Imm,    0, 0, 1},
+
+    // SPRITE_MINICAR_*_J = World - 0x5A0.
+    {"sprite_minicar_right",  0x106B8, Kind::Imm,    0, 0, 1},
+    {"sprite_minicar_up",     0x106C2, Kind::Imm,    0, 0, 1},
+    {"sprite_minicar_down",   0x106CC, Kind::Imm,    0, 0, 1},
+
+    // SPRITE_COURSEMAP_TOP/BOT/END_J = World - 12.
+    {"sprite_coursemap_top",  0x3778,  Kind::Imm,    0, 0, 1},
+    {"sprite_coursemap_bot",  0x3860,  Kind::Imm,    0, 0, 1},
+    {"sprite_coursemap_end",  0x3948,  Kind::Imm,    0, 0, 1},
+
+    // sprite_type_table: J at 0x11932.
+    {"sprite_type_table",     0x11932, Kind::Long,   4, 0, 256},
+
+    // Frame tables: J variants.
+    {"sprite_cloud_frames",   0x423A,  Kind::Long,   4, 0, 64},
+    {"sprite_minitree_frames",0x4350,  Kind::Long,   4, 0, 64},
+    {"sprite_grass_frames",   0x453C,  Kind::Long,   4, 0, 16},
+    {"sprite_sand_frames",    0x457C,  Kind::Long,   4, 0, 16},
+    {"sprite_stone_frames",   0x45BC,  Kind::Long,   4, 0, 16},
+    {"sprite_water_frames",   0x45FC,  Kind::Long,   4, 0, 16},
+    {"sprite_pass_frames",    0xA512,  Kind::Long,   4, 0, 8},
+
+    {"sprite_shdw_frames",    0x7794,  Kind::Long,   4, 0, 64},
+    {"sprite_shadow_data",    0xFE16,  Kind::Long,   4, 0, 256},
+
+    {"sprite_pass1_skidl",    0x10ADC, Kind::Long,   4, 0, 16},
+    {"sprite_pass1_skidr",    0x10B22, Kind::Long,   4, 0, 16},
+    {"sprite_pass2_skidl",    0x10B2C, Kind::Long,   4, 0, 16},
+    {"sprite_pass2_skidr",    0x10B72, Kind::Long,   4, 0, 16},
+
+    // Crash tables: World addrs minus 12.
+    {"sprite_crash_spin1",    0x2288,  Kind::Stride, 8, 0, 8},
+    {"sprite_crash_spin2",    0x22C8,  Kind::Stride, 8, 0, 8},
+    {"sprite_bump_data1",     0x2308,  Kind::Stride, 8, 0, 3},
+    {"sprite_bump_data2",     0x2320,  Kind::Stride, 8, 0, 3},
+    {"sprite_crash_man1",     0x2338,  Kind::Stride, 8, 0, 14},
+    {"sprite_crash_girl1",    0x23A8,  Kind::Stride, 8, 0, 14},
+    {"sprite_crash_flip",     0x2418,  Kind::Stride, 8, 0, 8},
+    {"sprite_crash_flip_m1",  0x2458,  Kind::Stride, 8, 0, 16},
+    {"sprite_crash_flip_g1",  0x2550,  Kind::Stride, 8, 0, 16},
+    {"sprite_crash_flip_m2",  0x24D0,  Kind::Stride, 8, 0, 16},
+    {"sprite_crash_flip_g2",  0x25C8,  Kind::Stride, 8, 0, 6},
+    {"sprite_crash_man2",     0x25F8,  Kind::Stride, 8, 0, 12},
+    {"sprite_crash_girl2",    0x2654,  Kind::Stride, 8, 0, 12},
+
+    {"sprite_ferrari_frames", 0x9CF2,  Kind::Stride, 8, 0, 16},
+    {"sprite_skid_frames",    0x9D3A,  Kind::Stride, 8, 0, 32},
+
+    {"smoke_data",            0xAAEC,  Kind::Long,   4, 0, 16},
+    {"spray_data",            0xAB2C,  Kind::Long,   4, 0, 16},
+
+    // End-sequence: World addrs minus 0x5A0.
+    {"anim_endseq_obj1",      0x11F10, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj2",      0x11F38, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj3",      0x11F60, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj4",      0x11F88, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj5",      0x11FB0, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj6",      0x11FD8, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj7",      0x12000, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_obj8",      0x12028, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_objA",      0x12050, Kind::Stride, 8, 0, 5},
+    {"anim_endseq_objB",      0x12078, Kind::Stride, 8, 0, 5},
+
+    {"anim_seq_flag",         0x11DE2, Kind::Stride, 8, 0, 16},
+    {"anim_ferrari_curr",     0x123D0, Kind::Stride, 8, 0, 10},
+    {"anim_ferrari_next",     0x12420, Kind::Stride, 8, 0, 1},
+    {"anim_pass1_curr",       0x12428, Kind::Stride, 8, 0, 10},
+    {"anim_pass1_next",       0x12478, Kind::Stride, 8, 0, 1},
+    {"anim_pass2_curr",       0x12480, Kind::Stride, 8, 0, 10},
+    {"anim_pass2_next",       0x124D0, Kind::Stride, 8, 0, 1},
+
+    {"anim_ferrari_frames",   0xA116,  Kind::Stride, 8, 0, 64},
+
+    {"traffic_data",          0x5362,  Kind::Long,   4, 0, 48},
+};
+static const int kNumTablesJ = sizeof(kTablesJ) / sizeof(kTablesJ[0]);
+static_assert(sizeof(kTables) == sizeof(kTablesJ),
+              "Japan and World table arrays must have the same length");
 
 // ----------------------------------------------------------------------------
 // Per-sub-descriptor decode result.
@@ -410,13 +529,18 @@ static bool looks_like_input_addr(const Roms& r,
 
 void walk_static_addrs(const Roms& r,
                        const std::vector<uint32_t>& sprites_words,
-                       std::vector<StaticTuple>& out)
+                       std::vector<StaticTuple>& out,
+                       bool japan,
+                       bool phase1_only)
 {
+    const TableDesc* tables = japan ? kTablesJ : kTables;
+    const int        num_tables = japan ? kNumTablesJ : kNumTables;
+
     // First, collect every candidate input_addr.
     std::set<uint32_t> input_addrs;
 
-    for (int ti = 0; ti < kNumTables; ti++) {
-        const TableDesc& T = kTables[ti];
+    for (int ti = 0; ti < num_tables; ti++) {
+        const TableDesc& T = tables[ti];
 
         if (T.kind == Kind::Imm) {
             input_addrs.insert(T.base);
@@ -438,23 +562,25 @@ void walk_static_addrs(const Roms& r,
 
     std::printf("walker: %zu input_addrs from tables\n", input_addrs.size());
 
-    // Brute-force fallback: scan rom0 for every position that strictly looks
-    // like a 5-sub-descriptor block. The validator requires all 5 SIZE slots
-    // to decode, EOR-terminate in both flip directions, and form a monotonic
-    // non-increasing (h, pitch) sequence — false positives are rare. Found
-    // input_addrs that weren't already in our table-driven set come from
-    // data-driven sources we don't statically traverse (scenerymap stream,
-    // anim_seq_* chains, smoke_data indirection, etc).
-    const uint32_t scan_end = (r.rom0p->length > 0x32u)
-                              ? (r.rom0p->length - 0x32u) : 0u;
-    size_t before = input_addrs.size();
-    for (uint32_t scan = 0; scan < scan_end; scan++) {
-        if (input_addrs.count(scan)) continue;
-        if (!looks_like_input_addr(r, sprites_words, scan)) continue;
-        input_addrs.insert(scan);
+    if (!phase1_only) {
+        // Brute-force fallback: scan rom0 for every position that strictly looks
+        // like a 5-sub-descriptor block. The validator requires all 5 SIZE slots
+        // to decode, EOR-terminate in both flip directions, and form a monotonic
+        // non-increasing (h, pitch) sequence — false positives are rare. Found
+        // input_addrs that weren't already in our table-driven set come from
+        // data-driven sources we don't statically traverse (scenerymap stream,
+        // anim_seq_* chains, smoke_data indirection, etc).
+        const uint32_t scan_end = (r.rom0p->length > 0x32u)
+                                  ? (r.rom0p->length - 0x32u) : 0u;
+        size_t before = input_addrs.size();
+        for (uint32_t scan = 0; scan < scan_end; scan++) {
+            if (input_addrs.count(scan)) continue;
+            if (!looks_like_input_addr(r, sprites_words, scan)) continue;
+            input_addrs.insert(scan);
+        }
+        std::printf("walker: brute-scan added %zu input_addrs (total %zu)\n",
+                    input_addrs.size() - before, input_addrs.size());
     }
-    std::printf("walker: brute-scan added %zu input_addrs (total %zu)\n",
-                input_addrs.size() - before, input_addrs.size());
 
 
     // Now decode each. Dedup tuples in a temporary set.
@@ -486,6 +612,8 @@ void walk_static_addrs(const Roms& r,
     std::printf("walker: %d/%d sub-descriptors decoded, %zu unique (bank,addr,pitch)\n",
         valid_subs, total_subs, tuple_max_h.size());
 
+    if (phase1_only) goto emit_output;
+
     // Second-pass brute scan: directly enumerate sub-descriptor candidates.
     // The first pass found input_addrs and walked their 5 SIZE slots; this
     // pass scans every 10-byte window in rom0 and accepts it if it decodes
@@ -514,6 +642,7 @@ void walk_static_addrs(const Roms& r,
                     tuple_max_h.size() - before_sub, tuple_max_h.size());
     }
 
+emit_output:
     out.clear();
     out.reserve(tuple_max_h.size());
     for (const auto& kv : tuple_max_h) {

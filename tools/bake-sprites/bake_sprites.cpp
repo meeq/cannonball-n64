@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -218,6 +219,8 @@ int main(int argc, char** argv)
 {
     std::string roms_dir, blob_path, index_path,
                 sprites_blob_path, tiles_blob_path;
+    bool japan_region = false;
+    bool phase1_only  = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -230,13 +233,15 @@ int main(int argc, char** argv)
         else if (a == "--index")         index_path        = next("--index");
         else if (a == "--sprites-blob")  sprites_blob_path = next("--sprites-blob");
         else if (a == "--tiles-blob")    tiles_blob_path   = next("--tiles-blob");
+        else if (a == "--japan")         japan_region      = true;
+        else if (a == "--phase1-only")   phase1_only       = true;
         else { std::fprintf(stderr, "bake-sprites: unknown arg %s\n", a.c_str()); return 2; }
     }
     if (roms_dir.empty() || blob_path.empty() || index_path.empty()
         || sprites_blob_path.empty() || tiles_blob_path.empty()) {
         std::fprintf(stderr,
             "usage: bake-sprites --roms <dir> --blob <out.bin> --index <out.c>"
-            " --sprites-blob <out.bin> --tiles-blob <out.bin>\n");
+            " --sprites-blob <out.bin> --tiles-blob <out.bin> [--japan]\n");
         return 2;
     }
 
@@ -247,10 +252,50 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "bake-sprites: ROM load failed (path=%s)\n", roms_dir.c_str());
         return 1;
     }
+    // --japan: swap rom0/rom1 in place to the Japanese chip data (the runtime
+    // does the same via outrun.select_course(jap=true)). Used for the audit
+    // that verifies the World-baked atlas covers Japan too — see
+    // tools/bake-sprites/audit_japan.sh.
+    if (japan_region) {
+        if (!roms.load_japanese_roms()) {
+            std::fprintf(stderr, "bake-sprites: Japanese ROM load failed\n");
+            return 1;
+        }
+        std::fprintf(stderr, "bake-sprites: walking JAPAN rom0/rom1\n");
+    }
     // load_revb_roms() leaves rom0p/rom1p NULL — the runtime selects via
     // outrun.select_course(). For the bake we always use the W (revb) set.
     roms.rom0p = &roms.rom0;
     roms.rom1p = &roms.rom1;
+
+    // Sprite and tile ROMs aren't loaded by load_revb_roms anymore (the N64
+    // runtime gets them as pre-decoded blobs from this very tool's output).
+    // Load them here so the walker / bake can read them.
+    {
+        int status = 0;
+        roms.sprites.init(0x100000);
+        status += roms.sprites.load_rom("mpr-10371.9",  0x000000, 0x20000, 0x7cc86208, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10373.10", 0x000001, 0x20000, 0xb0d26ac9, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10375.11", 0x000002, 0x20000, 0x59b60bd7, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10377.12", 0x000003, 0x20000, 0x17a1b04a, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10372.13", 0x080000, 0x20000, 0xb557078c, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10374.14", 0x080001, 0x20000, 0x8051e517, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10376.15", 0x080002, 0x20000, 0xf3b8f318, RomLoader::INTERLEAVE4, true);
+        status += roms.sprites.load_rom("mpr-10378.16", 0x080003, 0x20000, 0xa1062984, RomLoader::INTERLEAVE4, true);
+
+        roms.tiles.init(0x30000);
+        status += roms.tiles.load_rom("opr-10268.99",  0x00000, 0x08000, 0x95344b04, RomLoader::NORMAL, true);
+        status += roms.tiles.load_rom("opr-10232.102", 0x08000, 0x08000, 0x776ba1eb, RomLoader::NORMAL, true);
+        status += roms.tiles.load_rom("opr-10267.100", 0x10000, 0x08000, 0xa85bb823, RomLoader::NORMAL, true);
+        status += roms.tiles.load_rom("opr-10231.103", 0x18000, 0x08000, 0x8908bcbf, RomLoader::NORMAL, true);
+        status += roms.tiles.load_rom("opr-10266.101", 0x20000, 0x08000, 0x9f6f1a74, RomLoader::NORMAL, true);
+        status += roms.tiles.load_rom("opr-10230.104", 0x28000, 0x08000, 0x686f5e50, RomLoader::NORMAL, true);
+
+        if (status != 0) {
+            std::fprintf(stderr, "bake-sprites: sprite/tile ROM load failed\n");
+            return 1;
+        }
+    }
 
     // Byte-swap into the same uint32_t layout the runtime uses (matches
     // hwsprites::init exactly so spritedata[i] reads are bit-identical).
@@ -327,8 +372,68 @@ int main(int argc, char** argv)
     }
 
     // Walk every (bank, addr, pitch, max_h) tuple statically from ROM.
+    //
+    // Production (default) baked World only, which missed ~109 Japan-only
+    // sprite descriptors (a Japan-region toggle at runtime would fall through
+    // to the slow EOR-walk path for those). Now we walk BOTH regions and
+    // union the tuple sets so the resulting atlas covers either CPU ROM
+    // load. Sprite pixel data (mpr-1037x.bin) is region-agnostic, so each
+    // tuple's blob_offset points into the same data either way — the union
+    // costs only the extra unique entries (~109 × 2 flips ≈ 350 KB).
+    //
+    // --japan flag still walks only Japan (used by the original audit). The
+    // --phase1-only flag still skips brute-force scans for tight audits.
     std::vector<StaticTuple> tuples;
-    walk_static_addrs(roms, sprites_words, tuples);
+    walk_static_addrs(roms, sprites_words, tuples,
+                      /*japan=*/japan_region, phase1_only);
+    if (!japan_region) {
+        // Also walk Japan tables: swap rom0/rom1 in place, walk with
+        // kTablesJ[], merge results. We run Japan in phase1-only mode —
+        // the brute-force scans for World already catch valid sprite
+        // descriptors that EOR-terminate properly in the sprite ROM
+        // (region-agnostic), so re-running brute force on Japan rom0
+        // mostly just adds false-positive duplicates from different
+        // random bytes. The strict-need add is Japan's table-derived
+        // (phase 1) tuples — they're the ones the engine code actually
+        // references when Japan is loaded.
+        if (!roms.load_japanese_roms()) {
+            std::fprintf(stderr, "bake-sprites: Japan ROM swap failed for combined walk\n");
+            return 1;
+        }
+        std::vector<StaticTuple> tuples_jap;
+        walk_static_addrs(roms, sprites_words, tuples_jap,
+                          /*japan=*/true, /*phase1_only=*/true);
+
+        // Merge: tuple identity is (bank, addr, pitch); keep max h.
+        struct K { uint16_t bank; uint16_t addr; int16_t pitch;
+                   bool operator<(const K& o) const {
+                       if (bank != o.bank)   return bank   < o.bank;
+                       if (addr != o.addr)   return addr   < o.addr;
+                       return pitch < o.pitch; } };
+        std::map<K, uint16_t> merged;
+        for (const auto& t : tuples)
+            merged[K{t.bank, t.addr, t.pitch}] = t.h;
+        size_t before = merged.size();
+        for (const auto& t : tuples_jap) {
+            auto it = merged.find(K{t.bank, t.addr, t.pitch});
+            if (it == merged.end()) merged[K{t.bank, t.addr, t.pitch}] = t.h;
+            else it->second = std::max(it->second, t.h);
+        }
+        std::fprintf(stderr, "bake-sprites: combined walk: %zu W + %zu Japan-only "
+                             "= %zu unique tuples\n",
+                     before, merged.size() - before, merged.size());
+
+        tuples.clear();
+        tuples.reserve(merged.size());
+        for (const auto& kv : merged) {
+            StaticTuple st;
+            st.bank  = kv.first.bank;
+            st.addr  = kv.first.addr;
+            st.pitch = kv.first.pitch;
+            st.h     = kv.second;
+            tuples.push_back(st);
+        }
+    }
     if (tuples.empty()) {
         std::fprintf(stderr, "bake-sprites: walker produced no tuples\n");
         return 1;

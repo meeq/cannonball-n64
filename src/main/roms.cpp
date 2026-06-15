@@ -6,7 +6,12 @@
 ***************************************************************************/
 
 #include <cstring>
+#ifdef __mips__
 #include <libdragon.h>
+#else
+#include <cstdio>
+#define debugf(...) std::fprintf(stderr, __VA_ARGS__)
+#endif
 #include "stdint.hpp"
 #include "roms.hpp"
 
