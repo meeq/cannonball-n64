@@ -27,7 +27,6 @@ public:
 
     // Diagnostics for the atlas cache (FPS overlay).
     uint32_t atlas_extract_count() const;
-    uint32_t baked_extract_count() const;
     uint32_t atlas_hit_count() const;
     uint32_t atlas_overflow_count() const;
     uint32_t atlas_used_bytes() const;
@@ -41,8 +40,12 @@ private:
     // Clip values.
     uint16_t x1, x2;
 
-    // 128 sprites, 16 bytes each (0x400)
-    static const uint16_t SPRITE_RAM_SIZE = 128 * 8;
+    // Sega arcade hardware was 128 sprites @ 16 bytes each (0x400 bytes).
+    // We grew to 256 slots after JUMP_ENTRIES_TOTAL in osprites bumped
+    // past 128 to fix overpass scenery silent drops. Cap is the 12-bit
+    // write_sprite16 address mask in video.cpp (& 0xfff = 4096 bytes =
+    // 256 sprite slots). See [[assertions-over-logs]] / SPRITE_ENTRIES.
+    static const uint16_t SPRITE_RAM_SIZE = 256 * 8;
     static const uint32_t SPRITES_LENGTH = 0x100000 >> 2;
     static const uint16_t COLOR_BASE = 0x800;
 
@@ -120,13 +123,6 @@ private:
     // prepass retires don't count (drain_on_overflow=false).
     uint32_t   atlas_overflows;
     uint32_t   atlas_segment_retirements;  // all retires, drained or not
-
-    // Cart PI address of /sprites/sprite_atlas.bin (resolved at first
-    // render_rdp call via dfs_rom_addr). 0 = unresolved or DFS file missing,
-    // in which case extracts fall through to the CPU EOR-walk spillover.
-    // Atlas miss path PI-DMAs ci4 bytes out of this blob.
-    uint32_t   baked_blob_pi_addr;
-    uint32_t   baked_extracts;   // count of baked-path extracts (diagnostics)
 
     // Ring of scratch TLUTs used by the shadow body pass: each entry is a copy
     // of sprite_tlut[color*16] with slot 10 zeroed (so the shadow texel becomes

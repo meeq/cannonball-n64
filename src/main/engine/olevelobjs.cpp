@@ -19,6 +19,10 @@
 #include "engine/olevelobjs.hpp"
 #include "engine/ostats.hpp"
 
+#ifdef __mips__
+#include <libdragon.h>
+#endif
+
 OLevelObjs olevelobjs;
 
 OLevelObjs::OLevelObjs(void)
@@ -132,7 +136,19 @@ void OLevelObjs::setup_sprites(uint32_t z)
             return;
         }
     }
-    //std::cout << "Need another entry" << std::endl;
+    // Jump-table pool exhausted. Original cannonball dropped this silently
+    // (commented-out cout). On N64 it's the silent root cause of missing
+    // overpass pillars / posts. Hard fail — see [[assertions-over-logs]].
+#ifdef __mips__
+    assertf(0,
+            "olevelobjs: setup_sprites pool exhausted — no free jump_table "
+            "slot for incoming scenery sprite. no_sprites=%u z=0x%lx "
+            "seg_spr_addr=0x%lx seg_spr_offset1=%d. Bump SPRITE_ENTRIES "
+            "(osprites.hpp) and re-test.",
+            (unsigned)osprites.no_sprites, (unsigned long)z,
+            (unsigned long)osprites.seg_spr_addr,
+            (int)osprites.seg_spr_offset1);
+#endif
 }
 
 // Setup Sprite from ROM format for use in game

@@ -1,20 +1,21 @@
 # -----------------------------------------------------------------------------
-# bake-sprites — generate the pre-decoded sprite atlas blob + lookup index.
+# bake-sprites — generate the native-byteswapped sprite + tile ROM blobs that
+# the runtime CPU EOR-walk spillover DMAs at decode-on-miss time.
 #
-# Builds the host bake-sprites tool out-of-tree (via a nested cmake), which
-# statically walks the OutRun master CPU ROM's sprite/anim descriptor tables
-# to enumerate every (bank, addr, pitch, max_h) tuple the hardware can be
-# asked to render. Emits sprite_atlas.bin into the DFS root and
-# sprite_atlas_index.c into the build tree (linked into the N64 ELF).
+# Builds the host bake-sprites tool out-of-tree (via a nested cmake). The
+# static atlas pre-decode pipeline (sprite_atlas.bin + sprite_atlas_index.c)
+# was removed: the runtime atlas hash cache decodes on first miss and
+# amortizes the ~500us EOR walk across subsequent frames.
 #
 # Inputs from caller (set BEFORE include):
 #   N64_DFS_ROOT       — DFS staging directory (the same one passed to
-#                        n64_create_rom). The module appends /sprites/.
+#                        n64_create_rom). The module appends /sprites/ and
+#                        /tiles/.
 #
 # Outputs:
-#   BAKE_SPRITES_INDEX_SRC     — generated .c (add to cannonball sources)
-#   BAKE_SPRITES_STAGED_BLOB   — staged .bin path (add to EXTRA_DFS_DEPS)
-#   target  bake-sprites-host  — internal host-tool build target
+#   BAKE_SPRITES_STAGED_NATIVE_BLOB — staged sprites_native.bin
+#   BAKE_TILES_STAGED_NATIVE_BLOB   — staged tiles_native.bin
+#   target  bake-sprites-host       — internal host-tool build target
 # -----------------------------------------------------------------------------
 
 if(NOT DEFINED N64_DFS_ROOT)
@@ -54,38 +55,22 @@ add_custom_command(
     VERBATIM)
 
 # -----------------------------------------------------------------------------
-# Run the bake. Both outputs come out of a single tool invocation, so they
-# share one custom_command.
+# Run the bake. Single tool invocation emits both native blobs.
 # -----------------------------------------------------------------------------
-set(BAKE_SPRITES_INDEX_SRC          "${CMAKE_BINARY_DIR}/sprite_atlas_index.c")
-set(BAKE_SPRITES_BLOB               "${CMAKE_BINARY_DIR}/sprite_atlas.bin")
-set(BAKE_SPRITES_STAGED_BLOB        "${_BAKE_STAGE_DIR}/sprite_atlas.bin")
 set(BAKE_SPRITES_NATIVE_BLOB        "${CMAKE_BINARY_DIR}/sprites_native.bin")
 set(BAKE_SPRITES_STAGED_NATIVE_BLOB "${_BAKE_STAGE_DIR}/sprites_native.bin")
 set(BAKE_TILES_NATIVE_BLOB          "${CMAKE_BINARY_DIR}/tiles_native.bin")
 set(BAKE_TILES_STAGED_NATIVE_BLOB   "${_BAKE_TILES_STAGE_DIR}/tiles_native.bin")
 
 add_custom_command(
-    OUTPUT  "${BAKE_SPRITES_INDEX_SRC}"
-            "${BAKE_SPRITES_BLOB}"
-            "${BAKE_SPRITES_NATIVE_BLOB}"
+    OUTPUT  "${BAKE_SPRITES_NATIVE_BLOB}"
             "${BAKE_TILES_NATIVE_BLOB}"
     COMMAND "${_BAKE_HOST_BIN}"
             --roms          "${_BAKE_ROMS_DIR}"
-            --blob          "${BAKE_SPRITES_BLOB}"
-            --index         "${BAKE_SPRITES_INDEX_SRC}"
             --sprites-blob  "${BAKE_SPRITES_NATIVE_BLOB}"
             --tiles-blob    "${BAKE_TILES_NATIVE_BLOB}"
     DEPENDS "${_BAKE_HOST_BIN}"
-    COMMENT "[BAKE] sprite_atlas.bin + sprite_atlas_index.c + sprites_native.bin + tiles_native.bin"
-    VERBATIM)
-
-add_custom_command(
-    OUTPUT  "${BAKE_SPRITES_STAGED_BLOB}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${BAKE_SPRITES_BLOB}" "${BAKE_SPRITES_STAGED_BLOB}"
-    DEPENDS "${BAKE_SPRITES_BLOB}"
-    COMMENT "[BAKE] stage sprite_atlas.bin"
+    COMMENT "[BAKE] sprites_native.bin + tiles_native.bin"
     VERBATIM)
 
 add_custom_command(
@@ -105,7 +90,5 @@ add_custom_command(
     VERBATIM)
 
 add_custom_target(bake-sprites ALL
-    DEPENDS "${BAKE_SPRITES_INDEX_SRC}"
-            "${BAKE_SPRITES_STAGED_BLOB}"
-            "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
+    DEPENDS "${BAKE_SPRITES_STAGED_NATIVE_BLOB}"
             "${BAKE_TILES_STAGED_NATIVE_BLOB}")

@@ -1,10 +1,10 @@
 # -----------------------------------------------------------------------------
 # bake-sprites — host-side asset pipeline tool.
 #
-# Reads the OutRun sprite ROM via the runtime's romloader, statically walks
-# the master CPU ROM's sprite/anim descriptor tables to enumerate every
-# (bank, addr, pitch, max_h) tuple the hardware could render, and emits a
-# pre-decoded CI4 atlas blob + a sorted lookup index linked into the N64 ELF.
+# Reads the OutRun sprite + tile ROMs via the runtime's romloader and emits
+# the two native-byteswapped DFS blobs (sprites_native.bin, tiles_native.bin)
+# the N64 runtime PI-DMAs on demand. The pre-decoded atlas pipeline was
+# removed in favour of runtime lazy decode (see hwsprites.cpp).
 #
 # Invoke from the repo root:
 #   cmake -S tools/bake-sprites -B build-host/bake-sprites
@@ -33,7 +33,6 @@ set(romloader
 )
 set(driver
     "${CMAKE_CURRENT_SOURCE_DIR}/bake_sprites.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/walker.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/stubs.cpp"
 )
 

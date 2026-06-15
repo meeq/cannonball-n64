@@ -1,6 +1,5 @@
 #include "video.hpp"
 #include "hwvideo/hwsprites.hpp"
-#include "hwvideo/hwsprites_baked.h"
 #include "globals.hpp"
 #include "frontend/config.hpp"
 
@@ -100,7 +99,6 @@ hwsprites::hwsprites()
       atlas_current_segment(0),
       atlas_extracts(0), atlas_hits(0), atlas_overflows(0),
       atlas_segment_retirements(0),
-      baked_blob_pi_addr(0), baked_extracts(0),
       shadow_body_ring_idx(0)
 {
     std::memset(atlas_entries, 0, sizeof(atlas_entries));
@@ -225,100 +223,27 @@ void hwsprites::atlas_init()
            hs0.total, hs0.used, hs0.total - hs0.used);
 #endif
     atlas_pool = (uint8_t*)memalign(8, atlas_pool_bytes);
+    assertf(atlas_pool,
+            "hwsprites: atlas_pool memalign(%u) failed — sprite rendering "
+            "cannot proceed without a backing pool",
+            (unsigned)atlas_pool_bytes);
     atlas_reset();
 
-    // Resolve the cart-side baked atlas blob. dfs_rom_addr returns a PI
-    // address into ROM space (0x10000000+) that we PI-DMA from on cache
-    // miss. Returns 0 if the file is missing — extracts fall back to the
-    // CPU EOR-walk spillover and we lose the speedup but stay correct.
-    baked_blob_pi_addr = dfs_rom_addr("sprites/sprite_atlas.bin");
-
-    // Resolve the cart-side native sprite ROM blob (BE on disk = matches
-    // PI-DMA target layout). EOR-walk fallback DMAs per-extract slices.
+    // Source sprite ROM (BE on disk = matches PI-DMA target layout). Every
+    // sprite extract slices a window of this and EOR-walks it on CPU.
     sprites_pi_addr = dfs_rom_addr("sprites/sprites_native.bin");
 
 #if CANNONBALL_LOG_HEAP
     heap_stats_t hs1; sys_get_heap_stats(&hs1);
-    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx sprites_blob=%08lx entries=%lu heap after used=%d free=%d\n",
+    debugf("atlas_init: pool=%p bytes=%u sprites_blob=%08lx heap after used=%d free=%d\n",
            atlas_pool, (unsigned)atlas_pool_bytes,
-           (unsigned long)baked_blob_pi_addr,
            (unsigned long)sprites_pi_addr,
-           (unsigned long)hwsprites_baked_count,
            hs1.used, hs1.total - hs1.used);
 #else
-    debugf("atlas_init: pool=%p bytes=%u baked_blob=%08lx sprites_blob=%08lx entries=%lu\n",
+    debugf("atlas_init: pool=%p bytes=%u sprites_blob=%08lx\n",
            atlas_pool, (unsigned)atlas_pool_bytes,
-           (unsigned long)baked_blob_pi_addr,
-           (unsigned long)sprites_pi_addr,
-           (unsigned long)hwsprites_baked_count);
+           (unsigned long)sprites_pi_addr);
 #endif
-}
-
-struct HwspritesBakedHit {
-    const HwspritesBakedEntry* be;
-    uint16_t row_offset;   // request addr = be->addr + row_offset * pitch
-};
-
-// Predecessor search on the sorted baked index (key = bank, flip, pitch, addr).
-// A direct hit (row_offset = 0) covers descriptor-table entries; a partial hit
-// (row_offset > 0) covers the runtime `inc_offset(y_adj)` path — when a sprite
-// is partially clipped at the top, the runtime computes addr' = addr + y_adj
-// * pitch and asks for a row-aligned suffix of the same baked blob.
-static HwspritesBakedHit hwsprites_baked_lookup(
-    uint16_t bank, uint16_t addr, int16_t pitch, bool flip,
-    uint16_t source_h)
-{
-    HwspritesBakedHit miss = {nullptr, 0};
-    if (hwsprites_baked_count == 0) return miss;
-    const uint8_t flip_v = flip ? 1 : 0;
-
-    // upper_bound by (bank, flip, pitch, addr) — find smallest index whose
-    // key > (bank, flip_v, pitch, addr). The candidate is index-1.
-    uint32_t lo = 0;
-    uint32_t hi = hwsprites_baked_count;
-    while (lo < hi)
-    {
-        uint32_t mid = (lo + hi) >> 1;
-        const HwspritesBakedEntry& e = hwsprites_baked_index[mid];
-        bool le;
-        if      (e.bank  != bank)   le = (e.bank  < bank);
-        else if (e.flip  != flip_v) le = (e.flip  < flip_v);
-        else if (e.pitch != pitch)  le = (e.pitch < pitch);
-        else                        le = (e.addr <= addr);
-        if (le) lo = mid + 1;
-        else    hi = mid;
-    }
-    if (lo == 0) return miss;
-
-    // Walk back through entries with matching (bank, flip, pitch), picking
-    // the FIRST one whose addr <= target, (target - addr) is a multiple of
-    // pitch, and row_offset + source_h <= cand.h. The walk is closest-first
-    // so we prefer smaller deltas (= exact / near-exact base entries). When
-    // the runtime y_adj path lands on a small-zoom sibling's addr that has
-    // h < source_h, walkback finds the big-zoom base whose row range covers
-    // the full requested h. Bounded to keep worst-case dense clusters cheap.
-    static const uint32_t WALKBACK_MAX = 16;
-    uint32_t i = lo;
-    uint32_t steps = 0;
-    while (i > 0 && steps < WALKBACK_MAX) {
-        --i; ++steps;
-        const HwspritesBakedEntry& cand = hwsprites_baked_index[i];
-        if (cand.bank != bank || cand.flip != flip_v || cand.pitch != pitch)
-            return miss;
-        if (cand.addr > addr) continue;
-        const uint16_t delta = (uint16_t)(addr - cand.addr);
-        if (delta == 0) {
-            if (cand.h >= source_h) return {&cand, 0};
-            continue;
-        }
-        if (pitch <= 0) continue;
-        const uint16_t upitch = (uint16_t)pitch;
-        if (delta % upitch) continue;
-        const uint16_t off = delta / upitch;
-        if ((uint32_t)off + (uint32_t)source_h > (uint32_t)cand.h) continue;
-        return {&cand, off};
-    }
-    return miss;
 }
 
 void hwsprites::atlas_reset()
@@ -389,7 +314,6 @@ uint8_t* hwsprites::atlas_pool_alloc(uint32_t bytes, bool drain_on_overflow)
 }
 
 uint32_t hwsprites::atlas_extract_count()  const { return atlas_extracts; }
-uint32_t hwsprites::baked_extract_count()  const { return baked_extracts; }
 uint32_t hwsprites::atlas_hit_count()      const { return atlas_hits; }
 uint32_t hwsprites::atlas_overflow_count() const { return atlas_overflows; }
 uint32_t hwsprites::atlas_used_bytes()     const
@@ -431,7 +355,25 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     uint16_t bank, uint16_t addr, uint16_t height, int16_t pitch, bool flip,
     uint16_t vzoom, bool drain_on_overflow)
 {
-    if (!atlas_pool || height == 0 || vzoom == 0) return nullptr;
+    // Hard fail on any condition that would silently drop a sprite. Callers
+    // are responsible for filtering hidden/zero-height slots upstream — see
+    // [[feedback-never-silent-drop-content]].
+    assertf(atlas_pool,
+            "hwsprites::atlas_get_or_extract called before atlas_init "
+            "(bank=%u addr=0x%04x h=%u pitch=%d flip=%u vzoom=%u)",
+            (unsigned)bank, (unsigned)addr, (unsigned)height,
+            (int)pitch, (unsigned)flip, (unsigned)vzoom);
+    assertf(height != 0,
+            "hwsprites::atlas_get_or_extract height=0 (bank=%u addr=0x%04x "
+            "pitch=%d flip=%u vzoom=%u) — caller must filter zero-height "
+            "ramBuff slots before invoking the atlas",
+            (unsigned)bank, (unsigned)addr, (int)pitch,
+            (unsigned)flip, (unsigned)vzoom);
+    assertf(vzoom != 0,
+            "hwsprites::atlas_get_or_extract vzoom=0 (bank=%u addr=0x%04x "
+            "h=%u pitch=%d flip=%u) — caller must clamp vzoom to >= 0x40",
+            (unsigned)bank, (unsigned)addr, (unsigned)height,
+            (int)pitch, (unsigned)flip);
 
     // Match CPU render(): row[i] reads source row floor(i * vzoom / 512).
     // After height iterations the last row touched is (height-1)*vzoom/512,
@@ -493,96 +435,14 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         }
     }
 
-    // ---- Baked-atlas fast path ------------------------------------------
-    // The bake holds one CI4 blob per (bank, addr, pitch, flip) tuple sized
-    // to the largest source_h ever seen for that sprite. Shorter source_h
-    // variants are just row-prefixes of the same blob, so we can PI-DMA
-    // only the first source_h rows (ci4_stride bytes each) from the cart
-    // into the bump pool. That replaces ~500 us of CPU EOR-walk + bitplane
-    // decode with a ~50-100 us PI transfer.
-#if !HWSPR_DIAG_FORCE_SPILLOVER
-    if (baked_blob_pi_addr)
-    {
-        const HwspritesBakedHit hit =
-            hwsprites_baked_lookup(bank, addr, pitch, flip, source_h);
-        const HwspritesBakedEntry* be = hit.be;
-        const uint16_t row_off = hit.row_offset;
-        const uint16_t avail_h = be ? (uint16_t)(be->h - row_off) : 0;
-        if (be && source_h <= avail_h)
-        {
-            const uint32_t ci4_stride = (uint32_t)be->w / 2;
-            // bytes to DMA: source_h rows of CI4, padded to 8 (matches the
-            // alignment we'd use for a freshly-extracted entry).
-            const uint32_t bytes =
-                (ci4_stride * (uint32_t)source_h + 7u) & ~7u;
-            // Row-offset variant: skip the first row_off rows of the baked
-            // blob. ci4_stride is a multiple of 4 (w is a multiple of 8), so
-            // the PI source stays 2-byte aligned — fine for dma_read.
-            const uint32_t skip_bytes = (uint32_t)row_off * ci4_stride;
-
-            uint8_t* dst = atlas_pool_alloc(bytes, drain_on_overflow);
-
-            // PI-DMA the source-h prefix. dma_read takes a PI address inside
-            // cart space; the bake aligned each entry to 8 bytes, so the
-            // base + offset is 8-byte aligned and the length is 2-aligned.
-            //
-            // The same atlas slot may still hold cached lines from a previous
-            // EOR-walk extract (that path writes cached + writeback, but does
-            // not invalidate). dma_read does no cache management, so we must
-            // wipe those stale lines first or the next cached read of this
-            // RDRAM range picks them up. See [[dma-read-no-cache-mgmt]].
-            data_cache_hit_writeback_invalidate(dst, bytes);
-            dma_read(dst,
-                     baked_blob_pi_addr + be->blob_offset + skip_bytes,
-                     bytes);
-
-            AtlasEntry& e = atlas_entries[insert_idx];
-            e.key        = key;
-            e.ci4        = dst;
-            e.w          = be->w;
-            e.h          = source_h;             // requested variant height
-            // Shadow bbox is reported in baked coords (rows 0..be->h-1). For a
-            // row-offset variant, shift y by -row_off and clip to source_h so
-            // the body pass doesn't sample rows we never DMA'd in.
-            e.has_shadow = be->has_shadow;
-            e.shadow_x0  = be->shadow_x0;
-            e.shadow_x1  = be->shadow_x1;
-            if (e.has_shadow)
-            {
-                const uint16_t y0 = be->shadow_y0;
-                const uint16_t y1 = be->shadow_y1;
-                if (y1 <= row_off) {
-                    e.has_shadow = 0;
-                } else {
-                    e.shadow_y0 = (y0 > row_off) ? (uint16_t)(y0 - row_off) : 0;
-                    const uint16_t y1_shift = (uint16_t)(y1 - row_off);
-                    e.shadow_y1 = (y1_shift > source_h) ? source_h : y1_shift;
-                }
-            }
-            if (e.has_shadow && e.shadow_y1 <= e.shadow_y0)
-                e.has_shadow = 0;
-            if (!e.has_shadow)
-            {
-                e.shadow_x0 = e.shadow_y0 = 0;
-                e.shadow_x1 = e.shadow_y1 = 0;
-            }
-
-            baked_extracts++;
-            atlas_extracts++;
-            return &e;
-        }
-    }
-#endif
-
-    // ---- Spillover: CPU EOR walk + bitplane decode (the original path) --
-    // The bank source lives on cart. DMA only the word range this extract
-    // will touch: rows step by `pitch` from `addr` for source_h rows, each
-    // row walks ≤ 32 words to the EOR sentinel — so the window is bounded
-    // by [row_lo - 32, row_hi + 32] in word units, where row_lo/row_hi are
-    // the smaller/larger of first_row (= addr) and last_row (= addr +
-    // (h-1)*pitch). Bailing here would silently corrupt rendering — assert
-    // instead so a missing DFS payload halts at boot, not mid-frame.
-    // See [[feedback-never-silent-drop-content]].
+    // ---- Lazy decode: every miss runs the CPU EOR walk and inserts into
+    // atlas_entries. The 1024-entry hash cache amortizes the ~500us decode
+    // across subsequent frames; steady-state hit rate ≈ 100% after the
+    // first frame of any scene. The original "static bake → PI-DMA the
+    // pre-decoded blob" path was removed because it required us to find
+    // every descriptor offline, including runtime-y_adj-computed addresses
+    // that don't appear in rom0 as stored sub-descriptors — see the
+    // hwsprites discussion in 1a974f7.
     assertf(sprites_pi_addr,
             "hwsprites: spillover invoked before atlas_init resolved "
             "sprites_native.bin");
@@ -792,6 +652,11 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
 // sprites draw in two passes: a darken pass (constant 50% multiply, slot 0xa
 // only) followed by a body pass (regular TLUT with slot 0xa masked off) so
 // the sprite's opaque pixels still render on top of the shadow they cast.
+// Diagnostic flag — set to 1 from gdb to dump every render_rdp emit one
+// frame at a time. Auto-decrements each call so e.g. set =4 to capture the
+// next 4 priority calls (one frame = 4 priorities).
+volatile int hwsprites_dump_emit = 0;
+
 void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                            int x_offset, int y_offset)
 {
@@ -799,7 +664,10 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // before ROM load so the pool gets a clean contiguous region; this is
     // just a safety net for unit-test / replay paths that don't.
     if (!atlas_pool) atlas_init();
-    if (!atlas_pool) return;
+    assertf(atlas_pool,
+            "hwsprites::render_rdp invoked but atlas_pool is NULL after "
+            "lazy atlas_init — refusing to silently drop a frame's worth "
+            "of sprites");
 
     // Per-call telemetry — mirrors hwtiles::render_rdp_tile_layers. Locals
     // are incremented at the relevant sites and flushed to n64_profile at
@@ -811,6 +679,49 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     uint32_t spr_vis = 0;
     uint32_t spr_loads = 0;
     uint32_t spr_tlut_uploads = 0;
+
+    // ONE-SHOT DIAGNOSTIC — dump every priority-8 sprite's input + emit state
+    // for the first 4 calls after activation, then disable. Activated by
+    // setting hwsprites_dump_emit=1 from gdb. Logs go to the ISViewer.
+    extern volatile int hwsprites_dump_emit;
+    int dump_emit = hwsprites_dump_emit;
+    if (dump_emit) {
+        hwsprites_dump_emit = dump_emit - 1;
+        debugf("[spr-dump] call pri=%u  x_off=%d y_off=%d  remaining=%d\n",
+               (unsigned)priority, x_offset, y_offset, dump_emit - 1);
+        // Dump EVERY slot (including hidden / wrong-priority / zero-height)
+        // exactly once per frame — only on the first priority call of a
+        // frame, to avoid 4× duplication.
+        if (priority == 1u || dump_emit == 4) {
+            for (uint16_t da = 0; da < SPRITE_RAM_SIZE; da += 8) {
+                uint16_t w0 = ramBuff[da+0];
+                if ((w0 & 0x8000) != 0) {
+                    debugf("[spr-dump-all] slot=%3u TERM\n", (unsigned)(da/8));
+                    break;
+                }
+                uint16_t hide_r   = (w0 & 0x5000);
+                int32_t  height_r = ((ramBuff[da+5] >> 8) & 0xff) + 1;
+                uint32_t spr_pri  = 1u << ((ramBuff[da+3] >> 12) & 3);
+                int16_t  bank_r   = (w0 >> 9) & 7;
+                uint32_t addr_r   = ramBuff[da+1];
+                int32_t  pitch_r  = ((ramBuff[da+2] >> 1)
+                    | ((ramBuff[da+4] & 0x1000) << 3)) >> 8;
+                int32_t  xpos_r   = ramBuff[da+6];
+                int32_t  top_r    = (w0 & 0x1ff) - 0x100;
+                int32_t  vzoom_r  = ramBuff[da+3] & 0x7ff;
+                int32_t  flip_r   = (~ramBuff[da+4] >> 14) & 1;
+                int32_t  xdelta_r = ((ramBuff[da+4] & 0x2000) != 0) ? 1 : -1;
+                debugf("[spr-dump-all] slot=%3u pri=%lu hide=0x%04x h=%3d "
+                       "b=%d a=0x%04x pit=%d flip=%d xpos=%4d top=%4d "
+                       "xd=%+d vz=%4d\n",
+                       (unsigned)(da/8), (unsigned long)spr_pri,
+                       (unsigned)hide_r, (int)height_r,
+                       (int)bank_r, (unsigned)addr_r, (int)pitch_r,
+                       (int)flip_r, (int)xpos_r, (int)top_r,
+                       (int)xdelta_r, (int)vzoom_r);
+            }
+        }
+    }
 
 // Set to 1 to enable per-sprite counters (atlas loads, shadow tight-bbox %,
 // palette-cache hit rate). Adds ~10 counter ops per sprite × ~80-150 sprites/
@@ -1003,7 +914,17 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             (uint16_t)bank, (uint16_t)addr,
             (uint16_t)height, (int16_t)pitch, flip != 0,
             (uint16_t)vzoom, /*drain_on_overflow=*/true);
-        if (!e) continue;
+        // No `if (!e) continue;` — atlas_get_or_extract is contractually
+        // required to produce an entry for every enabled sprite slot the
+        // engine emits. Silently skipping here would drop content (e.g.
+        // overpass scenery sub-sprites) without any visible signal. See
+        // [[feedback-never-silent-drop-content]].
+        assertf(e,
+                "hwsprites: pass-2 atlas miss for enabled sprite slot %u "
+                "(bank=%u addr=0x%04x h=%d pitch=%d flip=%d vzoom=%d)",
+                (unsigned)(data / 8),
+                (unsigned)bank, (unsigned)addr, (int)height,
+                (int)pitch, (int)flip, (int)vzoom);
 
         // Shadow pass is a 2-cycle RDP operation (darken blender). If this
         // sprite carries no shadow silhouette in its CI4 data, the pass
@@ -1053,10 +974,27 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             ? (float)top
             : ((float)top  - zoomed_h + 1.0f);
 
-        if (screen_x + zoomed_w <= 0.0f) continue;
-        if (screen_x >= (float)config.s16_width) continue;
-        if (screen_y + zoomed_h <= 0.0f) continue;
-        if (screen_y >= (float)config.s16_height) continue;
+        bool culled = false;
+        const char* cull_reason = "";
+        if      (screen_x + zoomed_w <= 0.0f)        { culled = true; cull_reason = "left-of-screen"; }
+        else if (screen_x >= (float)config.s16_width){ culled = true; cull_reason = "right-of-screen"; }
+        else if (screen_y + zoomed_h <= 0.0f)        { culled = true; cull_reason = "above-screen"; }
+        else if (screen_y >= (float)config.s16_height){culled = true; cull_reason = "below-screen"; }
+
+        if (dump_emit) {
+            debugf("[spr-dump] slot=%3u b=%u a=0x%04x h=%3d pit=%2d flip=%d "
+                   "xpos=%4d top=%4d xd=%+d vz=%4d hz=%4d "
+                   "atlas=%ux%u zw=%5.1f zh=%5.1f screen=(%5.1f,%5.1f) "
+                   "cull=%s%s\n",
+                   (unsigned)(data/8),
+                   (unsigned)bank, (unsigned)addr, (int)height, (int)pitch, (int)flip,
+                   (int)xpos, (int)top, (int)xdelta, (int)vzoom, (int)hzoom,
+                   (unsigned)e->w, (unsigned)e->h,
+                   (double)zoomed_w, (double)zoomed_h,
+                   (double)screen_x, (double)screen_y,
+                   culled ? "Y:" : "N", cull_reason);
+        }
+        if (culled) continue;
 
         spr_vis++;
 
@@ -1277,19 +1215,88 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             continue;
         }
 
-        // ---- Fallback: rdpq_tex_blit (sprite too big to fit one strip) --
-        // ~5% of sprites per profile. Strip walker re-loads pixels per
-        // strip; shadow sprites pay it twice. tex_blit also writes TILE0/
-        // TILE1 internally, so invalidate the bypass cache afterwards.
-        surface_t spr_surf = surface_make_linear(e->ci4, FMT_CI4, e->w, e->h);
-        rdpq_blitparms_t parms = {};
-        parms.scale_x = scale_x;
-        parms.scale_y = scale_y;
-        parms.flip_x  = mirror_x;
-        parms.flip_y  = mirror_y;
+        // ---- Custom strip walker (sprite too big to fit one TMEM strip)
+        //
+        // We used to call rdpq_tex_blit here. It silently failed to emit
+        // any primitives for some big CI4 sprites with scale + no flip
+        // (overpass top-beam right half on stage 1, Japan), causing
+        // visible holes in scenery. Rather than try to localize the
+        // libdragon bug, we walk strips manually: LOAD_BLOCK as many full
+        // rows as fit in 2 KB of TMEM, then emit one rdpq_texture_
+        // rectangle_scaled per strip — the exact pattern the bypass path
+        // uses, just repeated across the sprite. Uses the same LRU TLUT
+        // cache as the bypass path so there's no palette-zero collision.
+        //
+        // [[feedback-never-silent-drop-content]] — this path must not
+        // silently no-op for any (w, h) tuple.
+        const uint32_t fb_pre_prims = n64_profile::prim_count;
+        const uint32_t rows_per_strip = 2048u / ci4_stride;
+        assertf(rows_per_strip > 0,
+                "hwsprites: atlas stride %u exceeds 2 KB TMEM (w=%u h=%u)",
+                (unsigned)ci4_stride, (unsigned)e->w, (unsigned)e->h);
+
+        auto emit_strips = [&](int palette_slot,
+                               int sx0, int sy0, int sx1, int sy1) {
+            // Per-strip LOAD_BLOCK + texture_rectangle. (sx0,sy0)–(sx1,sy1)
+            // is the requested source sub-rect (used for shadow tight
+            // bbox); the strip walker clamps each strip to its rows. We
+            // bind TILE0/TILE1 once and only re-issue set_texture_image_raw
+            // + LOAD_BLOCK per strip.
+            rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0, NULL);
+            rdpq_tileparms_t tparms = {};
+            tparms.palette = (uint8_t)palette_slot;
+            rdpq_set_tile(TILE0, FMT_CI4, 0, (uint16_t)ci4_stride, &tparms);
+            cur_tile_palette = palette_slot;
+
+            const int row_lo = sy0;
+            const int row_hi = sy1;
+            for (int row = row_lo; row < row_hi; ) {
+                int strip_h = (int)rows_per_strip;
+                if (row + strip_h > row_hi) strip_h = row_hi - row;
+
+                uint8_t* strip_src = e->ci4 + (uint32_t)row * ci4_stride;
+                uint32_t strip_texels =
+                    ((uint32_t)strip_h * ci4_stride) / 2;  // RGBA16 texels
+
+                rdpq_set_texture_image_raw(0, PhysicalAddr(strip_src),
+                                           FMT_RGBA16,
+                                           (e->w + 1) / 4, strip_h);
+                rdpq_load_block(TILE1, 0, 0,
+                                (uint16_t)strip_texels,
+                                (uint16_t)ci4_stride);
+                rdpq_set_tile_size(TILE0, 0, 0, e->w, strip_h);
+
+                // Local strip coords (TMEM is rebased to row 0 per strip).
+                int strip_sx0 = sx0;
+                int strip_sx1 = sx1;
+                int strip_ty0 = 0;
+                int strip_ty1 = strip_h;
+
+                // Destination y-range for this strip in screen space.
+                const float dstrip_y0 = dst_y + (float)row       * scale_y;
+                const float dstrip_y1 = dst_y + (float)(row + strip_h) * scale_y;
+                // X range covers the requested sub-rect, scaled to screen.
+                const float dstrip_x0 = dst_x + (float)sx0 * scale_x;
+                const float dstrip_x1 = dst_x + (float)sx1 * scale_x;
+
+                float rx0 = dstrip_x0, rx1 = dstrip_x1;
+                float ry0 = dstrip_y0, ry1 = dstrip_y1;
+                if (mirror_x) { float t = rx0; rx0 = rx1; rx1 = t; }
+                if (mirror_y) { float t = ry0; ry0 = ry1; ry1 = t; }
+
+                rdpq_texture_rectangle_scaled(
+                    TILE0, rx0, ry0, rx1, ry1,
+                    strip_sx0, strip_ty0, strip_sx1, strip_ty1);
+                n64_profile::prim_count++;
+                spr_loads++;
+
+                row += strip_h;
+            }
+        };
 
         if (shadow)
         {
+            // Pass 1: shadow darken. Uses the slot-0xa-only TLUT in slot 0.
             if (pipeline != 1)
             {
                 rdpq_set_fog_color(RGBA32(0, 0, 0, 128));
@@ -1298,12 +1305,19 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY_CONST);
                 pipeline = 1;
             }
-            rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut, 0, 16);
-            rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
-            n64_profile::prim_count++;
-            spr_tlut_uploads++;
-            spr_loads++;
+            if (!shadow_mask_loaded)
+            {
+                rdpq_tex_upload_tlut((uint16_t*)shadow_mask_tlut,
+                                     TLUT_SLOT_SHADOW_MASK * 16, 16);
+                shadow_mask_loaded = true;
+                spr_tlut_uploads++;
+            }
+            emit_strips(TLUT_SLOT_SHADOW_MASK,
+                        e->shadow_x0, e->shadow_y0,
+                        e->shadow_x1, e->shadow_y1);
 
+            // Pass 2: opaque body. Reload mode and a fresh body TLUT (slot
+            // 0xa zeroed) into the shadow-body ring.
             if (pipeline != 0)
             {
                 rdpq_mode_combiner(RDPQ_COMBINER_TEX);
@@ -1317,11 +1331,9 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
             uint16_t* scratch_uc = (uint16_t*)UncachedAddr(scratch);
             for (int i = 0; i < 16; i++) scratch_uc[i] = color_tlut[i];
             scratch_uc[10] = 0;
-            rdpq_tex_upload_tlut(scratch, 0, 16);
-            rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
-            n64_profile::prim_count++;
+            rdpq_tex_upload_tlut(scratch, TLUT_SLOT_SHADOW_BODY * 16, 16);
             spr_tlut_uploads++;
-            spr_loads++;
+            emit_strips(TLUT_SLOT_SHADOW_BODY, 0, 0, e->w, e->h);
         }
         else
         {
@@ -1331,18 +1343,60 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 rdpq_mode_blender(0);
                 pipeline = 0;
             }
-            rdpq_tex_upload_tlut((uint16_t*)color_tlut, 0, 16);
-            rdpq_tex_blit(&spr_surf, dst_x, dst_y, &parms);
-            n64_profile::prim_count++;
-            spr_tlut_uploads++;
-            spr_loads++;
+            // Same opaque-LRU lookup the bypass path uses.
+            int slot;
+            if (color_tlut == prev_opaque_tag)
+            {
+                slot = prev_opaque_slot;
+            }
+            else
+            {
+                slot = -1;
+                uint32_t best_seq = ~0u;
+                int best_i = 0;
+                for (int i = 0; i < TLUT_N_OPAQUE_SLOTS; i++)
+                {
+                    if (opaque_tag[i] == color_tlut) { slot = i; break; }
+                    if (opaque_seq[i] < best_seq)
+                    {
+                        best_seq = opaque_seq[i];
+                        best_i = i;
+                    }
+                }
+                if (slot < 0)
+                {
+                    slot = best_i;
+                    rdpq_tex_upload_tlut((uint16_t*)color_tlut,
+                                         (TLUT_SLOT_OPAQUE_BASE + slot) * 16, 16);
+                    opaque_tag[slot] = color_tlut;
+                    spr_tlut_uploads++;
+                }
+                prev_opaque_tag  = color_tlut;
+                prev_opaque_slot = slot;
+            }
+            opaque_seq[slot] = ++next_seq;
+            emit_strips(TLUT_SLOT_OPAQUE_BASE + slot, 0, 0, e->w, e->h);
         }
-        // tex_blit clobbers TILE0/TILE1 and uploads its TLUT to palette
-        // slot 0, so invalidate the bypass cache for slots 0/TILE0. Slots
-        // 2..15 (opaque LRU) are untouched, so we leave those tags intact.
-        last_atlas_ci4    = NULL;
-        cur_tile_palette  = -1;
-        shadow_mask_loaded = false;
+        // We re-bound TILE0/TILE1, so invalidate the bypass cache so the
+        // next regular-bypass sprite re-binds (cur_tile_palette was set
+        // inside emit_strips for diagnostic clarity).
+        last_atlas_ci4 = NULL;
+
+        if (dump_emit) {
+            const uint32_t emitted = n64_profile::prim_count - fb_pre_prims;
+            debugf("[spr-dump]   STRIPS slot=%u w=%u h=%u ci4_b=%u "
+                   "rows/strip=%u scale=(%.3f,%.3f) flip=(%d,%d) "
+                   "dst=(%.1f,%.1f) shadow=%d has_shadow=%u "
+                   "prims=%u\n",
+                   (unsigned)(data/8),
+                   (unsigned)e->w, (unsigned)e->h, (unsigned)ci4_bytes,
+                   (unsigned)rows_per_strip,
+                   (double)scale_x, (double)scale_y,
+                   (int)mirror_x, (int)mirror_y,
+                   (double)dst_x, (double)dst_y,
+                   (int)shadow, (unsigned)e->has_shadow,
+                   (unsigned)emitted);
+        }
     }
 
 #if HWSPR_PROFILE

@@ -14,6 +14,10 @@
 
 #include "../trackloader.hpp"
 
+#ifdef __mips__
+#include <libdragon.h>
+#endif
+
 #include "engine/oanimseq.hpp"
 #include "engine/ocrash.hpp"
 #include "engine/oferrari.hpp"
@@ -363,9 +367,19 @@ void OSprites::map_palette(oentry* spr)
 
 void OSprites::do_spr_order_shadows(oentry* input)
 {
-    // LayOut specific fix to avoid memory crash on over populated scenery segments
+    // Pool exhausted — silently dropping a sprite here loses scenery
+    // content. See [[assertions-over-logs]].
+#ifdef __mips__
+    assertf(spr_cnt_main + spr_cnt_shadow < JUMP_ENTRIES_TOTAL,
+            "osprites: do_spr_order_shadows MAIN-add pool exhausted "
+            "(spr_cnt_main=%u + spr_cnt_shadow=%u >= %u). Bump "
+            "SPRITE_ENTRIES (osprites.hpp).",
+            (unsigned)spr_cnt_main, (unsigned)spr_cnt_shadow,
+            (unsigned)JUMP_ENTRIES_TOTAL);
+#else
     if (spr_cnt_main + spr_cnt_shadow >= JUMP_ENTRIES_TOTAL)
         return;
+#endif
 
     // Use priority as lookup into table. Assume we're on boundaries of 0x10
     uint16_t priority = (input->priority & 0x1FF) << 4;
@@ -384,9 +398,19 @@ void OSprites::do_spr_order_shadows(oentry* input)
     // test_shadow: 
     if (!(input->control & SHADOW)) return;
 
-    // LayOut specific fix to avoid memory crash on over populated scenery segments
+    // Pool exhausted — silently dropping a shadow sprite hides scenery
+    // shadows. See [[assertions-over-logs]].
+#ifdef __mips__
+    assertf(spr_cnt_main + spr_cnt_shadow < JUMP_ENTRIES_TOTAL,
+            "osprites: do_spr_order_shadows SHADOW-add pool exhausted "
+            "(spr_cnt_main=%u + spr_cnt_shadow=%u >= %u). Bump "
+            "SPRITE_ENTRIES (osprites.hpp).",
+            (unsigned)spr_cnt_main, (unsigned)spr_cnt_shadow,
+            (unsigned)JUMP_ENTRIES_TOTAL);
+#else
     if (spr_cnt_main + spr_cnt_shadow >= JUMP_ENTRIES_TOTAL)
         return;
+#endif
 
     input->dst_index = spr_cnt_shadow;
     spr_cnt_shadow++;                       // Increment total shadow count
@@ -657,11 +681,29 @@ void OSprites::do_sprite(oentry* input)
 
     // Hide Sprite if off screen (note bug fix to solve shadow wrapping issue on original game)
     // I think this bug might be permanently fixed with the introduction of widescreen mode
-    // as I had to change the storage size of the x-cordinate. 
+    // as I had to change the storage size of the x-cordinate.
     // Unsetting fix_bugs may no longer revert to the original behaviour.
     if (sprite_y2 < 256 || sprite_y1 > 479 ||
         sprite_x2 < x2_bounds || (config.engine.fix_bugs ? sprite_x1 >= x1_bounds : sprite_x1 > x1_bounds))
     {
+        extern volatile int hwsprites_dump_emit;
+        if (hwsprites_dump_emit) {
+            const char* reason = "?";
+            if      (sprite_y2 < 256)         reason = "y2<256";
+            else if (sprite_y1 > 479)         reason = "y1>479";
+            else if (sprite_x2 < x2_bounds)   reason = "x2<x2_bounds";
+            else                              reason = "x1>=x1_bounds";
+            debugf("[osp-cull] BOUNDS jt=%u type=0x%02x addr=0x%08lx "
+                   "spr_x=[%d,%d] spr_y=[%d,%d] xw1=%d yw=%d zoom=0x%x "
+                   "ctrl=0x%04x bounds=[%u,%u) reason=%s\n",
+                   (unsigned)input->jump_index, (unsigned)input->type,
+                   (unsigned long)input->addr,
+                   (int)sprite_x1, (int)sprite_x2,
+                   (int)sprite_y1, (int)sprite_y2,
+                   (int)input->xw1, (int)input->yw,
+                   (unsigned)input->zoom, (unsigned)input->control,
+                   (unsigned)x2_bounds, (unsigned)x1_bounds, reason);
+        }
         hide_hwsprite(input, output);
         return;
     }

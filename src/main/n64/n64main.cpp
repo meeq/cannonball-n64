@@ -888,9 +888,8 @@ int main(int /*argc*/, char* /*argv*/[])
                 // Sprite-cache state at the outlier — flagging an atlas reset
                 // (ovf bumped vs the prior outlier) immediately tells us the
                 // spike came from cache cold-start instead of normal load.
-                debugf("    spr.cache: ext=%4lu bake=%4lu hit=%4lu ovf=%lu used=%lu\n",
+                debugf("    spr.cache: ext=%4lu hit=%4lu ovf=%lu used=%lu\n",
                        (unsigned long)video.sprite_layer->atlas_extract_count(),
-                       (unsigned long)video.sprite_layer->baked_extract_count(),
                        (unsigned long)video.sprite_layer->atlas_hit_count(),
                        (unsigned long)video.sprite_layer->atlas_overflow_count(),
                        (unsigned long)video.sprite_layer->atlas_used_bytes());
