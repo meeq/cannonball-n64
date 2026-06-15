@@ -4,9 +4,9 @@
 #
 # Format selection:
 #   *_bg.png   → RGBA16 (title_bg / options_bg keep their full-color art)
-#   everything else → CI4 (text labels, pills, cursor — single-colour glyphs
-#       so the runtime can re-tint them via rdpq_set_prim_color + the
-#       combiner pipeline, no per-state palette swap needed)
+#   everything else → IA4 (text labels, pills, cursor — black-outlined
+#       grayscale glyphs whose intensity ramp drives the combiner's
+#       TEX0×PRIM tint, no palette / TLUT upload needed per draw)
 #
 # Inputs from caller (set BEFORE include):
 #   N64_DFS_ROOT — DFS staging directory (same one passed to n64_create_rom).
@@ -47,7 +47,7 @@ foreach(png ${_MENU_PNGS})
     if(stem MATCHES "_bg$")
         set(_fmt "RGBA16")
     else()
-        set(_fmt "CI4")
+        set(_fmt "IA4")
     endif()
 
     add_custom_command(

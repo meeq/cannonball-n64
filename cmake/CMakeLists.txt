@@ -229,13 +229,13 @@ include(bake-sprites.cmake)
 target_sources(cannonball PRIVATE "${BAKE_SPRITES_INDEX_SRC}")
 add_dependencies(cannonball bake-sprites)
 
-# Pre-boot SEGA splash: CI8 sweep sprite baked from assets/sega_sweep.png +
-# CI4 fade sprite baked from assets/sega_fade/*.png (via build_fade.py +
-# mksprite). The generated palette header lives in SPLASH_FADE_HEADER_DIR
-# and is consumed by src/main/n64/splash.cpp. See cmake/bake-splash.cmake.
+# Pre-boot SEGA splash: CI8 sweep sprite baked from assets/splash/sweep.png +
+# IA4 silhouette sprite baked from assets/splash/fade.png. The fade tint comes
+# entirely from a per-frame PRIMITIVE colour and a combiner LERP in
+# src/main/n64/splash.cpp, so no generated palette header is needed.
+# See cmake/bake-splash.cmake.
 include(bake-splash.cmake)
 add_dependencies(cannonball bake-splash)
-target_include_directories(cannonball PRIVATE "${SPLASH_FADE_HEADER_DIR}")
 
 # Pre-engine title + options menu sprites: PNG → .sprite (CI4 for text labels
 # and pills so the runtime can re-tint them via the rdpq combiner; RGBA16 for

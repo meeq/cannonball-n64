@@ -3,9 +3,9 @@
 
     Render path is intentionally narrow:
       * rdpq_sprite_blit + a single per-frame combiner that multiplies the
-        CI4 texel RGB by a runtime prim colour — so the labels, pills and
-        cursor can be re-tinted (highlight #F9E231, dim grey for OFF pills)
-        without per-state palette swaps.
+        IA4 texel intensity by a runtime prim colour — so the labels,
+        pills and cursor can be re-tinted (highlight #F9E231, dim grey
+        for OFF pills) without per-sprite TLUT swaps.
       * Backgrounds (title_bg, options_bg) blit through the same combiner
         with prim = white, which leaves the RGBA16 chrome untouched.
       * One caret sprite (▲) re-used for ▶ ◀ ▲ ▼ via rdpq_blitparms_t.theta.
@@ -320,7 +320,7 @@ namespace
     // ===== Render helpers ===================================================
 
     // Per-frame mode setup: combiner = TEX0.rgb × PRIM.rgb, alpha = TEX0.a.
-    // Gives runtime tinting of every CI4 sprite while RGBA16 backgrounds
+    // Gives runtime tinting of every IA4 sprite while RGBA16 backgrounds
     // pass through unchanged when PRIM = white.
     void setup_render_mode()
     {

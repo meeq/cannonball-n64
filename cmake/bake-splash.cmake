@@ -1,23 +1,21 @@
 # -----------------------------------------------------------------------------
-# bake-splash — convert assets/splash/sega_sweep.png and
-# assets/splash/sega_fade/*.png into the two sprites the pre-boot intro
-# animation needs.
+# bake-splash — convert assets/splash/{sweep,fade}.png and sega.mp3 into the
+# sprites + audio the pre-boot intro animation needs.
 #
-#   sega_sweep.sprite — CI8 baked from assets/splash/sega_sweep.png via
-#                       libdragon mksprite. Carries the rainbow-indexed
-#                       wordmark used during the sweep phase; the splash
-#                       runtime re-indexes its pixels at boot so each
-#                       x-stripe gets a unique slot.
+#   sweep.sprite — CI8 baked from assets/splash/sweep.png via libdragon
+#                  mksprite. Carries the 18-hue rainbow-indexed wordmark
+#                  (transparent background); the splash runtime re-indexes
+#                  its pixels at boot so each x-stripe gets a unique slot.
 #
-#   sega_fade.sprite  — CI4 baked from assets/splash/sega_fade/4.png after
-#                       a Python preprocess step. The four sega_fade frames
-#                       are the same anti-aliased SEGA wordmark with
-#                       progressively richer palettes (pale cyan → cyan →
-#                       mid blue → deep blue); build_fade.py canonicalises
-#                       them into one 7-level indexed PNG plus a generated
-#                       header (sega_fade_palettes.h) holding the four
-#                       RGBA16 palettes. The runtime cycles those palettes
-#                       during the fade phase.
+#   fade.sprite  — IA4 baked from assets/splash/fade.png. Anti-aliased
+#                  SEGA silhouette where dark intensities mark the logo
+#                  body and lighter intensities mark the AA edges. The
+#                  splash runtime sets a per-frame PRIMITIVE colour and
+#                  uses the colour combiner LERP(PRIM, ONE, TEX0_I) to
+#                  tint the body and feather the edges into white.
+#
+#   sega.wav64   — VADPCM jingle resampled to 22050 Hz, played at the
+#                  fade-phase boundary.
 #
 # Inputs from caller (set BEFORE include):
 #   N64_DFS_ROOT  — DFS staging directory (same one passed to n64_create_rom).
@@ -27,7 +25,6 @@
 #   SPLASH_STAGED_SWEEP_SPRITE  — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
 #   SPLASH_STAGED_FADE_SPRITE   — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
 #   SPLASH_STAGED_AUDIO         — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
-#   SPLASH_FADE_HEADER_DIR      — include path for the generated palette header
 #   target  bake-splash         — ALL target producing the staged files
 # -----------------------------------------------------------------------------
 
@@ -38,10 +35,6 @@ endif()
 find_program(MKSPRITE_EXE mksprite
     PATHS "${N64_BINDIR}"
     DOC   "libdragon mksprite (PNG -> .sprite converter)"
-    REQUIRED)
-
-find_program(UV_EXE uv
-    DOC   "uv (Python script runner; manages build_fade.py's pillow dep)"
     REQUIRED)
 
 find_program(AUDIOCONV64_EXE audioconv64
@@ -55,14 +48,14 @@ file(MAKE_DIRECTORY "${_SPLASH_BUILD_DIR}")
 file(MAKE_DIRECTORY "${_SPLASH_STAGE_DIR}")
 
 # -----------------------------------------------------------------------------
-# Sweep sprite: assets/sega_sweep.png -> sega_sweep.sprite (CI8).
-# --dither NONE keeps the 20 source RGB triples exact in the quantised TLUT
-# so the runtime's per-stripe re-index can deterministically locate the
-# white slot.
+# Sweep sprite: assets/splash/sweep.png -> sweep.sprite (CI8).
+# --dither NONE keeps the 18 source rainbow hues exact in the quantised
+# TLUT so the runtime's per-stripe re-index can deterministically locate
+# the transparent bg slot (the only entry with alpha=0).
 # -----------------------------------------------------------------------------
-set(_SPLASH_SWEEP_SRC          "${CMAKE_CURRENT_SOURCE_DIR}/../assets/splash/sega_sweep.png")
-set(_SPLASH_SWEEP_BUILT_SPRITE "${_SPLASH_BUILD_DIR}/sega_sweep.sprite")
-set(SPLASH_STAGED_SWEEP_SPRITE "${_SPLASH_STAGE_DIR}/sega_sweep.sprite")
+set(_SPLASH_SWEEP_SRC          "${CMAKE_CURRENT_SOURCE_DIR}/../assets/splash/sweep.png")
+set(_SPLASH_SWEEP_BUILT_SPRITE "${_SPLASH_BUILD_DIR}/sweep.sprite")
+set(SPLASH_STAGED_SWEEP_SPRITE "${_SPLASH_STAGE_DIR}/sweep.sprite")
 
 add_custom_command(
     OUTPUT  "${_SPLASH_SWEEP_BUILT_SPRITE}"
@@ -72,7 +65,7 @@ add_custom_command(
             -o "${_SPLASH_BUILD_DIR}"
             "${_SPLASH_SWEEP_SRC}"
     DEPENDS "${_SPLASH_SWEEP_SRC}"
-    COMMENT "[BAKE] sega_sweep.sprite"
+    COMMENT "[BAKE] sweep.sprite"
     VERBATIM)
 
 add_custom_command(
@@ -80,52 +73,37 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${_SPLASH_SWEEP_BUILT_SPRITE}" "${SPLASH_STAGED_SWEEP_SPRITE}"
     DEPENDS "${_SPLASH_SWEEP_BUILT_SPRITE}"
-    COMMENT "[BAKE] stage sega_sweep.sprite"
+    COMMENT "[BAKE] stage sweep.sprite"
     VERBATIM)
 
 # -----------------------------------------------------------------------------
-# Fade sprite: assets/sega_fade/*.png -> sega_fade.sprite (CI4) + palette header.
-# build_fade.py canonicalises the four fade frames into a single 7-level
-# indexed PNG and emits the matching palette table. mksprite then bakes the
-# indexed PNG into a CI4 sprite while preserving the level→index order.
+# Fade sprite: assets/splash/fade.png -> fade.sprite (IA4).
+# The source PNG is an anti-aliased silhouette of the SEGA wordmark over a
+# transparent background; mksprite converts it straight to IA4 (3-bit
+# intensity + 1-bit alpha). The runtime drives all colour from a per-frame
+# PRIMITIVE colour + combiner LERP — no palette is needed.
 # -----------------------------------------------------------------------------
-set(_FADE_SRC_DIR             "${CMAKE_CURRENT_SOURCE_DIR}/../assets/splash/sega_fade")
-set(_FADE_SCRIPT              "${CMAKE_CURRENT_SOURCE_DIR}/../tools/bake-splash/build_fade.py")
-set(_FADE_BUILT_PNG           "${_SPLASH_BUILD_DIR}/sega_fade.png")
-set(_FADE_BUILT_HEADER        "${_SPLASH_BUILD_DIR}/sega_fade_palettes.h")
-set(_FADE_BUILT_SPRITE        "${_SPLASH_BUILD_DIR}/sega_fade.sprite")
-set(SPLASH_STAGED_FADE_SPRITE "${_SPLASH_STAGE_DIR}/sega_fade.sprite")
-set(SPLASH_FADE_HEADER_DIR    "${_SPLASH_BUILD_DIR}")
+set(_SPLASH_FADE_SRC          "${CMAKE_CURRENT_SOURCE_DIR}/../assets/splash/fade.png")
+set(_SPLASH_FADE_BUILT_SPRITE "${_SPLASH_BUILD_DIR}/fade.sprite")
+set(SPLASH_STAGED_FADE_SPRITE "${_SPLASH_STAGE_DIR}/fade.sprite")
 
 add_custom_command(
-    OUTPUT  "${_FADE_BUILT_PNG}" "${_FADE_BUILT_HEADER}"
-    COMMAND "${UV_EXE}" run --quiet "${_FADE_SCRIPT}"
-            "${_FADE_SRC_DIR}" "${_FADE_BUILT_PNG}" "${_FADE_BUILT_HEADER}"
-    DEPENDS "${_FADE_SCRIPT}"
-            "${_FADE_SRC_DIR}/1.png"
-            "${_FADE_SRC_DIR}/2.png"
-            "${_FADE_SRC_DIR}/3.png"
-            "${_FADE_SRC_DIR}/4.png"
-    COMMENT "[BAKE] sega_fade.png + sega_fade_palettes.h"
-    VERBATIM)
-
-add_custom_command(
-    OUTPUT  "${_FADE_BUILT_SPRITE}"
+    OUTPUT  "${_SPLASH_FADE_BUILT_SPRITE}"
     COMMAND "${MKSPRITE_EXE}"
-            --format CI4
+            --format IA4
             --dither NONE
             -o "${_SPLASH_BUILD_DIR}"
-            "${_FADE_BUILT_PNG}"
-    DEPENDS "${_FADE_BUILT_PNG}"
-    COMMENT "[BAKE] sega_fade.sprite"
+            "${_SPLASH_FADE_SRC}"
+    DEPENDS "${_SPLASH_FADE_SRC}"
+    COMMENT "[BAKE] fade.sprite"
     VERBATIM)
 
 add_custom_command(
     OUTPUT  "${SPLASH_STAGED_FADE_SPRITE}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_FADE_BUILT_SPRITE}" "${SPLASH_STAGED_FADE_SPRITE}"
-    DEPENDS "${_FADE_BUILT_SPRITE}"
-    COMMENT "[BAKE] stage sega_fade.sprite"
+            "${_SPLASH_FADE_BUILT_SPRITE}" "${SPLASH_STAGED_FADE_SPRITE}"
+    DEPENDS "${_SPLASH_FADE_BUILT_SPRITE}"
+    COMMENT "[BAKE] stage fade.sprite"
     VERBATIM)
 
 # -----------------------------------------------------------------------------
@@ -159,5 +137,4 @@ add_custom_command(
 add_custom_target(bake-splash ALL
     DEPENDS "${SPLASH_STAGED_SWEEP_SPRITE}"
             "${SPLASH_STAGED_FADE_SPRITE}"
-            "${SPLASH_STAGED_AUDIO}"
-            "${_FADE_BUILT_HEADER}")
+            "${SPLASH_STAGED_AUDIO}")
