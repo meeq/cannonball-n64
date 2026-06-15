@@ -114,11 +114,11 @@ namespace
         // so the player goes straight from attract → game without a coin button.
         config.engine.freeplay = true;
 
-        // Engine timing: the main loop is vsync-capped to ~60 Hz by
-        // display_get(). tick_engine() only frame-skips when config.fps == 60
-        // or 120 — leaving video.fps == 0 (30 Hz path) makes the engine tick
-        // every iteration and run at 2x speed. video.fps = 1 selects
-        // "60 Hz display, 30 Hz engine tick" which matches the arcade cadence.
+        // Engine timing: render runs as fast as the work allows (30-60 fps
+        // depending on scene); engine logic is decoupled via wall-clock
+        // accumulator in tick_engine() and ticks at exactly 30 Hz. video.fps=1
+        // keeps cannonball's tick_fps at 30 while letting the background
+        // scroll interpolate on off-tick render frames (outrun.tick(false)).
         config.video.fps = 1;
 
         // Phase 4a audio: CPU-mixed YM2151 + SegaPCM → libdragon audio_push.
@@ -132,8 +132,29 @@ namespace
     {
         frame++;
 
-        if (config.fps == 60)      tick_frame = frame & 1;
-        else if (config.fps == 120) tick_frame = (frame & 3) == 1;
+        // Wall-clock decouple: engine ticks at exactly 30 Hz of real time
+        // regardless of render fps. The original frame-skip path (frame & 1
+        // when config.fps == 60) assumed the loop was vsync-locked at 60 Hz;
+        // when render dips to 30 the engine would drop to 15 Hz (half-speed
+        // gameplay), when it floats back to 60 the engine pops to 30 (feels
+        // like fast-forward). Accumulator-driven scheduling makes engine
+        // speed independent of render rate. State handlers below still
+        // override tick_frame=true for warmup transitions; that's fine, the
+        // accumulator phase carries through and resyncs on next steady-state
+        // iteration. Long stalls (boot menu, blocking loads) clamp the
+        // accumulator to avoid catch-up bursts on resume.
+        {
+            static uint64_t last_us = 0;
+            static uint64_t accum_us = 0;
+            constexpr uint64_t TICK_US = 1000000 / 30;  // 33333
+            uint64_t now_us = get_ticks_us();
+            if (last_us == 0) { last_us = now_us; accum_us = TICK_US; }
+            accum_us += (now_us - last_us);
+            last_us = now_us;
+            if (accum_us > TICK_US * 4) accum_us = TICK_US;
+            tick_frame = (accum_us >= TICK_US);
+            if (tick_frame) accum_us -= TICK_US;
+        }
 
         input.poll();
 
