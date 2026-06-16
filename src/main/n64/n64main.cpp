@@ -17,6 +17,7 @@
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
 #include "hwroad_rdp_rsp.hpp"
+#include "tile_cache_rsp.hpp"
 #include "../hwvideo/hwroad.hpp"
 #include "../hwvideo/hwsprites.hpp"
 
@@ -799,6 +800,14 @@ int main(int /*argc*/, char* /*argv*/[])
     n64::hwroad_rsp::init();
     n64::hwroad_rdp::init();
     n64::hwroad_rdp_rsp::init();
+
+    // Bring up the tile_cache RSP overlay. Phase 1: register + ping test
+    // proves the CPU↔RSP wiring works. Phase 2+ (DMA fill, palette count,
+    // pixel paste) is paused — Phase 2 hit a hang where cmd 1 dispatched
+    // but its first SP DMA never completed. To be revisited after the
+    // async-CPU fallback delivers the per-transition smoothing wins.
+    n64::tile_cache_rsp::init();
+    (void)n64::tile_cache_rsp::test_ping(0x12345678u);
 
     // Pre-flush the libdragon mixer's lazy per-channel sample buffers as
     // the LAST init step, so every other large alloc (video atlas/cache,

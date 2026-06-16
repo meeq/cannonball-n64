@@ -161,6 +161,7 @@ set(src_n64
     "${main_cpp_base}/n64/hwroad_rsp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp_rsp.cpp"
+    "${main_cpp_base}/n64/tile_cache_rsp.cpp"
 )
 
 set(SRCS
@@ -194,6 +195,11 @@ n64_add_rsp_ucode(cannonball
 # hwroad_rdp_rsp.cpp.
 n64_add_rsp_ucode(cannonball
     "${main_cpp_base}/n64/rsp_hwroad_rdp.S")
+
+# RSP overlay: tile-layer cache rebuilder. Source basename matches
+# DEFINE_RSP_UCODE(rsp_tile_cache) in tile_cache_rsp.cpp.
+n64_add_rsp_ucode(cannonball
+    "${main_cpp_base}/n64/rsp_tile_cache.S")
 
 # -----------------------------------------------------------------------------
 # DFS payload — ROMs + binary tile data baked into cannonball.z64
