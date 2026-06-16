@@ -5,6 +5,7 @@
 #include "romloader.hpp"
 #include "hwvideo/hwtiles.hpp"
 #include "frontend/config.hpp"
+#include "n64/tile_cache_rsp.hpp"
 #include <cstring>
 
 namespace n64_profile {
@@ -261,6 +262,14 @@ namespace tile_cache {
                 const uint8_t* tile_banks, uint32_t tiles_pi_addr,
                 const char* dbg_name)
     {
+        // Kick the RSP-side zero of L.buf BEFORE Pass 1 so its SP DMA fill
+        // (~0.7 ms for 256 KiB at the measured 368 MB/s) hides behind the
+        // CPU's tile-ram walk + histogram (~0.5 ms). We sync below right
+        // before Pass 2 first writes to L.buf. SP DMA writes bypass the
+        // CPU dcache, so no zeroing-side writeback is needed here — only
+        // the post-Pass-2 writeback of the CPU-side cell pastes remains.
+        n64::tile_cache_rsp::zero_async(L.buf, CACHE_BYTES);
+
         // Pass 1 — count palettes.
         uint16_t palette_count[128] = {};
         for (int my = 0; my < CACHE_CELLS_Y; my++)
@@ -300,8 +309,11 @@ namespace tile_cache {
         L.cells_in    = (uint16_t)dom_count;
         L.cells_out   = (uint16_t)(total_count - dom_count);
 
+        // Sync the kicked-off RSP zero before Pass 2 starts writing cells.
+        // If the SP DMA finished during Pass 1 (typical), this is ~free.
+        n64::tile_cache_rsp::zero_sync();
+
         // Pass 2 — paste pixels for dominant-palette cells only.
-        std::memset(L.buf, 0, CACHE_BYTES);
         for (int my = 0; my < CACHE_CELLS_Y; my++)
         {
             const bool my_top = my < 32;

@@ -31,6 +31,19 @@ namespace tile_cache_rsp
     // the buffer is all zeros. Returns true on full success.
     bool test_fill(uint32_t bytes);
 
+    // Phase 4a: async zero-fill of `bytes` at `cache_buf` (physical addr
+    // implied — pass a cached pointer; we resolve via PhysicalAddr). Issues
+    // an SP DMA fill from a DMEM ZERO_CHUNK, flushes the rspq, and returns
+    // immediately. SP DMA writes bypass the CPU dcache, so the caller
+    // does NOT need to writeback this range afterwards. `bytes` must be a
+    // positive multiple of 2 KiB. Caller MUST invoke zero_sync() before
+    // touching cache_buf or kicking another zero_async.
+    void zero_async(void* cache_buf, uint32_t bytes);
+
+    // Block until the most recent zero_async completes. Cheap if it
+    // already drained. Surfaces any RSP assertion via __rsp_check_assert.
+    void zero_sync();
+
     extern bool initialised;
 }
 }

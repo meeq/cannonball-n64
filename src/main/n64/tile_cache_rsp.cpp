@@ -138,5 +138,31 @@ bool test_fill(uint32_t bytes)
     return ok;
 }
 
+void zero_async(void* cache_buf, uint32_t bytes)
+{
+    assertf(initialised, "tile_cache_rsp: zero_async before init");
+    assertf(cache_buf != nullptr, "tile_cache_rsp: zero_async null buf");
+    assertf((bytes & 0x7ff) == 0 && bytes > 0 && bytes <= 0x100000,
+            "tile_cache_rsp: zero_async bytes must be 2KiB-aligned, "
+            "positive, ≤ 1MiB (got %lu)", (unsigned long)bytes);
+
+    status_uc[0] = 0;
+    status_uc[1] = 0;
+
+    const uint32_t buf_phys    = PhysicalAddr(cache_buf);
+    const uint32_t status_phys = PhysicalAddr(status_uc);
+
+    rspq_write(overlay_id, FILL_CACHE_CMD, buf_phys, bytes, status_phys);
+    rspq_flush();
+}
+
+void zero_sync()
+{
+    assertf(initialised, "tile_cache_rsp: zero_sync before init");
+    // rspq_wait both flushes and surfaces any RSP assertion via
+    // __rsp_check_assert / __rsp_crash. Cheap if work is already drained.
+    rspq_wait();
+}
+
 } // namespace tile_cache_rsp
 } // namespace n64

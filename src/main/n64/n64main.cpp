@@ -801,17 +801,7 @@ int main(int /*argc*/, char* /*argv*/[])
     n64::hwroad_rdp::init();
     n64::hwroad_rdp_rsp::init();
 
-    // Bring up the tile_cache RSP overlay. Phase 1: register + ping test
-    // proves the CPU↔RSP wiring works. Phase 2 debugging: cmd 1 hang —
-    // assert tripwires in TileCache_FillCache will surface the failing
-    // step if it dies via libdragon's RSP assert path.
     n64::tile_cache_rsp::init();
-    (void)n64::tile_cache_rsp::test_ping(0x12345678u);
-    // Phase 2: chunked DMA fill. Start small to confirm correctness,
-    // then climb to the full 256 KiB cache surface size.
-    (void)n64::tile_cache_rsp::test_fill(2 * 1024);
-    (void)n64::tile_cache_rsp::test_fill(16 * 1024);
-    (void)n64::tile_cache_rsp::test_fill(256 * 1024);
 
     // Pre-flush the libdragon mixer's lazy per-channel sample buffers as
     // the LAST init step, so every other large alloc (video atlas/cache,
