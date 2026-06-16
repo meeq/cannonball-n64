@@ -53,7 +53,15 @@ public:
     void   load_wav(const char* filename);
     void   clear_wav();
 
+    // Silence every mixer channel for the duration of the pause menu and
+    // remember the music wav64 + sample position so it can resume mid-track.
+    // PCM voices / SFX are simply stopped — reconcile_pcm re-triggers any
+    // still-active SegaPCM voice on the next tick after resume_audio.
+    void   pause_audio();
+    void   resume_audio();
+
 private:
     wav_t wavfile{};
     bool  dac_initialised = false;
+    bool  paused          = false;
 };

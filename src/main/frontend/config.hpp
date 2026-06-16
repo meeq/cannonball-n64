@@ -37,6 +37,7 @@ struct music_t
     const static int IS_YM_INT = 0; // Intenal YM Track (from OutRun ROMs)
     const static int IS_YM_EXT = 1; // External YM Track (from Binary)
     const static int IS_WAV = 2;    // External WAV Track
+    const static int IS_NONE = 3;   // Silent slot ("radio off")
     int type;
 
     int cmd;                        // Z80 Command

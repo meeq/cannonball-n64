@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include "../engine/audio/osoundint.hpp"
+#include "../engine/audio/osound.hpp"
 #include "../engine/audio/commands.hpp"
 #include "../frontend/config.hpp"
 #include "../roms.hpp"
@@ -215,6 +216,12 @@ namespace
         pcm_rom_signed = (int8_t*)roms.pcm.rom;
     }
 
+    // DIAG-REV: dump SegaPCM voice register state + osound.sound_props
+    // once per second so we can compare what the chip sees at redline vs
+    // below redline. Removed after rev-sound diagnosis.
+    uint32_t diag_rev_ticks = 0;
+    uint32_t diag_rev_retrigs[16] = {0};
+
     void reconcile_pcm()
     {
         pcm_rom_signed_ensure();
@@ -312,6 +319,7 @@ namespace
                 // playing the *previous* sample's length on a retrigger.
                 pcm_wave[slot].__uuid = 0;
                 mixer_ch_play(slot, &pcm_wave[slot]);
+                diag_rev_retrigs[v]++;
             }
 
             if (slot >= 0)
@@ -352,6 +360,30 @@ namespace
             pcm_track[v].prev_addr_lo = addr_lo;
             pcm_track[v].prev_addr_hi = addr_hi;
             pcm_track[v].prev_end     = end;
+        }
+
+        // DIAG-REV: dump once per ~second
+        if (++diag_rev_ticks >= 30)
+        {
+            diag_rev_ticks = 0;
+            auto aux = osound.aux_state();
+            debugf("[REV] sp=%02x EP=%02x%02x EV=%02x retrig:",
+                aux.sound_props,
+                osoundint.engine_data[sound::ENGINE_PITCH_H],
+                osoundint.engine_data[sound::ENGINE_PITCH_L],
+                osoundint.engine_data[sound::ENGINE_VOL]);
+            for (int v = 0; v < 16; v++)
+            {
+                uint8_t* r = osoundint.pcm_ram + 8 * v;
+                if ((r[0x86] & 1) == 0)  // active
+                {
+                    debugf(" v%d[fl=%02x adr=%02x%02x end=%02x pit=%02x vl=%02x/%02x rt=%lu]",
+                        v, r[0x86], r[5], r[4], r[6], r[7], r[2], r[3],
+                        (unsigned long)diag_rev_retrigs[v]);
+                }
+                diag_rev_retrigs[v] = 0;
+            }
+            debugf("\n");
         }
     }
 
@@ -437,6 +469,16 @@ namespace
     wav64_t wav64_files[N_WAV64];
     bool    wav64_loaded[N_WAV64] = {false};
 
+    // -1 when no music is on WAV64_MUS_CH (boot, after FM_RESET, etc.).
+    // Tracked here so pause/resume can replay the same track from a saved
+    // sample position without round-tripping through the Z80.
+    int active_music_idx = -1;
+
+    // -1 when nothing is held paused. Set by Audio::pause_music; consumed by
+    // Audio::resume_music.
+    int    paused_music_idx = -1;
+    double paused_music_pos = 0.0;
+
     int wav64_index_of(uint8_t snd)
     {
         for (int i = 0; i < N_WAV64; i++)
@@ -453,6 +495,7 @@ namespace
         if (snd == sound::FM_RESET || snd == 0xFF)
         {
             mixer_ch_stop(WAV64_MUS_CH);
+            active_music_idx = -1;
             return false;
         }
 
@@ -466,6 +509,8 @@ namespace
         // an SFX mid-play, or interrupting music with a jingle.
         mixer_ch_stop(ch);
         wav64_play(&wav64_files[idx], ch);
+        if (WAV64_TABLE[idx].is_music)
+            active_music_idx = idx;
         return true;
     }
 }
@@ -661,8 +706,62 @@ double Audio::adjust_speed() { return 1.0; }
 void Audio::load_wav(const char* /*filename*/) {}
 void Audio::clear_wav() {}
 
+void Audio::pause_audio()
+{
+    // Save music position so resume can seek back to it.
+    if (active_music_idx >= 0)
+    {
+        // Store as seconds — wav64_seek takes time_sec and applies the
+        // codec-specific seek-point snap (VADPCM frames are not 1:1 with
+        // samples, so mixer_ch_set_pos on a raw sample count would assert).
+        const double freq = wav64_files[active_music_idx].wave.frequency;
+        paused_music_pos = mixer_ch_get_pos(WAV64_MUS_CH) / freq;
+        paused_music_idx = active_music_idx;
+        active_music_idx = -1;
+    }
+
+    // Stop everything. The Z80 keeps ticking inside Audio::tick even while
+    // the engine is frozen, so without this the engine-rev / traffic-noise
+    // SegaPCM voices keep playing into the pause menu.
+    for (int ch = 0; ch < N_MIXER_CH; ++ch)
+        mixer_ch_stop(ch);
+
+    // Mark each PCM track as "inactive last frame" + drop its pool slot so
+    // reconcile_pcm on the next post-resume tick sees any still-active
+    // SegaPCM voice as a fresh key-on and re-plays it from scratch.
+    for (int v = 0; v < N_PCM_CH; ++v)
+    {
+        pcm_track[v].prev_flags86 = 1;
+        pcm_track[v].mix_slot     = -1;
+    }
+    // Free every pool slot so claims after resume start clean. mixer_ch_stop
+    // on each slot was already done by the loop above.
+    for (int s = 0; s < N_PCM_SLOTS; ++s)
+        pcm_slot[s].voice = -1;
+
+    paused = true;
+}
+
+void Audio::resume_audio()
+{
+    paused = false;
+    if (paused_music_idx < 0) return;
+    wav64_play(&wav64_files[paused_music_idx], WAV64_MUS_CH);
+    wav64_seek(&wav64_files[paused_music_idx], WAV64_MUS_CH, paused_music_pos);
+    active_music_idx = paused_music_idx;
+    paused_music_idx = -1;
+    paused_music_pos = 0.0;
+}
+
 void Audio::tick()
 {
+    // Pause menu: freeze the Z80 stream and skip mixer_poll. With every
+    // channel already stopped in pause_audio, the libdragon audio queue
+    // drains within ~160 ms and the DAC outputs silence. Advancing the Z80
+    // here would have it re-trigger engine-tone / traffic-noise voices that
+    // reconcile_pcm would then immediately push back onto the mixer.
+    if (paused) return;
+
     auto smooth = [](uint32_t& acc, uint64_t sample)
     {
         acc = (uint32_t)((acc * 7 + sample) >> 3);

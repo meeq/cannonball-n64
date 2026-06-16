@@ -288,6 +288,14 @@ void OMusic::play_music(int index)
         case music_t::IS_WAV:
             cannonball::audio.load_wav((config.data.res_path + next_track->filename).c_str());
             break;
+
+        case music_t::IS_NONE:
+            // Silent slot — kill anything currently playing on the music
+            // channels. FM_RESET both stops the wav64 music channel (via the
+            // N64 intercept) and resets YM2151 register state on SDL.
+            cannonball::audio.clear_wav();
+            osoundint.queue_sound(sound::FM_RESET);
+            break;
     }
 
     last_music_selected = index;

@@ -127,6 +127,22 @@ namespace
         // 30 fps engine target; raise once budget permits.
         config.sound.enabled = 1;
         config.sound.rate    = 22050;
+
+        // Add a silent "RADIO OFF" slot to the music-select carousel so
+        // players who'd rather drive without a soundtrack can pick it like
+        // any other track. The default cursor sits at index 1 (Passing
+        // Breeze) and RIGHT cycles 1 → 2 → 3 → 0; the arcade-faithful
+        // sequence from that start is Breeze → Splash → Magical, so we
+        // lay out the array as [Radio Off, Breeze, Splash, Magical] —
+        // moving Magical to the end keeps that cycle and parks Radio Off
+        // as the last track visited before wrapping back to Breeze.
+        music_t magical = config.sound.music[0];
+        config.sound.music.erase(config.sound.music.begin());
+        music_t radio_off;
+        radio_off.title = "RADIO OFF";
+        radio_off.type  = music_t::IS_NONE;
+        config.sound.music.insert(config.sound.music.begin(), radio_off);
+        config.sound.music.push_back(magical);
     }
 
     // -----------------------------------------------------------------------
@@ -244,6 +260,13 @@ namespace
                         const bool driving = (gs >= GS_START1 && gs <= GS_BONUS);
                         if (driving && input.has_pressed(Input::START))
                         {
+                            // Save mixer state BEFORE FM_RESET — that command
+                            // stops the music channel and resets the FM regs
+                            // as a side effect via the wav64 intercept and
+                            // OSound, but we want to keep the SegaPCM voice
+                            // register state so reconcile_pcm can re-trigger
+                            // engine rev / traffic noise on resume.
+                            cannonball::audio.pause_audio();
                             osoundint.queue_sound(sound::FM_RESET);
                             cannonball::audio.clear_wav();
                             pause_cursor = PAUSE_CONTINUE;
@@ -409,11 +432,12 @@ namespace
                         switch (choice)
                         {
                             case PAUSE_CONTINUE:
-                                // Re-arm music from where the player paused.
-                                // play_music restarts the active track — not
-                                // sample-accurate resume, but the same path
-                                // the music-select cycle already uses.
-                                omusic.play_music();
+                                // Replay the same wav64 and seek to the
+                                // sample position we captured at pause entry.
+                                // SegaPCM voices come back through
+                                // reconcile_pcm's edge detection on the next
+                                // engine tick.
+                                cannonball::audio.resume_audio();
                                 state = STATE_GAME;
                                 break;
                             case PAUSE_RETRY:
