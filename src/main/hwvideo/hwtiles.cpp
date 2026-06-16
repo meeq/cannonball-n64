@@ -12,6 +12,8 @@ namespace n64_profile {
     extern uint32_t tile_tlut_uploads;
     extern uint32_t text_tlut_uploads;
     extern uint32_t tile_call_vis;
+    extern uint32_t tile_call_vis_bg;
+    extern uint32_t tile_call_vis_fg;
     extern uint32_t tile_call_uniq_total;
     extern uint32_t tile_call_chunks;
     extern uint32_t tile_call_tlut_evicts;
@@ -329,10 +331,32 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
     int n_unique  = 0;
+    // Per-sub-layer visible counts so we can scope a BG-cache strategy
+    // ([[project-tbg-chunks-bound]]). Captures the BG/FG ratio inside this
+    // call's 246-vis / 154-prim total; the prim breakdown isn't strictly
+    // additive (coalescing crosses pages) but the vis ratio is a strong
+    // signal for where the bigger win lives.
+    int n_vis_bg = 0;
+    int n_vis_fg = 0;
+    // BG-extent audit (lightweight, runs every frame). Tracks the smallest
+    // bounding box of (mx, my) BG-page cells that have non-zero Code over
+    // the lifetime of the session, plus the range of EffPage values seen.
+    // Drives the pre-rendered BG cache surface sizing decision — without
+    // this we'd over-allocate the cache to the theoretical 1024×512.
+    static uint16_t s_bg_mx_min   = 0xffff, s_bg_mx_max   = 0;
+    static uint16_t s_bg_my_min   = 0xffff, s_bg_my_max   = 0;
+    static uint32_t s_bg_cells_used = 0;
+    static uint8_t  s_bg_cell_seen[128 * 64 / 8] = {};
+    static uint16_t s_bg_effpage_seen[16] = {};
+    static int      s_bg_effpage_n  = 0;
+    static uint16_t s_bg_xscroll_min = 0xffff, s_bg_xscroll_max = 0;
+    static uint16_t s_bg_yscroll_min = 0xffff, s_bg_yscroll_max = 0;
+    static uint32_t s_audit_frames = 0;
 
     // Walk BG (page=1) first, then FG (page=0). BG must draw under FG.
     for (int pass = 0; pass < 2; pass++)
     {
+        const int pass_vis_start = n_visible;
         const uint8_t page_index = (pass == 0) ? 1 : 0;
 
         const uint16_t EffPage = page[page_index];
@@ -345,6 +369,19 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         if ((yScroll & 0x8000) != 0)
             yScroll = (text_ram[0xf16 + (0x40 * page_index) + 0] << 8)
                     | text_ram[0xf16 + (0x40 * page_index) + 1];
+        // BG-extent audit: track scroll range + unique EffPage values.
+        if (page_index == 1) {
+            if (xScroll < s_bg_xscroll_min) s_bg_xscroll_min = xScroll;
+            if (xScroll > s_bg_xscroll_max) s_bg_xscroll_max = xScroll;
+            if (yScroll < s_bg_yscroll_min) s_bg_yscroll_min = yScroll;
+            if (yScroll > s_bg_yscroll_max) s_bg_yscroll_max = yScroll;
+            bool seen = false;
+            for (int k = 0; k < s_bg_effpage_n; k++)
+                if (s_bg_effpage_seen[k] == EffPage) { seen = true; break; }
+            if (!seen && s_bg_effpage_n < 16) {
+                s_bg_effpage_seen[s_bg_effpage_n++] = EffPage;
+            }
+        }
 
         const int ox = (x_clamp - xScroll) & 0x3ff; // 0..1023
         const int oy = yScroll & 0x1ff;             // 0..511
@@ -386,6 +423,22 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
                 Code &= (NUM_TILES - 1);
                 if (Code == 0) continue;
+
+                // BG-extent audit. Only count BG (page_index==1) cells —
+                // FG cache decision is separate. Cheap O(1) bitmap ops.
+                if (page_index == 1) {
+                    const int bit_idx = my * 128 + mx;
+                    const int byte_ix = bit_idx >> 3;
+                    const uint8_t bit = (uint8_t)(1u << (bit_idx & 7));
+                    if (!(s_bg_cell_seen[byte_ix] & bit)) {
+                        s_bg_cell_seen[byte_ix] |= bit;
+                        s_bg_cells_used++;
+                    }
+                    if (mx < s_bg_mx_min) s_bg_mx_min = (uint16_t)mx;
+                    if (mx > s_bg_mx_max) s_bg_mx_max = (uint16_t)mx;
+                    if (my < s_bg_my_min) s_bg_my_min = (uint16_t)my;
+                    if (my > s_bg_my_max) s_bg_my_max = (uint16_t)my;
+                }
 
                 const int Colour = (Data >> 6) & 0x7f;
 
@@ -433,6 +486,9 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
             }
             if (overflow_hit) break;
         }
+        // Capture per-sub-layer vis delta before we leave this pass.
+        const int pass_vis = n_visible - pass_vis_start;
+        if (pass == 0) n_vis_bg = pass_vis; else n_vis_fg = pass_vis;
         if (overflow_hit) break;
     }
 
@@ -611,12 +667,39 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     uint32_t uniq_total = 0;
     for (int c = 0; c < n_chunks; c++) uniq_total += (uint32_t)chunk_uniq[c];
     n64_profile::tile_call_vis         = (uint32_t)n_visible;
+    n64_profile::tile_call_vis_bg      = (uint32_t)n_vis_bg;
+    n64_profile::tile_call_vis_fg      = (uint32_t)n_vis_fg;
     n64_profile::tile_call_uniq_total  = uniq_total;
     n64_profile::tile_call_chunks      = (uint32_t)n_chunks;
     n64_profile::tile_call_tlut_evicts =
         n64_profile::tile_tlut_uploads - pre_tlut_uploads;
     n64_profile::tile_call_prims = n64_profile::prim_count - pre_prim_count;
     n64_profile::tile_call_pass2_us = (uint32_t)(get_ticks_us() - pass2_t0);
+
+    // BG-extent audit: dump the running high-water marks every 256 frames so
+    // we can size the pre-rendered BG cache surface against actual usage
+    // instead of the theoretical 1024×512. See [[project-tbg-chunks-bound]].
+    if (++s_audit_frames == 256 && priority_draw == 0) {
+        if (s_bg_mx_max >= s_bg_mx_min && s_bg_my_max >= s_bg_my_min) {
+            const int bbox_w = (s_bg_mx_max - s_bg_mx_min + 1) * 8;
+            const int bbox_h = (s_bg_my_max - s_bg_my_min + 1) * 8;
+            debugf("[bg-audit] cells=%lu bbox_xy=[%u..%u]×[%u..%u] "
+                   "(%dpx × %dpx) xscroll=[%u..%u] yscroll=[%u..%u] "
+                   "effpages=%d (",
+                   (unsigned long)s_bg_cells_used,
+                   (unsigned)s_bg_mx_min, (unsigned)s_bg_mx_max,
+                   (unsigned)s_bg_my_min, (unsigned)s_bg_my_max,
+                   bbox_w, bbox_h,
+                   (unsigned)s_bg_xscroll_min, (unsigned)s_bg_xscroll_max,
+                   (unsigned)s_bg_yscroll_min, (unsigned)s_bg_yscroll_max,
+                   s_bg_effpage_n);
+            for (int k = 0; k < s_bg_effpage_n; k++)
+                debugf("0x%04x%s", s_bg_effpage_seen[k],
+                       k + 1 < s_bg_effpage_n ? "," : "");
+            debugf(")\n");
+        }
+        s_audit_frames = 0;
+    }
 }
 
 // RDP path for the text layer. Same chunked-atlas + LOAD_BLOCK strategy as

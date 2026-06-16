@@ -51,6 +51,8 @@ namespace n64_profile
     // varies 3.4× (~6.5ms → ~22ms) in tile-heavy, low-sprite scenes. Single
     // call per frame, so the value at end-of-call == frame value.
     extern uint32_t tile_call_vis;          // n_visible (tiles drawn)
+    extern uint32_t tile_call_vis_bg;       // n_visible from BG (page=1) sub-layer
+    extern uint32_t tile_call_vis_fg;       // n_visible from FG (page=0) sub-layer
     extern uint32_t tile_call_uniq_total;   // sum of chunk_uniq[] (atlas LOAD work)
     extern uint32_t tile_call_chunks;       // n_chunks (atlas rebuilds)
     extern uint32_t tile_call_tlut_evicts;  // TLUT LRU evictions this call

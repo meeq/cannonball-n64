@@ -64,6 +64,8 @@ namespace n64_profile
     uint32_t text_tlut_uploads      = 0;
 
     uint32_t tile_call_vis          = 0;
+    uint32_t tile_call_vis_bg       = 0;
+    uint32_t tile_call_vis_fg       = 0;
     uint32_t tile_call_uniq_total   = 0;
     uint32_t tile_call_chunks       = 0;
     uint32_t tile_call_tlut_evicts  = 0;
