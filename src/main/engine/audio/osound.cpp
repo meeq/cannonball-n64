@@ -86,6 +86,11 @@ void OSound::tick()
     traffic_process();      // Traffic Volume/Panning & Pitch
 }
 
+void OSound::clear_rev_effect()
+{
+    sound_props &= ~BIT_0;
+}
+
 // PCM RAM Read/Write Helper Functions
 uint8_t OSound::pcm_r(uint16_t adr)
 {

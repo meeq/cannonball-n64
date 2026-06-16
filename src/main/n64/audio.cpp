@@ -216,12 +216,6 @@ namespace
         pcm_rom_signed = (int8_t*)roms.pcm.rom;
     }
 
-    // DIAG-REV: dump SegaPCM voice register state + osound.sound_props
-    // once per second so we can compare what the chip sees at redline vs
-    // below redline. Removed after rev-sound diagnosis.
-    uint32_t diag_rev_ticks = 0;
-    uint32_t diag_rev_retrigs[16] = {0};
-
     void reconcile_pcm()
     {
         pcm_rom_signed_ensure();
@@ -319,7 +313,6 @@ namespace
                 // playing the *previous* sample's length on a retrigger.
                 pcm_wave[slot].__uuid = 0;
                 mixer_ch_play(slot, &pcm_wave[slot]);
-                diag_rev_retrigs[v]++;
             }
 
             if (slot >= 0)
@@ -360,30 +353,6 @@ namespace
             pcm_track[v].prev_addr_lo = addr_lo;
             pcm_track[v].prev_addr_hi = addr_hi;
             pcm_track[v].prev_end     = end;
-        }
-
-        // DIAG-REV: dump once per ~second
-        if (++diag_rev_ticks >= 30)
-        {
-            diag_rev_ticks = 0;
-            auto aux = osound.aux_state();
-            debugf("[REV] sp=%02x EP=%02x%02x EV=%02x retrig:",
-                aux.sound_props,
-                osoundint.engine_data[sound::ENGINE_PITCH_H],
-                osoundint.engine_data[sound::ENGINE_PITCH_L],
-                osoundint.engine_data[sound::ENGINE_VOL]);
-            for (int v = 0; v < 16; v++)
-            {
-                uint8_t* r = osoundint.pcm_ram + 8 * v;
-                if ((r[0x86] & 1) == 0)  // active
-                {
-                    debugf(" v%d[fl=%02x adr=%02x%02x end=%02x pit=%02x vl=%02x/%02x rt=%lu]",
-                        v, r[0x86], r[5], r[4], r[6], r[7], r[2], r[3],
-                        (unsigned long)diag_rev_retrigs[v]);
-                }
-                diag_rev_retrigs[v] = 0;
-            }
-            debugf("\n");
         }
     }
 
@@ -511,6 +480,18 @@ namespace
         wav64_play(&wav64_files[idx], ch);
         if (WAV64_TABLE[idx].is_music)
             active_music_idx = idx;
+
+        // SIGNAL2 in OSound::process_command clears sound_props BIT_0 (the
+        // "car-at-start-line, do rev sample when revs high enough" gate set
+        // by the REVS command at game start). Intercepting the command above
+        // skips that side effect — leaving BIT_0 stuck on, so the start-line
+        // rev PCM sample (engine_process_chan source 0x766E path) keeps
+        // re-firing on the traffic engine voices every time revs >= 0xFA
+        // during gameplay, producing a "vroom-vroom-vroom" overlay on the
+        // real engine sound. Mirror the clear here.
+        if (snd == sound::SIGNAL2)
+            osound.clear_rev_effect();
+
         return true;
     }
 }

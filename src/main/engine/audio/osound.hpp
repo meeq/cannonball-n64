@@ -302,6 +302,13 @@ public:
         };
     }
 
+    // Clear sound_props BIT_0 (the start-line rev-sample gate set by the
+    // REVS command). The Z80 case sound::SIGNAL2 normally does this when
+    // the countdown ends — N64 wav64-intercepts SIGNAL2, so the platform
+    // layer must mirror the side effect to avoid the rev sample leaking
+    // into gameplay.
+    void clear_rev_effect();
+
 private:
     const static uint16_t PCM_RAM_SIZE  = 0x100;
     const static uint16_t CHAN_RAM_SIZE = 0x800;
