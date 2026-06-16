@@ -206,9 +206,18 @@ namespace tile_cache {
 
     bool init_layer(Layer& L, const char* name)
     {
-        L.buf = (uint8_t*)memalign(64, CACHE_BYTES);
+        // Uncached: CPU pass-2 writes go straight to RAM, bypassing the
+        // write-allocate fill that costs ~30 cycles per cache line on the
+        // R4300. For our stride-512 paste, every 4-byte write hits a
+        // different cache line, so write-allocate would otherwise fill
+        // 16 bytes per cell-row from RAM (~8 misses per cell) just to
+        // immediately overwrite 4 of them. RSP also writes via SP DMA
+        // (zero_async), which already bypasses CPU dcache — making the
+        // surface uncached keeps the two writers consistent and lets us
+        // drop the post-paste data_cache_hit_writeback entirely.
+        L.buf = (uint8_t*)malloc_uncached_aligned(64, CACHE_BYTES);
         if (!L.buf) {
-            debugf("tile_cache(%s): memalign(64, %d) failed\n",
+            debugf("tile_cache(%s): malloc_uncached_aligned(64, %d) failed\n",
                    name, CACHE_BYTES);
             return false;
         }
@@ -216,7 +225,7 @@ namespace tile_cache {
         L.surface = surface_make_linear(L.buf, FMT_CI4, CACHE_W_PX, CACHE_H_PX);
         L.shadow_valid = false;
         L.palette_idx = 0xff;
-        debugf("tile_cache(%s): enabled — %d KiB at %p\n",
+        debugf("tile_cache(%s): enabled — %d KiB at %p (uncached)\n",
                name, CACHE_BYTES >> 10, L.buf);
         return true;
     }
@@ -262,6 +271,7 @@ namespace tile_cache {
                 const uint8_t* tile_banks, uint32_t tiles_pi_addr,
                 const char* dbg_name)
     {
+        const uint64_t t_kick = get_ticks_us();
         // Kick the RSP-side zero of L.buf BEFORE Pass 1 so its SP DMA fill
         // (~0.7 ms for 256 KiB at the measured 368 MB/s) hides behind the
         // CPU's tile-ram walk + histogram (~0.5 ms). We sync below right
@@ -269,6 +279,7 @@ namespace tile_cache {
         // CPU dcache, so no zeroing-side writeback is needed here — only
         // the post-Pass-2 writeback of the CPU-side cell pastes remains.
         n64::tile_cache_rsp::zero_async(L.buf, CACHE_BYTES);
+        const uint64_t t_p1 = get_ticks_us();
 
         // Pass 1 — count palettes.
         uint16_t palette_count[128] = {};
@@ -309,9 +320,11 @@ namespace tile_cache {
         L.cells_in    = (uint16_t)dom_count;
         L.cells_out   = (uint16_t)(total_count - dom_count);
 
+        const uint64_t t_p1_done = get_ticks_us();
         // Sync the kicked-off RSP zero before Pass 2 starts writing cells.
         // If the SP DMA finished during Pass 1 (typical), this is ~free.
         n64::tile_cache_rsp::zero_sync();
+        const uint64_t t_sync = get_ticks_us();
 
         // Pass 2 — paste pixels for dominant-palette cells only.
         for (int my = 0; my < CACHE_CELLS_Y; my++)
@@ -347,15 +360,18 @@ namespace tile_cache {
             }
         }
 
-        // Push the freshly-written cache to RAM so the RDP texture loader
-        // reads consistent bytes. [[feedback-dma-read-no-cache-mgmt]] applies
-        // here: rdpq_tex_blit will DMA from this surface.
-        data_cache_hit_writeback(L.buf, CACHE_BYTES);
+        const uint64_t t_p2 = get_ticks_us();
+        // No writeback: L.buf is uncached, so CPU writes have already
+        // landed in RAM. RDP reads via SP DMA (which bypasses CPU cache)
+        // see the correct bytes immediately.
         L.renders++;
-        debugf("tile_cache(%s): rebuilt — dom_palette=0x%02x in=%u out=%u "
-               "(coverage=%.0f%%)\n",
+        debugf("tile_cache(%s): rebuilt — dom=0x%02x in=%u out=%u  "
+               "p1=%lu sync=%lu p2=%lu (us)\n",
                dbg_name, (unsigned)dom_palette, L.cells_in, L.cells_out,
-               total_count ? (100.0 * dom_count / total_count) : 0.0);
+               (unsigned long)(t_p1_done - t_p1),
+               (unsigned long)(t_sync   - t_p1_done),
+               (unsigned long)(t_p2     - t_sync));
+        (void)t_kick;
     }
 
     // Emit a wrap-aware CI4 blit of the visible 320×224 window. tex_blit
