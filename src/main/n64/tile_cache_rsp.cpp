@@ -27,7 +27,8 @@ namespace
     uint32_t  overlay_id = 0;
     uint32_t* status_uc  = nullptr;
 
-    constexpr uint32_t TEST_PING_CMD = 0;
+    constexpr uint32_t TEST_PING_CMD  = 0;
+    constexpr uint32_t FILL_CACHE_CMD = 1;
 }
 
 void init()
@@ -72,6 +73,68 @@ bool test_ping(uint32_t payload)
            (unsigned long)got_echo,     (unsigned long)expected_echo,
            (unsigned long)got_sentinel, (unsigned long)expected_sentinel,
            ok ? "OK" : "FAIL");
+    return ok;
+}
+
+bool test_fill(uint32_t bytes)
+{
+    assertf(initialised, "tile_cache_rsp: test_fill before init");
+    assertf((bytes & 0x7ff) == 0 && bytes > 0 && bytes <= 0x100000,
+            "tile_cache_rsp: bytes must be 2KiB-aligned, positive, ≤ 1MiB (got %lu)",
+            (unsigned long)bytes);
+
+    uint8_t* buf_uc = (uint8_t*)malloc_uncached_aligned(64, bytes);
+    assertf(buf_uc != nullptr,
+            "tile_cache_rsp: test_fill alloc(%lu) failed", (unsigned long)bytes);
+
+    std::memset(buf_uc, 0xAA, bytes);
+    status_uc[0] = 0;
+    status_uc[1] = 0;
+
+    const uint32_t buf_phys    = PhysicalAddr(buf_uc);
+    const uint32_t status_phys = PhysicalAddr(status_uc);
+
+    const uint64_t t0 = get_ticks_us();
+    rspq_write(overlay_id, FILL_CACHE_CMD, buf_phys, bytes, status_phys);
+
+    // Surface any RSP assertion immediately. rspq_wait()'s RSP_WAIT_LOOP
+    // calls __rsp_check_assert per iteration; if the RSP halted on
+    // assertion_failed, __rsp_crash is invoked which loads the crash ucode
+    // and prints PC + GPRs + assert code from $at. That's far more useful
+    // than the previous silent 100 ms timeout.
+    rspq_wait();
+
+    if (status_uc[0] != 0xDEADC0DEu) {
+        debugf("tile_cache_rsp: test_fill(%lu) FAIL — status=0x%08lx after rspq_wait\n",
+               (unsigned long)bytes, (unsigned long)status_uc[0]);
+        free_uncached(buf_uc);
+        return false;
+    }
+    const uint64_t t1 = get_ticks_us();
+
+    // Verify every word is zero.
+    bool ok = true;
+    uint32_t first_bad = 0;
+    const uint32_t* w = (const uint32_t*)buf_uc;
+    const uint32_t nw = bytes / 4;
+    for (uint32_t i = 0; i < nw; i++) {
+        if (w[i] != 0) { ok = false; first_bad = i * 4; break; }
+    }
+
+    const uint32_t us = (uint32_t)(t1 - t0);
+    const uint32_t mbps = (us > 0)
+        ? (uint32_t)((uint64_t)bytes * 1000000ull / us / (1024 * 1024))
+        : 0;
+    debugf("tile_cache_rsp: test_fill bytes=%lu took=%lu us "
+           "(%lu MB/s) -> %s",
+           (unsigned long)bytes, (unsigned long)us,
+           (unsigned long)mbps, ok ? "OK" : "FAIL");
+    if (!ok)
+        debugf(" first_bad_byte=%lu val=0x%08lx",
+               (unsigned long)first_bad, (unsigned long)w[first_bad / 4]);
+    debugf("\n");
+
+    free_uncached(buf_uc);
     return ok;
 }
 

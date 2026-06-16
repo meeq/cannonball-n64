@@ -25,6 +25,12 @@ namespace tile_cache_rsp
     // true on success; logs the result either way.
     bool test_ping(uint32_t payload);
 
+    // Phase 2 fill test. Allocates a `bytes`-sized uncached buffer (must
+    // be a positive multiple of 2 KiB, ≤ 1 MiB), pre-fills with 0xAA,
+    // kicks FillCache, polls until RSP writes 0xDEADC0DE, then verifies
+    // the buffer is all zeros. Returns true on full success.
+    bool test_fill(uint32_t bytes);
+
     extern bool initialised;
 }
 }
