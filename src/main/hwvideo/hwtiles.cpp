@@ -204,6 +204,23 @@ namespace tile_cache {
     Layer s_fg = {};     // page=0
     bool  s_enabled = false;
 
+    // Scratch cell list shared by BG and FG renders (their renders run
+    // sequentially per frame). Pass 1 walks every cell once, building both
+    // the palette histogram AND this list of every valid (priority-0,
+    // Code != 0) cell. Pass 2 then walks just this list — no second pass
+    // over tile_ram. Saves the ~3.3 ms tile_ram walk per layer.
+    //
+    // Worst-case fill: 128 * 64 = 8192 cells. We've measured up to 4080
+    // valid cells in heavy scenes (music select, both layers same data).
+    // Sizing for the full theoretical max keeps the bound assertion-clean.
+    struct CellEntry {
+        uint16_t pal_ix;     // 0..127, valid cell-colour palette index
+        uint16_t Code;       // tile_banks-remapped, masked to NUM_TILES-1
+        uint32_t dst_offset; // byte offset into L.buf
+    };
+    constexpr int CELL_LIST_MAX = CACHE_CELLS_X * CACHE_CELLS_Y;  // 8192
+    CellEntry s_cell_list[CELL_LIST_MAX];
+
     bool init_layer(Layer& L, const char* name)
     {
         // Uncached: CPU pass-2 writes go straight to RAM, bypassing the
@@ -281,8 +298,12 @@ namespace tile_cache {
         n64::tile_cache_rsp::zero_async(L.buf, CACHE_BYTES);
         const uint64_t t_p1 = get_ticks_us();
 
-        // Pass 1 — count palettes.
+        // Pass 1 — single walk: build the palette histogram AND the
+        // cell list of every valid (priority-0, Code != 0) cell. Pass 2
+        // below replays that list instead of re-walking tile_ram, saving
+        // ~3.3 ms per layer.
         uint16_t palette_count[128] = {};
+        int cell_count = 0;
         for (int my = 0; my < CACHE_CELLS_Y; my++)
         {
             const bool my_top = my < 32;
@@ -291,6 +312,9 @@ namespace tile_cache {
                 64 * 32 * 2 * ((EffPage >> (my_top ? 0 : 8)) & 0x0f) + my_offset;
             const uint32_t base_R =
                 64 * 32 * 2 * ((EffPage >> (my_top ? 4 : 12)) & 0x0f) + my_offset;
+
+            const uint32_t cell_row_byte_base =
+                (uint32_t)my * 8 * CACHE_STRIDE;
 
             for (int mx = 0; mx < CACHE_CELLS_X; mx++)
             {
@@ -303,9 +327,17 @@ namespace tile_cache {
                 Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
                 Code &= 0x1fff;  // NUM_TILES - 1, mirrored from hwtiles.hpp
                 if (Code == 0) continue;
-                palette_count[(Data >> 6) & 0x7f]++;
+                const uint16_t pal_ix = (Data >> 6) & 0x7f;
+                palette_count[pal_ix]++;
+                CellEntry& e = s_cell_list[cell_count++];
+                e.pal_ix     = pal_ix;
+                e.Code       = (uint16_t)Code;
+                e.dst_offset = cell_row_byte_base + (uint32_t)mx * 4;
             }
         }
+        assertf(cell_count <= CELL_LIST_MAX,
+                "tile_cache: cell_list overflow %d > %d",
+                cell_count, CELL_LIST_MAX);
         int dom_palette = 0;
         int dom_count   = 0;
         int total_count = 0;
@@ -326,37 +358,18 @@ namespace tile_cache {
         n64::tile_cache_rsp::zero_sync();
         const uint64_t t_sync = get_ticks_us();
 
-        // Pass 2 — paste pixels for dominant-palette cells only.
-        for (int my = 0; my < CACHE_CELLS_Y; my++)
+        // Pass 2 — replay the cell list, paste cells matching dom_palette.
+        // No tile_ram walk: the cell_list already contains every valid
+        // cell's (Code, dst_offset), so this is purely a list scan + fetch
+        // + write per matching cell.
+        for (int i = 0; i < cell_count; i++)
         {
-            const bool my_top = my < 32;
-            const uint32_t my_offset = (2 * 64 * my) & 0xfff;
-            const uint32_t base_L =
-                64 * 32 * 2 * ((EffPage >> (my_top ? 0 : 8)) & 0x0f) + my_offset;
-            const uint32_t base_R =
-                64 * 32 * 2 * ((EffPage >> (my_top ? 4 : 12)) & 0x0f) + my_offset;
-
-            const uint32_t cell_row_byte_base =
-                (uint32_t)my * 8 * CACHE_STRIDE;
-
-            for (int mx = 0; mx < CACHE_CELLS_X; mx++)
-            {
-                const uint32_t base = (mx < 64) ? base_L : base_R;
-                const uint32_t TileIndex = base + ((2 * mx) & 0x7f);
-                const uint16_t Data =
-                    (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
-                if (((Data >> 15) & 1) != 0) continue;
-                uint32_t Code = Data & 0x1fff;
-                Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
-                Code &= 0x1fff;  // NUM_TILES - 1, mirrored from hwtiles.hpp
-                if (Code == 0) continue;
-                if (((Data >> 6) & 0x7f) != dom_palette) continue;
-
-                const uint32_t* src = hwtiles_fetch_tile(tiles_pi_addr, Code);
-                uint8_t* dst = L.buf + cell_row_byte_base + (uint32_t)mx * 4;
-                for (int r = 0; r < 8; r++) {
-                    *(uint32_t*)(dst + r * CACHE_STRIDE) = src[r];
-                }
+            const CellEntry& e = s_cell_list[i];
+            if (e.pal_ix != dom_palette) continue;
+            const uint32_t* src = hwtiles_fetch_tile(tiles_pi_addr, e.Code);
+            uint8_t* dst = L.buf + e.dst_offset;
+            for (int r = 0; r < 8; r++) {
+                *(uint32_t*)(dst + r * CACHE_STRIDE) = src[r];
             }
         }
 
