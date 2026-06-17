@@ -362,18 +362,8 @@ namespace
                                 // around music-select leftovers.
                                 ostats.credits = 0;
                                 outrun.init();
-                                // HACK: same 4-tick warmup STATE_INIT_GAME
-                                // uses. outrun.init queues a tilemap clear
-                                // that doesn't land until vint, and the sky
-                                // palette is mid-cycle/fade — without burning
-                                // a few engine ticks here, the first visible
-                                // frame shows the music-select sky over the
-                                // gameplay-attract scene. Magic 4 isn't
-                                // derived, it's copied from STATE_INIT_GAME.
-                                // Outstanding: see memory note
-                                // engine-init-warmup-hack for what's been
-                                // ruled out (tilemap, sky palette) and the
-                                // open leads (rgb[] desync, stale roadram).
+                                // Engine multi-tick convergence — see
+                                // STATE_INIT_GAME for the rationale.
                                 for (int i = 0; i < 4; ++i)
                                     outrun.tick(true);
                             }
@@ -497,15 +487,12 @@ namespace
                 if (outrun.cannonball_mode == Outrun::MODE_CONT)
                     outrun.custom_traffic = config.cont_traffic;
                 outrun.init();
-                // Advance the engine through GS_INIT → GS_INIT_MUSIC →
-                // GS_MUSIC (and a few GS_MUSIC ticks) without rendering, so
-                // the first visible frame is the music-select scene with
-                // correct tilemap/palette. Without this, the previous screen's
-                // leftover tile RAM (sand-brown course-map background from
-                // TTrial::init, or boot menu pixels on a fresh start) renders
-                // through the music-select tilemap for ~5 ticks while
-                // omusic.enable() + opalette fade resolve. Same fix benefits
-                // both the boot → game and TT-select → game transitions.
+                // Engine multi-tick convergence: oroad only populates
+                // hwroad.ramBuff[0..0xFF] (per-row sky/road indicator) on
+                // the 4th tick. Until then the road rasterizer emits no
+                // sky fill, so the first rendered frame is incomplete.
+                // Replacing this with one-shot setup means inlining the
+                // game state-machine path that reaches copy_bg_color.
                 for (int i = 0; i < 4; ++i)
                     outrun.tick(true);
                 state = STATE_GAME;
