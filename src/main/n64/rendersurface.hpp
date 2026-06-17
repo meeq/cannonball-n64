@@ -119,8 +119,7 @@ public:
     // has already happened via the initialized flag and skips re-entry.
     void boot_display();
 
-    bool init(int src_width, int src_height,
-              int scale, int video_mode, int scanlines);
+    bool init(int src_width, int src_height);
     void disable();
     bool start_frame();
     bool finalize_frame();
@@ -168,9 +167,6 @@ private:
 
     // Source S16 buffer dimensions (eg. 320x224).
     int src_width, src_height;
-    int video_mode;
-    int scanlines;
-    int scale;
 
     // Shadow intensity multiplier (0..255).
     int shadow_multi;

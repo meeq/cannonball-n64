@@ -61,7 +61,7 @@ int Video::init(Roms* roms, video_settings_t* settings)
         return 0;
 
     // Convert S16 tiles to a more useable format
-    tile_layer->init(roms->tiles.rom, config.video.hires != 0);
+    tile_layer->init(roms->tiles.rom);
 
     clear_tile_ram();
     clear_text_ram();
@@ -101,38 +101,18 @@ void Video::disable()
 // Configure video settings from config file
 // ------------------------------------------------------------------------------------------------
 
-int Video::set_video_mode(video_settings_t* settings)
+int Video::set_video_mode(video_settings_t* /*settings*/)
 {
-    if (settings->widescreen)
-    {
-        config.s16_width  = S16_WIDTH_WIDE;
-        config.s16_x_off = (S16_WIDTH_WIDE - S16_WIDTH) / 2;
-    }
-    else
-    {
-        config.s16_width = S16_WIDTH;
-        config.s16_x_off = 0;
-    }
-
+    // N64 fixed config: lores 320x224, no widescreen, no internal scaling
+    // (the framebuffer is 320x240; libdragon owns the on-screen mapping).
+    // The shadow intensity, scale, scanlines, filter, vsync, hires fields
+    // from video_settings_t were SDL knobs and have no effect here.
+    config.s16_width  = S16_WIDTH;
+    config.s16_x_off  = 0;
     config.s16_height = S16_HEIGHT;
 
-    // Internal video buffer is doubled in hi-res mode.
-    if (settings->hires)
-    {
-        config.s16_width  <<= 1;
-        config.s16_height <<= 1;
-    }
-
-    if (settings->scanlines < 0) settings->scanlines = 0;
-    else if (settings->scanlines > 100) settings->scanlines = 100;
-
-    if (settings->scale < 1)
-        settings->scale = 1;
-
-    set_shadow_intensity(settings->shadow == 0 ? shadow::ORIGINAL : shadow::MAME);
-
-    renderer->init(config.s16_width, config.s16_height, settings->scale, settings->mode, settings->scanlines);
-
+    set_shadow_intensity(shadow::ORIGINAL);
+    renderer->init(config.s16_width, config.s16_height);
     return 1;
 }
 

@@ -158,7 +158,7 @@ hwtiles::~hwtiles(void)
 
 }
 
-void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
+void hwtiles::init(uint8_t* /*src_tiles*/)
 {
     // CI4 tile data is pre-decoded offline (see tools/bake-sprites) and
     // shipped as /tiles/tiles_native.bin inside the DragonFS payload. We
@@ -185,13 +185,7 @@ void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
         std::memset(s_tile_cache_tag, 0xff, TILE_CACHE_SLOTS * sizeof(uint16_t));
     }
 
-    // The legacy SDL build dispatched CPU rendering through
-    // render8x8_tile_mask{,_clip} function pointers (lores/hires variants).
-    // N64 uses RDP-based render_rdp_tile_layers / render_rdp_text_layer
-    // exclusively (see src/main/n64/rendersurface.cpp), so the CPU paths
-    // and the function-pointer setup are dropped. s16_width_noscale is
-    // still consulted by the RDP renderers for clipping.
-    s16_width_noscale = hires ? (config.s16_width >> 1) : config.s16_width;
+    s16_width_noscale = config.s16_width;
 }
 
 // patch_tiles / restore_tiles are widescreen-only on N64. With

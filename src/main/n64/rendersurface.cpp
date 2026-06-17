@@ -76,8 +76,7 @@ namespace n64_profile
 
 Render::Render()
     : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
-      video_mode(0), scanlines(0), scale(1), shadow_multi(0),
-      y_offset(0), initialized(false)
+      shadow_multi(0), y_offset(0), initialized(false)
 {
 }
 
@@ -184,14 +183,10 @@ void Render::boot_display()
     initialized = true;
 }
 
-bool Render::init(int src_w, int src_h,
-                  int /*scale_in*/, int video_mode_in, int scanlines_in)
+bool Render::init(int src_w, int src_h)
 {
     src_width  = src_w;
     src_height = src_h;
-    scale      = 1;
-    video_mode = video_mode_in;
-    scanlines  = scanlines_in;
 
     // boot_display() is expected to have run in main() before any heavy
     // heap consumer; this guard is the safety net for unit tests or future

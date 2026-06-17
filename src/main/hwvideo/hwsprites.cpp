@@ -143,12 +143,6 @@ void hwsprites::set_x_clip(bool on)
     {
         x1 = config.s16_x_off;
         x2 = x1 + S16_WIDTH;
-
-        if (config.video.hires)
-        {
-            x1 <<= 1;
-            x2 <<= 1;
-        }
     }
     // Allow full wide-screen.
     else
@@ -819,7 +813,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 
         if (numbanks) bank %= numbanks;
         if (vzoom < 0x40) vzoom = 0x40;
-        if (config.video.hires) vzoom >>= 1;
 
         atlas_get_or_extract(
             (uint16_t)bank, (uint16_t)addr,
@@ -872,14 +865,6 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         if (hzoom < 0x40) hzoom = 0x40;
 
         xpos += config.s16_x_off;
-
-        if (config.video.hires)
-        {
-            xpos  <<= 1;
-            top   <<= 1;
-            hzoom >>= 1;
-            vzoom >>= 1;
-        }
 
         // Pass 2 (emit). drain_on_overflow=true: any miss here that triggers
         // overflow recovery must rspq_wait() first because we've already

@@ -20,7 +20,7 @@ public:
     hwtiles(void);
     ~hwtiles(void);
 
-    void init(uint8_t* src_tiles, const bool hires);
+    void init(uint8_t* src_tiles);
     void patch_tiles(RomLoader* patch);
     void restore_tiles();
     void set_x_clamp(const uint16_t);
