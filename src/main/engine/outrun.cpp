@@ -375,7 +375,11 @@ void Outrun::main_switch()
             ohud.draw_credits();
             ohud.draw_insert_coin();
             omusic.tick();
-            if (decrement_timers())
+            // Gated by music_timer > 0 — see OMusic::enable for the
+            // matching skip. When the timer is disabled (N64 default),
+            // the player advances out of music select by pressing
+            // start (handled in OMusic::check_start).
+            if (config.sound.music_timer > 0 && decrement_timers())
             {
                 omusic.disable();
                 game_state = GS_INIT_GAME;

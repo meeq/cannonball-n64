@@ -128,6 +128,13 @@ namespace
         config.sound.enabled = 1;
         config.sound.rate    = 22050;
 
+        // Console port: disable the arcade music-select auto-advance.
+        // The cartridge-style player picks a track + presses start when
+        // ready, not on a coin-up countdown. OMusic::enable + Outrun::
+        // main_switch GS_MUSIC both gate their timer logic on
+        // music_timer > 0; setting it to 0 here skips both.
+        config.sound.music_timer = 0;
+
         // Add a silent "RADIO OFF" slot to the music-select carousel so
         // players who'd rather drive without a soundtrack can pick it like
         // any other track. The default cursor sits at index 1 (Passing

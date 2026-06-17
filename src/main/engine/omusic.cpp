@@ -74,9 +74,17 @@ void OMusic::enable()
     auto_cycle_disabled       = false;
     track_overlay_ticks       = 0;
     preview_counter           = -20; // Delay before playing music
-    ostats.time_counter       = config.sound.music_timer; // Move 30 seconds to timer countdown (note on the original roms this is 15 seconds)
-    ostats.frame_counter      = ostats.frame_reset;  
-     
+    // music_timer == 0 disables the arcade-style auto-advance from
+    // music select. Skip setting the countdown so decrement_timers()
+    // never trips in Outrun::main_switch GS_MUSIC. The N64 build
+    // defaults to 0 (manual start required); arcade builds keep the
+    // 0x30-frame timeout.
+    if (config.sound.music_timer > 0)
+    {
+        ostats.time_counter   = config.sound.music_timer; // Move 30 seconds to timer countdown (note on the original roms this is 15 seconds)
+        ostats.frame_counter  = ostats.frame_reset;
+    }
+
     blit_music_select();
     // "SELECT MUSIC BY STEERING" is a World rev-B addition; the Japanese
     // rom has no matching blit_text2 record at the analogous offset, so
