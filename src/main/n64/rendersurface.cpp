@@ -24,13 +24,6 @@
 #include <cstring>
 #include <malloc.h>
 
-// Diagnostic: bracket each RDP pass with rspq_wait() so we can split per-pass
-// time into CPU-emit (command queue construction) vs RDP-drain (rasterizer/
-// TMEM-load work the RDP still had to do after CPU returned). When 1, every
-// 60th frame prints a debugf line. Serializing CPU and RDP kills frame-rate
-// while enabled, so flip this back to 0 once the bottleneck is identified.
-#define N64_PROFILE_RDP_DRAIN 0
-
 namespace n64_profile
 {
     uint32_t prepare_us = 0;
@@ -323,31 +316,13 @@ bool Render::finalize_frame()
     // data leaking past the visible area).
     rdpq_set_scissor(x, y_offset, x + src_width, y_offset + src_height);
 
-#if N64_PROFILE_RDP_DRAIN
-    uint32_t rbg_emit = 0, rbg_drain = 0, rbg_prims = 0;
-    uint32_t tbg_emit = 0, tbg_drain = 0, tbg_prims = 0;
-    uint32_t rfg_emit = 0, rfg_drain = 0, rfg_prims = 0;
-    uint32_t spr_emit = 0, spr_drain = 0, spr_prims = 0;
-    uint32_t txt_emit = 0, txt_drain = 0, txt_prims = 0;
-    uint32_t prim_mark = 0;
-#endif
 
     // Road background: emit one rdpq_fill_rectangle per same-color band.
     // Configures fill mode internally; safe to call before the composite blit.
-#if N64_PROFILE_RDP_DRAIN
-    prim_mark = n64_profile::prim_count;
-#endif
     uint64_t rbg_t0 = get_ticks_us();
     hwroad.render_rdp_background(rgb, x, y_offset, src_width);
     uint64_t rbg_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_ROAD_BG] = (uint32_t)(rbg_t1 - rbg_t0);
-#if N64_PROFILE_RDP_DRAIN
-    rspq_wait();
-    uint64_t rbg_t2 = get_ticks_us();
-    rbg_emit  = (uint32_t)(rbg_t1 - rbg_t0);
-    rbg_drain = (uint32_t)(rbg_t2 - rbg_t1);
-    rbg_prims = n64_profile::prim_count - prim_mark;
-#endif
     n64_profile::sub_us[n64_profile::SUB_ROAD_BG] =
         (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
          + (uint32_t)(rbg_t1 - rbg_t0)) >> 3;
@@ -361,20 +336,10 @@ bool Render::finalize_frame()
     // at engine layer-5).
     data_cache_hit_writeback(tile_tlut, sizeof(tile_tlut));
 
-#if N64_PROFILE_RDP_DRAIN
-    prim_mark = n64_profile::prim_count;
-#endif
     uint64_t tbg_t0 = get_ticks_us();
     video.tile_layer->render_rdp_tile_layers(tile_tlut, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_TILE_BG] = (uint32_t)(tbg_t1 - tbg_t0);
-#if N64_PROFILE_RDP_DRAIN
-    rspq_wait();
-    uint64_t tbg_t2 = get_ticks_us();
-    tbg_emit  = (uint32_t)(tbg_t1 - tbg_t0);
-    tbg_drain = (uint32_t)(tbg_t2 - tbg_t1);
-    tbg_prims = n64_profile::prim_count - prim_mark;
-#endif
     n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
@@ -428,83 +393,31 @@ bool Render::finalize_frame()
         // RSP path is disabled or when RSP has already drained.
         if (n64::hwroad_rdp_rsp::enabled)
             n64::hwroad_rdp_rsp::sync_runs();
-#if N64_PROFILE_RDP_DRAIN
-        prim_mark = n64_profile::prim_count;
-        uint64_t rfg_t0 = get_ticks_us();
-#endif
         hwroad.emit_foreground_lores_rdp(x, y_offset);
-#if N64_PROFILE_RDP_DRAIN
-        uint64_t rfg_t1 = get_ticks_us();
-        rspq_wait();
-        uint64_t rfg_t2 = get_ticks_us();
-        rfg_emit  = (uint32_t)(rfg_t1 - rfg_t0);
-        rfg_drain = (uint32_t)(rfg_t2 - rfg_t1);
-        rfg_prims = n64_profile::prim_count - prim_mark;
-#endif
     }
 
     // Sprite layer via RDP: opaque sprites are one blit each, shadow-flagged
     // sprites get a darken pass + body pass. Lives above the composite (so it
     // occludes road_fg) and below text.
     data_cache_hit_writeback(sprite_tlut, sizeof(sprite_tlut));
-#if N64_PROFILE_RDP_DRAIN
-    prim_mark = n64_profile::prim_count;
-#endif
     uint64_t spr_t0 = get_ticks_us();
     video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
     uint64_t spr_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_SPRITE] = (uint32_t)(spr_t1 - spr_t0);
-#if N64_PROFILE_RDP_DRAIN
-    rspq_wait();
-    uint64_t spr_t2 = get_ticks_us();
-    spr_emit  = (uint32_t)(spr_t1 - spr_t0);
-    spr_drain = (uint32_t)(spr_t2 - spr_t1);
-    spr_prims = n64_profile::prim_count - prim_mark;
-#endif
     n64_profile::sub_us[n64_profile::SUB_SPRITE] =
         (n64_profile::sub_us[n64_profile::SUB_SPRITE] * 7
          + (uint32_t)(spr_t1 - spr_t0)) >> 3;
 
     // Text layer sits on top of everything. Uses the same TLUT cache as the
     // tile layers (Colour is 3-bit here, only slots 0..7 are touched).
-#if N64_PROFILE_RDP_DRAIN
-    prim_mark = n64_profile::prim_count;
-#endif
     uint64_t txt_t0 = get_ticks_us();
     video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
     uint64_t txt_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_TEXT] = (uint32_t)(txt_t1 - txt_t0);
-#if N64_PROFILE_RDP_DRAIN
-    rspq_wait();
-    uint64_t txt_t2 = get_ticks_us();
-    txt_emit  = (uint32_t)(txt_t1 - txt_t0);
-    txt_drain = (uint32_t)(txt_t2 - txt_t1);
-    txt_prims = n64_profile::prim_count - prim_mark;
-#endif
     n64_profile::sub_us[n64_profile::SUB_TEXT] =
         (n64_profile::sub_us[n64_profile::SUB_TEXT] * 7
          + (uint32_t)(txt_t1 - txt_t0)) >> 3;
 
-#if N64_PROFILE_RDP_DRAIN
-    // Print one line per second so the USB log stays scannable.
-    static uint32_t drain_log_frame = 0;
-    if ((drain_log_frame++ % 60) == 0)
-    {
-        debugf("rdp[%5lu] rbg %3lup e=%4lu d=%5lu  tbg %4lup e=%4lu d=%4lu  "
-               "rfg %4lup e=%4lu d=%5lu  spr %3lup e=%4lu d=%4lu  txt %3lup e=%4lu d=%4lu\n",
-               (unsigned long)drain_log_frame,
-               (unsigned long)rbg_prims,
-               (unsigned long)rbg_emit, (unsigned long)rbg_drain,
-               (unsigned long)tbg_prims,
-               (unsigned long)tbg_emit, (unsigned long)tbg_drain,
-               (unsigned long)rfg_prims,
-               (unsigned long)rfg_emit, (unsigned long)rfg_drain,
-               (unsigned long)spr_prims,
-               (unsigned long)spr_emit, (unsigned long)spr_drain,
-               (unsigned long)txt_prims,
-               (unsigned long)txt_emit, (unsigned long)txt_drain);
-    }
-#endif
 
     // TEMP-PROBE: drain queue + read RDP busy counters. One line per 60
     // frames. Valid on real hardware only.

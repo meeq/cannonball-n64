@@ -108,10 +108,8 @@ namespace n64_profile
 
     // Per-frame RDP primitive counter. Each rasterizer increments this at
     // every rdpq_*_rectangle / rdpq_tex_blit site (~1500/frame at peak,
-    // ~30us of L1 store traffic — kept alive even when N64_PROFILE_RDP_DRAIN
-    // is off so flipping that flag immediately produces a per-pass prim
-    // breakdown). rendersurface snapshots it before/after each phase only
-    // when DRAIN is enabled.
+    // ~30us of L1 store traffic). Read by the per-call counters
+    // (spr_call_prims, tile_call_prims) for the outlier logger.
     extern uint32_t prim_count;
 }
 
