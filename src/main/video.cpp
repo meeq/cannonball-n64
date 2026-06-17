@@ -160,15 +160,6 @@ void Video::set_shadow_intensity(float f)
 
 void Video::prepare_frame()
 {
-    // start_frame() zeroes the engine scratch surface through KSEG1 — much
-    // cheaper than the old cached pass since stores skip the read-for-
-    // ownership + writeback round-trip. Untouched scratch pixels stay at
-    // alpha=0 and get dropped by the alpha-compare composite blit in
-    // finalize_frame, so anything we don't overwrite reveals the RDP layers
-    // (road_bg / tile_bg / tile_fg) underneath.
-    if (!renderer->start_frame())
-        return;
-
     if (!enabled)
         return;
 

@@ -78,14 +78,6 @@ namespace n64_profile
     extern uint32_t spr_call_us;
     extern uint32_t spr_call_ovf;       // atlas overflows this call (drives bimodality)
 
-    // Scratch composite blit (320×224 RGBA5551 with alpha-compare). Skipped
-    // when CPU road_fg path didn't run; instrumented to confirm that's a real
-    // RDP fillrate saving and not just a wash. raw_composite_us is the per-
-    // frame value; composite_us is the EMA.
-    extern uint32_t composite_us;
-    extern uint32_t raw_composite_us;
-    extern uint32_t composite_skipped_frames;   // count of skipped blits in window
-
     enum {
         SUB_ROAD_BG,
         SUB_TILE_BG,
@@ -139,12 +131,6 @@ public:
     void convert_palette(uint32_t adr, uint32_t r1, uint32_t g1, uint32_t b1);
     void set_shadow_intensity(float f);
 
-    // Engine scratch surface — RGBA5551, sized src_width × src_height. Held
-    // through KSEG1 so CPU writes go straight to RDRAM via the store buffer
-    // (no cache-line allocate, no writeback), then DMA-blit'd onto the
-    // framebuffer in finalize_frame. hwroad::render_foreground writes here.
-    uint16_t* scratch_uc() const { return scratch_uc_ptr; }
-
     // RGBA5551 engine palette LUT (S16_PALETTE_ENTRIES * 2 entries). Lower
     // half is normal colors, upper half is shadow-darkened. Indexed by engine
     // palette entry; entry 0 is encoded as zero so the alpha-compare composite
@@ -189,13 +175,6 @@ private:
     // Shadow intensity multiplier (0..255).
     int shadow_multi;
 
-    // Scratch RGBA5551 surface populated by hwroad foreground (and possibly
-    // future CPU layers) and blit'd onto the framebuffer in finalize_frame.
-    // scratch_pixels is the cached allocation; scratch_uc_ptr is its KSEG1
-    // alias used by all CPU writers — see scratch_uc() accessor above.
-    uint16_t*  scratch_pixels;
-    uint16_t*  scratch_uc_ptr;
-    surface_t  scratch_surface;
     int        y_offset;          // letterbox top (pixels)
 
     bool       initialized;

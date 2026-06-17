@@ -1,12 +1,9 @@
 /***************************************************************************
-    N64 Render — direct-to-RGBA5551 scratch + RDP composite.
+    N64 Render — all-RDP composite.
 
-    hwroad foreground rasterises straight into an RGBA5551 (FMT_RGBA16)
-    scratch surface (held through KSEG1 so CPU writes go to RDRAM via the
-    store buffer with no cache traffic). The tile, sprite, road-bg and text
-    layers go through the RDP. finalize_frame() composites everything onto
-    the framebuffer in z-order: road_bg fill → tile_bg → tile_fg → scratch
-    blit (road_fg, alpha-compared) → sprites → text → FPS overlay.
+    finalize_frame() composites every layer straight onto the framebuffer
+    in z-order: road_bg fill → tile_bg → tile_fg → road_fg (RDP mask + CI4
+    TLUTs built per-line in prepare_frame) → sprites → text → FPS overlay.
 ***************************************************************************/
 
 #include "rendersurface.hpp"
@@ -75,24 +72,11 @@ namespace n64_profile
     uint32_t spr_call_tlut_uploads  = 0;
     uint32_t spr_call_us            = 0;
     uint32_t spr_call_ovf           = 0;
-
-    uint32_t composite_us           = 0;
-    uint32_t raw_composite_us       = 0;
-    uint32_t composite_skipped_frames = 0;
 }
-
-// Scratch surface for the hwroad foreground (engine-resolution RGBA5551).
-// Reserved as static BSS rather than memalign'd at Render::init so the
-// allocation can't be defeated by heap fragmentation after ROM load / audio
-// init / atlas alloc. Size is fixed at S16_WIDTH * S16_HEIGHT * 2 bytes
-// (320*224*2 = 143360 B). 16-byte alignment satisfies both the rdpq DMA
-// minimum and the data_cache_hit_invalidate cache-line precondition.
-alignas(16) static uint16_t s_scratch_storage[S16_WIDTH * S16_HEIGHT];
 
 Render::Render()
     : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
       video_mode(0), scanlines(0), scale(1), shadow_multi(0),
-      scratch_pixels(nullptr), scratch_uc_ptr(nullptr), scratch_surface{},
       y_offset(0), initialized(false)
 {
 }
@@ -215,23 +199,9 @@ bool Render::init(int src_w, int src_h,
     boot_display();
 
     // Engine resolution is fixed at S16_WIDTH x S16_HEIGHT on N64 (widescreen
-    // disabled, src_w / src_h always match), so the static buffer is sized
-    // exactly right. Assert the contract — anything else is a config bug.
+    // disabled, src_w / src_h always match). Assert the contract — anything
+    // else is a config bug.
     assert(src_width == S16_WIDTH && src_height == S16_HEIGHT);
-    const int bytes = src_width * src_height * (int)sizeof(uint16_t);
-    scratch_pixels = s_scratch_storage;
-
-    // All CPU writes to the scratch surface go through KSEG1 so the store
-    // buffer coalesces sequential writes straight into RDRAM (no cache-line
-    // allocate, no eventual writeback). Invalidate any cached lines now so
-    // they can't shadow the uncached writes later — nothing in the engine
-    // path reads scratch_pixels through the cached pointer.
-    scratch_uc_ptr = (uint16_t*)UncachedAddr(scratch_pixels);
-    data_cache_hit_invalidate(scratch_pixels, bytes);
-    std::memset(scratch_uc_ptr, 0, bytes);
-
-    scratch_surface = surface_make_linear(scratch_pixels, FMT_RGBA16,
-                                          src_width, src_height);
 
     // Vertical letterbox: engine is 224 tall, framebuffer 240.
     y_offset = (n64::FB_HEIGHT - src_height) / 2;
@@ -242,10 +212,6 @@ bool Render::init(int src_w, int src_h,
 
 void Render::disable()
 {
-    // scratch_pixels lives in BSS (s_scratch_storage); just clear the alias
-    // pointers, no free.
-    scratch_pixels = nullptr;
-    scratch_uc_ptr = nullptr;
     if (initialized)
     {
         rdpq_close();
@@ -256,14 +222,6 @@ void Render::disable()
 
 bool Render::start_frame()
 {
-    // Zero the scratch surface through KSEG1 so the store buffer coalesces
-    // straight into RDRAM — no read-for-ownership, no later writeback. Any
-    // pixels not written by CPU rasterizers stay alpha=0 and get dropped by
-    // the alpha-compare composite blit in finalize_frame, letting the RDP
-    // road background and tile layers underneath show through.
-    if (scratch_uc_ptr)
-        std::memset(scratch_uc_ptr, 0,
-                    src_width * src_height * sizeof(uint16_t));
     return true;
 }
 
@@ -344,15 +302,9 @@ bool Render::finalize_frame()
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
 
-    // Composite the engine scratch surface on top. Standard mode + alpha
-    // Scratch composite removed: the only writer was the CPU road_fg
-    // rasterizer, which is gone now that hwroad_rdp_rsp ships unconditionally.
-    n64_profile::composite_skipped_frames++;
-
-    // RDP road_fg overlay. When the runtime flag is on, prepare_frame ran
-    // build_foreground_lores_rdp instead of the CPU scratch pass; we paint
-    // straight into the now-uncomposited framebuffer. This just emits the
-    // prebuilt CI4 mask + per-line TLUTs into rdpq.
+    // RDP road_fg overlay. prepare_frame ran build_foreground_lores_rdp_rsp;
+    // here we sync the RSP-written n_runs back and emit the prebuilt mask +
+    // per-line TLUTs into rdpq, painting straight into the framebuffer.
     //
     // should_render_road_fg() mirrors the build-side predicate at
     // video.cpp's prepare_frame: when the engine suppresses road_fg (e.g.

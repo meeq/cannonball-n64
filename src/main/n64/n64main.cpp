@@ -910,7 +910,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 // counters (then suspect RDP backpressure or DMA stalls).
                 // If chunks > 1 or evicts spike, the atlas/TLUT working set
                 // overflowed for this scene's tile diversity.
-                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu dma=%lu/%lu@%luus\n",
+                debugf("    tile.call: vis=%4lu uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  dma=%lu/%lu@%luus\n",
                        (unsigned long)n64_profile::tile_call_vis,
                        (unsigned long)n64_profile::tile_call_uniq_total,
                        (unsigned long)n64_profile::tile_call_chunks,
@@ -918,7 +918,6 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_prims,
                        (unsigned long)n64_profile::tile_call_pass1_us,
                        (unsigned long)n64_profile::tile_call_pass2_us,
-                       (unsigned long)n64_profile::raw_composite_us,
                        (unsigned long)n64_profile::tile_call_dma_misses,
                        (unsigned long)n64_profile::tile_call_dma_fetches,
                        (unsigned long)n64_profile::tile_call_dma_us);
@@ -1010,9 +1009,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 // Last-call tile.call values — baseline reference when fps is
                 // healthy. Compare against the OUT log to see how vis/uniq/
                 // chunks/evicts move on slow frames.
-                static uint32_t snap_comp_skipped = 0;
-                const uint32_t cur_comp_skipped = n64_profile::composite_skipped_frames;
-                debugf("    tile.call: vis=%4lu (bg=%lu fg=%lu) uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  comp=%lu skip=%lu/%lu dma=%lu/%lu@%luus\n",
+                debugf("    tile.call: vis=%4lu (bg=%lu fg=%lu) uniq=%3lu chunks=%lu evicts=%lu prims=%lu p1=%lu p2=%lu  dma=%lu/%lu@%luus\n",
                        (unsigned long)n64_profile::tile_call_vis,
                        (unsigned long)n64_profile::tile_call_vis_bg,
                        (unsigned long)n64_profile::tile_call_vis_fg,
@@ -1022,9 +1019,6 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::tile_call_prims,
                        (unsigned long)n64_profile::tile_call_pass1_us,
                        (unsigned long)n64_profile::tile_call_pass2_us,
-                       (unsigned long)n64_profile::composite_us,
-                       (unsigned long)(cur_comp_skipped - snap_comp_skipped),
-                       (unsigned long)wf,
                        (unsigned long)n64_profile::tile_call_dma_misses,
                        (unsigned long)n64_profile::tile_call_dma_fetches,
                        (unsigned long)n64_profile::tile_call_dma_us);
@@ -1046,7 +1040,6 @@ int main(int /*argc*/, char* /*argv*/[])
                 n64_profile::snap_spr_overflows     = cur_spr_ovf;
                 n64_profile::snap_tile_tlut_uploads = cur_tile_upl;
                 n64_profile::snap_text_tlut_uploads = cur_text_upl;
-                snap_comp_skipped                   = cur_comp_skipped;
             }
         }
 #endif
