@@ -2,10 +2,10 @@
     CPU-side dispatch for the hwroad_rdp_rsp overlay.
 
     Step 1 — overlay scaffold + CPU descriptor build + pre-fill. The RSP
-    overlay is a stub: the mask region is left in the all-OOB state the
-    pre-fill writes, so the visual contract when enabled==true is "road
-    region paints a uniform OOB colour through the RDP". That validates
-    the build/emit wiring before step 2 adds the actual scalar pack loop
+    overlay started as a stub: the mask region was left in the all-OOB
+    state the pre-fill writes, so the visual contract was "road region
+    paints a uniform OOB colour through the RDP". That validated the
+    build/emit wiring before step 2 added the actual scalar pack loop
     in rsp_hwroad_rdp.S.
 
     Per-frame protocol:
@@ -40,9 +40,8 @@ namespace n64
 namespace hwroad_rdp_rsp
 {
 
-// Shipping default: RSP path on. Handles all ctrl values (0/1/2/3); ctrl=1/2
-// dual-road frames are scanned piece-wise inside do_case12.
-bool     enabled    = true;
+// RSP packer for the road_fg CI4 mask. Handles all ctrl values (0/1/2/3);
+// ctrl=1/2 dual-road frames are scanned piece-wise inside do_case12.
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
 uint32_t rsp_us     = 0;

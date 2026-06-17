@@ -345,36 +345,9 @@ bool Render::finalize_frame()
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
 
     // Composite the engine scratch surface on top. Standard mode + alpha
-    // compare keeps RGBA5551 alpha=0 texels (untouched scratch background)
-    // from overwriting the road background and tile layers underneath. The
-    // scratch holds road_fg pixels in their final RGBA5551 form — hwroad
-    // wrote them directly during prepare_frame.
-    //
-    // SKIP the blit when CPU road_fg didn't run: either the RDP hwroad path
-    // owns the road (should_skip_cpu) or road_fg is entirely suppressed
-    // (!should_render_road_fg). In both cases, scratch is still all alpha=0
-    // from start_frame()'s memset — blitting it is ~71680 pixels of RDP
-    // fillrate that all get dropped by alpha-compare. CPU-side rdpq emit
-    // measures ~22us per frame (raw_composite_us); RDP fillrate savings
-    // (~71680 alpha-compare reads of zero alpha) come on top but are hidden
-    // by the upstream tile_bg backpressure (see [[project-tbg-chunks-bound]]).
-    const bool cpu_wrote_scratch =
-        n64::hwroad_rdp::should_render_road_fg() &&
-        !n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control());
-    const uint64_t comp_t0 = get_ticks_us();
-    if (cpu_wrote_scratch)
-    {
-        rdpq_set_mode_standard();
-        rdpq_mode_alphacompare(1);
-        rdpq_tex_blit(&scratch_surface, x, y_offset, NULL);
-    }
-    else
-    {
-        n64_profile::composite_skipped_frames++;
-    }
-    const uint32_t comp_us = (uint32_t)(get_ticks_us() - comp_t0);
-    n64_profile::raw_composite_us = comp_us;
-    n64_profile::composite_us = (n64_profile::composite_us * 7 + comp_us) >> 3;
+    // Scratch composite removed: the only writer was the CPU road_fg
+    // rasterizer, which is gone now that hwroad_rdp_rsp ships unconditionally.
+    n64_profile::composite_skipped_frames++;
 
     // RDP road_fg overlay. When the runtime flag is on, prepare_frame ran
     // build_foreground_lores_rdp instead of the CPU scratch pass; we paint
@@ -386,13 +359,10 @@ bool Render::finalize_frame()
     // music-select sets horizon_base = HORIZON_OFF), build was skipped and
     // line[]/runs_buf hold stale geometry from the prior frame. Emitting
     // that would paint last frame's road over an unrelated scene.
-    if (n64::hwroad_rdp::should_render_road_fg() &&
-        n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control())) {
-        // If prepare_frame kicked the RSP build, the per-row n_runs needs
-        // to be synced back before emit walks runs[][]. Cheap no-op when
-        // RSP path is disabled or when RSP has already drained.
-        if (n64::hwroad_rdp_rsp::enabled)
-            n64::hwroad_rdp_rsp::sync_runs();
+    if (n64::hwroad_rdp::should_render_road_fg()) {
+        // Sync per-row n_runs back from the RSP build before emit walks
+        // runs[][]. Cheap no-op once RSP has already drained.
+        n64::hwroad_rdp_rsp::sync_runs();
         hwroad.emit_foreground_lores_rdp(x, y_offset);
     }
 

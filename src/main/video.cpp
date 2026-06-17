@@ -80,7 +80,7 @@ int Video::init(Roms* roms, video_settings_t* settings)
     }
 
     // Convert S16 Road Stuff
-    hwroad.init(roms->road.rom, config.video.hires != 0);
+    hwroad.init(roms->road.rom);
     if (roms->road.rom)
     {
         delete[] roms->road.rom;
@@ -187,20 +187,9 @@ void Video::prepare_frame()
         // hasn't queued anything yet). build_ also rspq_waits at entry as
         // a safety net against overwriting buffers the RDP still references.
         // emit_foreground_lores_rdp in finalize_frame replays the prebuilt
-        // state into the framebuffer.
-        if (n64::hwroad_rdp::should_skip_cpu(hwroad.get_road_control()))
-        {
-            // RSP-build variant offloads the per-pixel CI4 pack to the RSP.
-            // CPU still builds TLUT + spans + descriptor + pre-fill. Default
-            // off — toggle n64::hwroad_rdp_rsp::enabled at runtime to A/B.
-            if (n64::hwroad_rdp_rsp::enabled)
-                hwroad.build_foreground_lores_rdp_rsp(renderer->rgb_lut());
-            else
-                hwroad.build_foreground_lores_rdp(renderer->rgb_lut());
-        }
-        else
-            (hwroad.*hwroad.render_foreground)(renderer->scratch_uc(),
-                                               renderer->rgb_lut());
+        // state into the framebuffer. RSP packs the per-pixel CI4 mask;
+        // CPU still builds TLUT + spans + descriptor + pre-fill.
+        hwroad.build_foreground_lores_rdp_rsp(renderer->rgb_lut());
     }
     N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);
 }

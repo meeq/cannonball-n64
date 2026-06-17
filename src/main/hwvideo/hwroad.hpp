@@ -8,7 +8,7 @@ public:
     HWRoad();
     ~HWRoad();
 
-    void init(const uint8_t*, const bool hires);
+    void init(const uint8_t*);
     // Zero both halves of road RAM. ORoad::clear_road_ram only writes
     // scanlines 0..0xDF on the engine-write side, so the read-side data1
     // region (and any unscanned slots) keeps prior-session values whose
@@ -20,18 +20,28 @@ public:
     uint16_t read_road_control();
     void write_road_control(const uint8_t);
     uint8_t  get_road_control() const { return road_control; }
-    // Per-pixel foreground rasteriser. Writes RGBA5551 directly into the
-    // engine scratch surface (320x224, uint16_t per pixel) using the supplied
-    // engine→RGBA5551 palette LUT. Pixels left untouched stay at whatever the
-    // caller's start_frame() zeroed them to — alpha=0, transparent under the
-    // composite blit so the underlying road_bg / tile layers show through.
-    void (HWRoad::*render_foreground)(uint16_t* dst_rgba, const uint16_t* rgb_lut);
 
     // RDP road background — looks up which scanlines are solid-filled per the
     // S16 road_control / road RAM contents and emits batched rdpq fill rects
     // directly into the framebuffer at (x_offset, y_offset). Assumes the
     // caller has attached the display and not yet set a fill mode.
     void render_rdp_background(const uint16_t* rgb_lut, int x_offset, int y_offset, int s16_width);
+
+    // RDP road foreground rasteriser — handles all 4 (road_control & 3) values.
+    // Split into two phases so the CPU mask-build doesn't fight RDP DMA traffic
+    // for the RDRAM bus:
+    //   build_…  runs before finalize_frame queues road_bg / tiles / etc.
+    //            Fills per-line state + CI4 mask + per-line TLUT in RAM
+    //            (writes hit uncached aliases, so RDP DMA sees fresh bytes
+    //            with no writeback). CPU does TLUT + spans + descriptor +
+    //            uncached pre-fill; RSP overlay does the per-pixel CI4 pack.
+    //   emit_…   runs after the scratch composite, with rdpq_attach'd target.
+    //            Reads the prebuilt state and emits per-line fill + CI4
+    //            textured rectangles.
+    // n64::hwroad_rdp::init() + n64::hwroad_rdp_rsp::init() must both run once
+    // at startup before either phase is safe to call.
+    void build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut);
+    void emit_foreground_lores_rdp(int x_off, int y_off);
 
 private:
     uint8_t road_control;
@@ -51,32 +61,6 @@ private:
     uint16_t ramBuff[ROAD_RAM_SIZE / 2];
 
     void decode_road(const uint8_t*);
-    void render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut);
-    void render_foreground_hires(uint16_t* dst_rgba, const uint16_t* rgb_lut);
-
-public:
-    // RDP foreground rasteriser — handles all 4 (road_control & 3) values.
-    // Split into two phases so the CPU mask-build doesn't fight RDP DMA
-    // traffic for the RDRAM bus:
-    //   build_…  runs before finalize_frame queues road_bg / tiles / etc.
-    //            Fills per-line state + CI4 mask + per-line TLUT in RAM
-    //            (writes hit uncached aliases, so RDP DMA sees fresh bytes
-    //            with no writeback).
-    //   emit_…   runs after the scratch composite, with rdpq_attach'd target.
-    //            Reads the prebuilt state and emits per-line fill + CI4
-    //            textured rectangles.
-    // n64::hwroad_rdp::init() must run once at startup before either call.
-    void build_foreground_lores_rdp(const uint16_t* rgb_lut);
-    void emit_foreground_lores_rdp(int x_off, int y_off);
-
-    // RSP-build variant of build_foreground_lores_rdp. Same on-frame
-    // contract — populates the shared mask/TLUT/line state in
-    // n64::hwroad_rdp::detail. CPU still does TLUT + spans + descriptor
-    // build + uncached pre-fill; RSP overlay does the per-pixel CI4 pack.
-    // Caller selects via n64::hwroad_rdp_rsp::enabled. emit_… consumes
-    // the same buffers either way. n64::hwroad_rdp_rsp::init() must run
-    // once at startup before this is safe to call.
-    void build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut);
 };
 
 extern HWRoad hwroad;

@@ -36,12 +36,6 @@ namespace hwroad_rdp_rsp
     // called (ROM exits to libdragon abort on shutdown).
     void shutdown();
 
-    // Runtime selector. When true, video.cpp routes the build phase
-    // through HWRoad::build_foreground_lores_rdp_rsp instead of the
-    // CPU-only build. The emit phase is unchanged either way.
-    // Default false — flip to A/B against the CPU-build path.
-    extern bool enabled;
-
     // Wait for the kicked overlay to finish and copy the RSP-written
     // per-row n_runs back into line[y].n_runs so the emit phase can
     // walk runs[][]. Must be called between build_foreground_lores_rdp_rsp
@@ -64,7 +58,7 @@ namespace hwroad_rdp_rsp
 
     // True iff the build pass populated the per-row c_oob array for this
     // frame. Lets the emit phase fall back to the CPU loop when the build
-    // was CPU-driven (rsp::enabled == false) or hasn't run yet.
+    // hasn't run yet (e.g. road_fg is suppressed by the engine).
     bool coob_fill_ready();
 
     // Per-row body fill dispatch — RSP-side emit of fill_rectangles for the
