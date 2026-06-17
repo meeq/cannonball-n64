@@ -1054,7 +1054,17 @@ coob_loop:
     beq     s7, t7, coob_advance
     nop
 
-    # ---- Close current run: emit SET_FILL_COLOR + FILL_RECTANGLE. ----
+    # ---- Close current run: emit SYNC_PIPE + SET_FILL_COLOR + FILL_RECTANGLE.
+    # SYNC_PIPE (0xE7000000, 0): real RDP needs the previous fill rect's
+    # pixel writes drained before a fill-color change, or the new colour
+    # races stripe-pixels of the still-in-flight rectangle and we get
+    # wrong-colored bands. libdragon's rdpq_set_fill_color auto-syncs
+    # via autosync, but this overlay bypasses rdpq.
+    lui     a0, 0xE700
+    move    a1, zero
+    jal     hp_RDPQ_Write8
+    nop
+
     # SET_FILL_COLOR: w0 = 0xF7000000, w1 = (c<<16) | c (16bpp pack)
     lui     a0, 0xF700
     sll     a1, t7, 16
@@ -1281,12 +1291,21 @@ er_run_loop:
     beqz    t0, er_run_advance
     nop
 
-    # ---- SET_FILL_COLOR if colour changed. -----------------
+    # ---- SYNC_PIPE + SET_FILL_COLOR if colour changed. -----------------
+    # SYNC_PIPE before SET_FILL_COLOR is mandatory on real hardware when
+    # a fill rect is still pixel-writing — without it the new colour
+    # races stripes of the previous rect. ares hides the hazard; HW
+    # shows it as wrong-colored road stripes. See the coob phase above.
     beqz    s7, .er_emit_set
     nop
     beq     t5, s6, .er_skip_set
     nop
 .er_emit_set:
+    lui     a0, 0xE700
+    move    a1, zero
+    jal     hp_RDPQ_Write8
+    nop
+
     lui     a0, 0xF700
     sll     a1, t5, 16
     or      a1, a1, t5
