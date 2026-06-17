@@ -76,6 +76,15 @@ static TTrial g_ttrial(config.ttrial.best_times);
 #define CANNONBALL_WARMUP_TICKS 0
 #endif
 
+// Build-time switch: when 1, ohud.draw_fps_counter(display_get_fps()) runs
+// each frame and the result lands at engine tile col 30, row 0 (top-right
+// HUD area) in the small font. Off by default — text RAM writes interleave
+// with the engine's own HUD writes, and the overlay is only useful when
+// chasing perf regressions.
+#ifndef CANNONBALL_DRAW_FPS
+#define CANNONBALL_DRAW_FPS 0
+#endif
+
 namespace
 {
     void boot_subsystems()
@@ -834,6 +843,9 @@ int main(int /*argc*/, char* /*argv*/[])
     {
         uint64_t t0 = get_ticks_us();
         tick_engine();
+#if CANNONBALL_DRAW_FPS
+        ohud.draw_fps_counter((int16_t)display_get_fps());
+#endif
         uint64_t t1 = get_ticks_us();
         video.prepare_frame();
         uint64_t t2 = get_ticks_us();
