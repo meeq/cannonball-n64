@@ -743,34 +743,42 @@ void Audio::resume_audio()
 
 void Audio::tick()
 {
-    // Pause menu: freeze the Z80 stream and skip mixer_poll. With every
-    // channel already stopped in pause_audio, the libdragon audio queue
-    // drains within ~160 ms and the DAC outputs silence. Advancing the Z80
-    // here would have it re-trigger engine-tone / traffic-noise voices that
-    // reconcile_pcm would then immediately push back onto the mixer.
-    if (paused) return;
-
     auto smooth = [](uint32_t& acc, uint64_t sample)
     {
         acc = (uint32_t)((acc * 7 + sample) >> 3);
     };
 
-    // Always advance the Z80 audio code on wall-clock, even before
-    // sound_enabled flips on, so the chip register stream stays consistent
-    // with the engine. Cheap when there are no pending ticks.
-    uint64_t t_z80_0 = get_ticks_us();
-    advance_z80_audio();
-    uint64_t t_z80_1 = get_ticks_us();
-    smooth(n64_profile::aud_z80_us, t_z80_1 - t_z80_0);
-    n64_profile::raw_aud_z80_us = (uint32_t)(t_z80_1 - t_z80_0);
+    // Pause menu: skip the Z80 advance and PCM reconcile (otherwise the
+    // engine-rev / traffic-noise voices would immediately re-trigger on
+    // the next tick), but keep polling the mixer. Pause-menu BEEP / COIN
+    // SFX go through wav64_intercept onto WAV64_SFX_CH; the wav64_play
+    // there re-activates the channel pause_audio stopped, but without
+    // mixer_poll the new samples never reach the audio queue and we hear
+    // silence until resume kicks Z80 back on.
+    const bool drive_z80 = !paused;
+
+    if (drive_z80)
+    {
+        // Always advance the Z80 audio code on wall-clock, even before
+        // sound_enabled flips on, so the chip register stream stays consistent
+        // with the engine. Cheap when there are no pending ticks.
+        uint64_t t_z80_0 = get_ticks_us();
+        advance_z80_audio();
+        uint64_t t_z80_1 = get_ticks_us();
+        smooth(n64_profile::aud_z80_us, t_z80_1 - t_z80_0);
+        n64_profile::raw_aud_z80_us = (uint32_t)(t_z80_1 - t_z80_0);
+    }
 
     if (!sound_enabled) return;
 
-    uint64_t t_pcm_0 = get_ticks_us();
-    reconcile_pcm();
-    uint64_t t_pcm_1 = get_ticks_us();
-    smooth(n64_profile::aud_pcm_us, t_pcm_1 - t_pcm_0);
-    n64_profile::raw_aud_pcm_us = (uint32_t)(t_pcm_1 - t_pcm_0);
+    if (drive_z80)
+    {
+        uint64_t t_pcm_0 = get_ticks_us();
+        reconcile_pcm();
+        uint64_t t_pcm_1 = get_ticks_us();
+        smooth(n64_profile::aud_pcm_us, t_pcm_1 - t_pcm_0);
+        n64_profile::raw_aud_pcm_us = (uint32_t)(t_pcm_1 - t_pcm_0);
+    }
 
     const int blen = audio_get_buffer_length();
     if (blen <= 0) return;
