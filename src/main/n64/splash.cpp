@@ -1,6 +1,22 @@
 /***************************************************************************
     N64 pre-boot SEGA splash — implementation.
 
+    Three-phase boot intro:
+
+      Phase 0  Full-screen I8 disclaimer (assets/splash/disclaimer.png, baked
+               to disclaimer.sprite). Held at full intensity for 10 s
+               (skippable with START), then faded to black via a per-frame
+               PRIMITIVE colour that scales the I8 luma: combiner is
+               RGB = TEX0 * PRIM, alpha = TEX0_A. The fade-out always plays
+               as the transition even on skip.
+
+      Phase 1+ SEGA wordmark animation (existing two-sprite sweep + fade),
+               bracketed by a fade-in from black and a final fade-out to
+               black. Both edge fades are background-only: rdpq_clear's
+               colour lerps black→white (entry) and white→black (exit)
+               while no wordmark renders, so the existing white-background
+               sprites need no per-frame tinting at the boundaries.
+
     Two-sprite animation, both 200x80, centered on a 320x240 white
     framebuffer.
 
@@ -81,6 +97,17 @@ namespace
     constexpr int SPRITE_Y = (SCREEN_H - SPRITE_H) / 2;  // 80
 
     constexpr uint32_t WHITE_RGB = 0xFFFFFF;
+    constexpr uint32_t BLACK_RGB = 0x000000;
+
+    // ---- disclaimer phase ----------------------------------------------------
+
+    constexpr int DISC_HOLD_FRAMES    = 600;   // 10 s @ 60 fps
+    constexpr int DISC_FADEOUT_FRAMES = 30;    // 0.5 s
+
+    // ---- splash background fades --------------------------------------------
+
+    constexpr int SPLASH_FADEIN_FRAMES  = 30;  // black → white before sweep
+    constexpr int SPLASH_FADEOUT_FRAMES = 30;  // white → black after fade-out
 
     // ---- sweep phase -----------------------------------------------------
 
@@ -283,13 +310,86 @@ void run()
     // ---- audio bringup ---------------------------------------------------
     // Audio::init() hasn't run yet — own the audio + mixer here and tear
     // them back down before returning so Audio::init() can claim them
-    // fresh.
+    // fresh. The mixer runs through the disclaimer phase too (only silence
+    // until wav64_play hits at the splash fade boundary) so audio_can_write
+    // never stalls the AI ring.
 
     audio_init(AUDIO_RATE, AUDIO_BUFFERS);
     mixer_init(AUDIO_MIXER_CH);
 
     wav64_t splash_wav;
     wav64_open(&splash_wav, "rom:/splash/sega.wav64");
+
+    // ---- disclaimer sprite: load (I8) ------------------------------------
+
+    sprite_t* disc_sprite = sprite_load("rom:/splash/disclaimer.sprite");
+    assertf(disc_sprite, "splash: sprite_load(rom:/splash/disclaimer.sprite) failed");
+    surface_t disc_pix = sprite_get_pixels(disc_sprite);
+
+    // Disclaimer combiner: result.rgb = TEX0 * PRIM, result.alpha = TEX0_A.
+    // PRIM=white passes the I8 luma through unchanged; PRIM=black scales
+    // every channel to 0 so the fade-out lands cleanly on black.
+    const rdpq_combiner_t disc_combiner =
+        RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (0, 0, 0, TEX0));
+
+    const color_t clear_black = rgb_to_color(BLACK_RGB);
+    const color_t clear_white = rgb_to_color(WHITE_RGB);
+
+    // ---- disclaimer phase: hold + fade-out -------------------------------
+    //
+    // START during the hold accelerates straight into the fade-out by
+    // rewriting hold_end to the current frame; the transition itself plays
+    // to completion so the cut into the splash fade-in (which starts at
+    // black) doesn't pop.
+
+    int disc_hold_end = DISC_HOLD_FRAMES;
+    int f = 0;
+    while (true)
+    {
+        const int total = disc_hold_end + DISC_FADEOUT_FRAMES;
+        if (f >= total) break;
+
+        surface_t* fb = display_get();
+        input.poll();
+        const bool skip = input.is_pressed(Input::START);
+
+        while (audio_can_write())
+        {
+            short* buf = audio_write_begin();
+            mixer_poll(buf, audio_get_buffer_length());
+            audio_write_end();
+        }
+
+        rdpq_attach(fb, NULL);
+        rdpq_clear(clear_black);
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(disc_combiner);
+
+        color_t prim;
+        if (f < disc_hold_end)
+        {
+            prim = rgb_to_color(WHITE_RGB);
+            if (skip)
+                disc_hold_end = f + 1;        // start fade-out next frame
+        }
+        else
+        {
+            const int rel = f - disc_hold_end;
+            const uint8_t v = (uint8_t)(255 - rel * 255 / DISC_FADEOUT_FRAMES);
+            prim = RGBA32(v, v, v, 0xFF);
+        }
+        rdpq_set_prim_color(prim);
+        rdpq_tex_blit(&disc_pix, 0, 0, NULL);
+
+        rdpq_detach_show();
+        input.frame_done();
+        ++f;
+    }
+
+    // Drain RDP before freeing the disclaimer's pixel buffer — same hazard
+    // as the splash end (see feedback_rdpq_free_needs_drain memory).
+    rspq_wait();
+    sprite_free(disc_sprite);
 
     // ---- sweep sprite: load + re-index -----------------------------------
 
@@ -320,14 +420,21 @@ void run()
     assertf(fade_sprite, "splash: sprite_load(rom:/splash/fade.sprite) failed");
     surface_t fade_pix    = sprite_get_pixels(fade_sprite);
 
-    // ---- phase boundaries ------------------------------------------------
+    // ---- splash phase boundaries -----------------------------------------
+    //
+    // Background fade-in (black → white) brackets the existing animation in
+    // front, and a fade-out (white → black) brackets it at the end. Both
+    // edge phases skip sprite rendering — the cleared framebuffer is all
+    // that's on screen.
 
     const int sweep_steps      = n_stripes + SWEEP_LEN - 1;
-    const int phase_sweep_end  = sweep_steps * FRAMES_PER_STEP;
+    const int phase_fadein_bg_end = SPLASH_FADEIN_FRAMES;
+    const int phase_sweep_end  = phase_fadein_bg_end + sweep_steps * FRAMES_PER_STEP;
     const int phase_gap_end    = phase_sweep_end + SWEEP_TO_FADE_GAP;
     const int phase_fadein_end = phase_gap_end + FADEIN_FRAMES;
     const int phase_hold_end   = phase_fadein_end + FINAL_HOLD;
-    const int total_frames     = phase_hold_end + FADEOUT_FRAMES;
+    const int phase_fadeout_end = phase_hold_end + FADEOUT_FRAMES;
+    const int total_frames     = phase_fadeout_end + SPLASH_FADEOUT_FRAMES;
 
     const int sweep_tlut_count = SLOT_STRIPE_BASE + n_stripes;
 
@@ -336,8 +443,6 @@ void run()
     const size_t sweep_wb_bytes =
         cacheline_round_up((size_t)sweep_tlut_count * sizeof(uint16_t));
 
-    const color_t clear_white = rgb_to_color(WHITE_RGB);
-
     // Combiner used in the fade phase: result.rgb = LERP(PRIM, 1, TEX0_I),
     // result.alpha = TEX0_A. The TEX0_A pipe drives rdpq_mode_alphacompare
     // so fully-transparent IA4 texels (the area around the wordmark) are
@@ -345,7 +450,7 @@ void run()
     const rdpq_combiner_t fade_combiner =
         RDPQ_COMBINER1((1, PRIM, TEX0, PRIM), (0, 0, 0, TEX0));
 
-    for (int f = 0; f < total_frames; ++f)
+    for (int sf = 0; sf < total_frames; ++sf)
     {
         surface_t* fb = display_get();
 
@@ -359,7 +464,7 @@ void run()
 
         // Start the jingle exactly when the fade phase begins (after the
         // brief blank-white pause that follows the sweep).
-        if (f == phase_gap_end)
+        if (sf == phase_gap_end)
             wav64_play(&splash_wav, 0);
 
         // Drain any empty AI buffers so the mixer keeps the stream flowing.
@@ -372,37 +477,63 @@ void run()
             audio_write_end();
         }
 
-        rdpq_attach(fb, NULL);
-        rdpq_clear(clear_white);
-        rdpq_set_mode_standard();
-        rdpq_mode_alphacompare(1);   // kill texels whose 1-bit alpha is 0
-
-        if (f < phase_sweep_end)
+        // Pick the per-frame clear colour. White through the whole wordmark
+        // animation; lerped to black on either side for the bracket fades.
+        color_t clear;
+        if (sf < phase_fadein_bg_end)
         {
-            rdpq_mode_tlut(TLUT_RGBA16);
-            compute_sweep_palette(f, n_stripes, scratch_tlut);
-            data_cache_hit_writeback(scratch_tlut, sweep_wb_bytes);
-            rdpq_tex_upload_tlut(scratch_tlut, 0, sweep_tlut_count);
-            rdpq_tex_blit(&sweep_pix, SPRITE_X, SPRITE_Y, NULL);
+            const uint8_t v =
+                (uint8_t)(sf * 255 / SPLASH_FADEIN_FRAMES);
+            clear = RGBA32(v, v, v, 0xFF);
         }
-        else if (f < phase_gap_end)
+        else if (sf < phase_fadeout_end)
         {
-            // Blank-white pause between the sweep finishing and the fade
-            // starting — the cleared framebuffer is all we need to show.
+            clear = clear_white;
         }
         else
         {
-            color_t prim;
-            if (f < phase_fadein_end)
-                prim = fadein_color(f - phase_gap_end);
-            else if (f < phase_hold_end)
-                prim = rgb_to_color(FADE_COLORS[FADE_KEYFRAMES - 1]);
-            else
-                prim = fadeout_color(f - phase_hold_end);
+            const int rel = sf - phase_fadeout_end;
+            const uint8_t v =
+                (uint8_t)(255 - rel * 255 / SPLASH_FADEOUT_FRAMES);
+            clear = RGBA32(v, v, v, 0xFF);
+        }
 
-            rdpq_mode_combiner(fade_combiner);
-            rdpq_set_prim_color(prim);
-            rdpq_tex_blit(&fade_pix, SPRITE_X, SPRITE_Y, NULL);
+        rdpq_attach(fb, NULL);
+        rdpq_clear(clear);
+
+        if (sf >= phase_fadein_bg_end && sf < phase_fadeout_end)
+        {
+            rdpq_set_mode_standard();
+            rdpq_mode_alphacompare(1);   // kill texels whose 1-bit alpha is 0
+
+            if (sf < phase_sweep_end)
+            {
+                const int rel = sf - phase_fadein_bg_end;
+                rdpq_mode_tlut(TLUT_RGBA16);
+                compute_sweep_palette(rel, n_stripes, scratch_tlut);
+                data_cache_hit_writeback(scratch_tlut, sweep_wb_bytes);
+                rdpq_tex_upload_tlut(scratch_tlut, 0, sweep_tlut_count);
+                rdpq_tex_blit(&sweep_pix, SPRITE_X, SPRITE_Y, NULL);
+            }
+            else if (sf < phase_gap_end)
+            {
+                // Blank-white pause between the sweep finishing and the fade
+                // starting — the cleared framebuffer is all we need to show.
+            }
+            else
+            {
+                color_t prim;
+                if (sf < phase_fadein_end)
+                    prim = fadein_color(sf - phase_gap_end);
+                else if (sf < phase_hold_end)
+                    prim = rgb_to_color(FADE_COLORS[FADE_KEYFRAMES - 1]);
+                else
+                    prim = fadeout_color(sf - phase_hold_end);
+
+                rdpq_mode_combiner(fade_combiner);
+                rdpq_set_prim_color(prim);
+                rdpq_tex_blit(&fade_pix, SPRITE_X, SPRITE_Y, NULL);
+            }
         }
 
         rdpq_detach_show();

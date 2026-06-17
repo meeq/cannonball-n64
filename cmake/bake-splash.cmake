@@ -17,15 +17,21 @@
 #   sega.wav64   — VADPCM jingle resampled to 22050 Hz, played at the
 #                  fade-phase boundary.
 #
+#   disclaimer.sprite — I8 baked from assets/splash/disclaimer.png. Full
+#                  320x240 grayscale displayed for 10 s (skippable with
+#                  START) before the SEGA splash, then faded to black via
+#                  a per-frame PRIMITIVE colour scaling its luma.
+#
 # Inputs from caller (set BEFORE include):
 #   N64_DFS_ROOT  — DFS staging directory (same one passed to n64_create_rom).
 #                   The module appends /splash/.
 #
 # Outputs:
-#   SPLASH_STAGED_SWEEP_SPRITE  — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
-#   SPLASH_STAGED_FADE_SPRITE   — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
-#   SPLASH_STAGED_AUDIO         — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
-#   target  bake-splash         — ALL target producing the staged files
+#   SPLASH_STAGED_SWEEP_SPRITE       — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
+#   SPLASH_STAGED_FADE_SPRITE        — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
+#   SPLASH_STAGED_DISCLAIMER_SPRITE  — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
+#   SPLASH_STAGED_AUDIO              — staged DFS path; pass via n64_create_rom EXTRA_DFS_DEPS
+#   target  bake-splash              — ALL target producing the staged files
 # -----------------------------------------------------------------------------
 
 if(NOT DEFINED N64_DFS_ROOT)
@@ -134,7 +140,37 @@ add_custom_command(
     COMMENT "[BAKE] stage sega.wav64"
     VERBATIM)
 
+# -----------------------------------------------------------------------------
+# Disclaimer sprite: assets/splash/disclaimer.png -> disclaimer.sprite (I8).
+# Full-screen 320x240 grayscale. Splash runtime drives all colour from the
+# combiner: result.rgb = TEX0 * PRIM, so a per-frame PRIM that LERPs from
+# white→black scales the I8 luma cleanly down to black.
+# -----------------------------------------------------------------------------
+set(_SPLASH_DISCLAIMER_SRC          "${CMAKE_CURRENT_SOURCE_DIR}/../assets/splash/disclaimer.png")
+set(_SPLASH_DISCLAIMER_BUILT_SPRITE "${_SPLASH_BUILD_DIR}/disclaimer.sprite")
+set(SPLASH_STAGED_DISCLAIMER_SPRITE "${_SPLASH_STAGE_DIR}/disclaimer.sprite")
+
+add_custom_command(
+    OUTPUT  "${_SPLASH_DISCLAIMER_BUILT_SPRITE}"
+    COMMAND "${MKSPRITE_EXE}"
+            --format I8
+            --dither NONE
+            -o "${_SPLASH_BUILD_DIR}"
+            "${_SPLASH_DISCLAIMER_SRC}"
+    DEPENDS "${_SPLASH_DISCLAIMER_SRC}"
+    COMMENT "[BAKE] disclaimer.sprite"
+    VERBATIM)
+
+add_custom_command(
+    OUTPUT  "${SPLASH_STAGED_DISCLAIMER_SPRITE}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_SPLASH_DISCLAIMER_BUILT_SPRITE}" "${SPLASH_STAGED_DISCLAIMER_SPRITE}"
+    DEPENDS "${_SPLASH_DISCLAIMER_BUILT_SPRITE}"
+    COMMENT "[BAKE] stage disclaimer.sprite"
+    VERBATIM)
+
 add_custom_target(bake-splash ALL
     DEPENDS "${SPLASH_STAGED_SWEEP_SPRITE}"
             "${SPLASH_STAGED_FADE_SPRITE}"
+            "${SPLASH_STAGED_DISCLAIMER_SPRITE}"
             "${SPLASH_STAGED_AUDIO}")

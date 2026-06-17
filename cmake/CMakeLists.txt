@@ -245,6 +245,7 @@ n64_create_rom(cannonball
                    "${BAKE_TILES_STAGED_NATIVE_BLOB}"
                    "${SPLASH_STAGED_SWEEP_SPRITE}"
                    "${SPLASH_STAGED_FADE_SPRITE}"
+                   "${SPLASH_STAGED_DISCLAIMER_SPRITE}"
                    "${SPLASH_STAGED_AUDIO}"
                    ${MENU_STAGED_SPRITES}
 )
