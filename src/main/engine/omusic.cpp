@@ -311,7 +311,14 @@ void OMusic::play_music(int index)
 
 // In-game track-title overlay: row mirrors the music-select title (Y=11)
 // and the countdown runs ~2 seconds at the 30Hz engine tick.
-namespace { constexpr uint8_t TRACK_OVERLAY_TICKS = 60; }
+namespace {
+    constexpr uint8_t TRACK_OVERLAY_TICKS = 60;
+    // Row 5 sits above the in-game pause overlay (PAUSED is blit_text_big at
+    // row 9-10, CONTINUE/RETRY/QUIT at 12/14/16) so the mid-race music-change
+    // banner doesn't clobber the pause-menu options when the player pauses
+    // right after changing tracks.
+    constexpr uint8_t TRACK_OVERLAY_ROW   = 5;
+}
 
 // Cycle music in continuous mode
 void OMusic::cycle_music()
@@ -322,7 +329,8 @@ void OMusic::cycle_music()
     if (idx >= n) idx = 0;
     music_selected = (uint8_t)idx;
     play_music();
-    ohud.blit_text_big(11, config.sound.music.at(music_selected).title.c_str(), true);
+    ohud.blit_text_big(TRACK_OVERLAY_ROW,
+                       config.sound.music.at(music_selected).title.c_str(), true);
     track_overlay_ticks = TRACK_OVERLAY_TICKS;
 }
 
@@ -334,7 +342,8 @@ void OMusic::cycle_music_prev()
     if (idx < 0) idx = n - 1;
     music_selected = (uint8_t)idx;
     play_music();
-    ohud.blit_text_big(11, config.sound.music.at(music_selected).title.c_str(), true);
+    ohud.blit_text_big(TRACK_OVERLAY_ROW,
+                       config.sound.music.at(music_selected).title.c_str(), true);
     track_overlay_ticks = TRACK_OVERLAY_TICKS;
 }
 
@@ -342,7 +351,7 @@ void OMusic::tick_track_overlay()
 {
     if (track_overlay_ticks == 0) return;
     if (--track_overlay_ticks == 0)
-        ohud.blit_text_big(11, ""); // empty string => clear-row pass only
+        ohud.blit_text_big(TRACK_OVERLAY_ROW, ""); // empty string => clear-row pass only
 }
 
 // Original Version of Music Selection Screen With 3 Tracks. 
