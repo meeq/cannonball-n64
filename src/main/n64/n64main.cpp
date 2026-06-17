@@ -379,23 +379,8 @@ namespace
                 }
                 if (!pause_engine || input.has_pressed(Input::STEP))
                 {
-                    const int pre_tick_gs = outrun.game_state;
                     outrun.tick(tick_frame);
                     if (tick_frame) input.frame_done();
-                    // End-of-run convergence: GS_REINIT is the engine's
-                    // exit transition out of the best-outrunners screen —
-                    // it clears text_ram and sets game_state = GS_INIT,
-                    // mirroring what outrun.init() does. The first attract
-                    // frame after that needs the same 4-tick warmup the
-                    // boot path uses (oroad's copy_bg_color populates
-                    // hwroad.ramBuff on the 4th tick); without it the
-                    // attract-loop transition flashes a few frames of
-                    // partial road / sky. Burn those ticks here.
-                    if (tick_frame && pre_tick_gs == GS_REINIT)
-                    {
-                        for (int i = 0; i < 4; ++i)
-                            outrun.tick(true);
-                    }
                     // Z80 audio code is advanced from audio.tick() on a wall-
                     // clock schedule; ticking it here would over-clock it when
                     // the main loop is faster than the audio cadence and
