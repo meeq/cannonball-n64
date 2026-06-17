@@ -54,17 +54,6 @@ namespace hwroad_rdp_rsp
     extern uint32_t cpu_us;   // CPU descriptor build only
     extern uint32_t rsp_us;   // RSP exec (measured via rspq_wait timing)
 
-    // Validation mode. When true, the CPU mask is also built into a
-    // shadow buffer and diffed against the RSP-built mask. Logs the
-    // first mismatching row + byte index per frame, rate-limited.
-    // Adds a full CPU build per frame — off for perf runs.
-    extern bool validate;
-
-    // Last validation result (only updated while validate==true).
-    extern uint32_t v_mismatches;
-    extern int      v_first_row;
-    extern int      v_first_byte;
-
     // Per-row OOB-colour fill dispatch — RSP-side emit of vertically
     // coalesced fill_rectangles for the c_oob strip that backs every active
     // road row. Caller (emit phase) must have already issued

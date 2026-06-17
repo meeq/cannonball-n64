@@ -47,13 +47,6 @@ uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
 uint32_t rsp_us     = 0;
 
-// Toggle on to re-run the CPU build into runs_buf and diff against the
-// RSP-produced runs[] / n_runs. Doubles prepare cost; off for perf.
-bool     validate   = false;
-uint32_t v_mismatches = 0;
-int      v_first_row  = -1;
-int      v_first_byte = -1;
-
 namespace
 {
     using namespace n64::hwroad_rdp::detail;
@@ -114,13 +107,6 @@ namespace
     bool initialised   = false;
     bool roads_flushed = false;
 
-    // Shadow buf for runs validation (compare RSP-produced runs[] vs CPU).
-    // sizeof(Run) == 4; MAX_RUNS_PER_ROW == 64. Cached.
-    constexpr size_t SHADOW_BYTES =
-        (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run);
-    void*    shadow_cached = nullptr;
-    uint8_t* shadow_buf    = nullptr;
-
     // n_runs write-back array. RSP writes one u16 per DRAW row;
     // dispatcher copies into line[y].n_runs after rspq_wait. Sized to
     // 8-byte multiple so SP DMA's length encoding is clean.
@@ -175,12 +161,6 @@ void init()
     assertf(state_uc, "hwroad_rdp_rsp: state alloc failed");
     std::memset(state_uc, 0, sizeof(FrameStateRDP));
 
-    // Shadow buffer for validate path (~56 KiB) is now allocated lazily on
-    // first validate=true frame in build_foreground_lores_rdp_rsp. With
-    // validate hard-off in shipping builds it would just be dead RAM, and
-    // on the 4 MiB base console every reclaimed KiB lets the sprite atlas
-    // pool grow toward covering the per-priority working set.
-
     n_runs_uc = (uint16_t*)malloc_uncached_aligned(16, N_RUNS_BYTES);
     assertf(n_runs_uc, "hwroad_rdp_rsp: n_runs alloc failed");
     std::memset(n_runs_uc, 0, N_RUNS_BYTES);
@@ -222,7 +202,6 @@ void shutdown()
     overlay_id = 0;
     if (desc_uc)      { free_uncached(desc_uc);      desc_uc      = nullptr; }
     if (state_uc)     { free_uncached(state_uc);     state_uc     = nullptr; }
-    if (shadow_cached){ free(shadow_cached);         shadow_cached = nullptr; shadow_buf = nullptr; }
     if (n_runs_uc)    { free_uncached(n_runs_uc);    n_runs_uc    = nullptr; }
     if (coob_fill_uc) { free_uncached(coob_fill_uc); coob_fill_uc = nullptr; }
     coob_fill_populated = false;
@@ -528,72 +507,6 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
 
     uint64_t t_kick_end = get_ticks_us();
     rsp::last_us = (rsp::last_us * 7 + (uint32_t)(t_kick_end - t0)) >> 3;
-
-    // ---- Validation path -------------------------------------------------
-    // Snapshot the RSP-produced runs[] + n_runs, re-run the CPU build into
-    // the shared runs_buf / line[].n_runs, then diff. Emit ends up reading
-    // the CPU result, so visuals stay correct even when the RSP path has a
-    // bug. 2x prep cost — keep this off for perf testing.
-    if (rsp::validate) {
-        // Lazy-alloc the shadow buffer (~56 KiB) on first use. Init time
-        // skipped this to keep boot RAM tight on the 4 MiB base console.
-        if (!rsp::shadow_cached) {
-            rsp::shadow_cached = memalign(16, rsp::SHADOW_BYTES);
-            assertf(rsp::shadow_cached,
-                    "hwroad_rdp_rsp: shadow alloc failed (%u bytes)",
-                    (unsigned)rsp::SHADOW_BYTES);
-            rsp::shadow_buf = (uint8_t*)rsp::shadow_cached;
-            std::memset(rsp::shadow_buf, 0, rsp::SHADOW_BYTES);
-        }
-        rspq_wait();
-        // Snapshot RSP runs + n_runs.
-        std::memcpy(rsp::shadow_buf, runs_buf,
-                    (size_t)MAX_LINES * MAX_RUNS_PER_ROW * sizeof(Run));
-        uint16_t shadow_n[MAX_LINES];
-        for (int y = 0; y < MAX_LINES; y++)
-            shadow_n[y] = (line[y].kind == DRAW) ? rsp::n_runs_uc[y] : 0;
-
-        // Re-run CPU build into runs_buf + line[].n_runs.
-        build_foreground_lores_rdp(rgb_lut);
-
-        // Compare. Mismatch counted as: differing n_runs OR any Run byte
-        // mismatch within the CPU-reported n_runs window.
-        uint32_t mism = 0;
-        int      first_row = -1;
-        int      first_run = -1;
-        for (int y = 0; y < MAX_LINES; y++) {
-            if (line[y].kind != DRAW) continue;
-            const uint16_t cpu_n = line[y].n_runs;
-            const uint16_t rsp_n = shadow_n[y];
-            if (cpu_n != rsp_n) {
-                if (first_row < 0) { first_row = y; first_run = -1; }
-                mism++;
-                continue;
-            }
-            const Run* cpu_runs = runs_ptr(y);
-            const Run* rsp_runs = (const Run*)
-                (rsp::shadow_buf + (size_t)y * MAX_RUNS_PER_ROW * sizeof(Run));
-            for (int r = 0; r < cpu_n; r++) {
-                if (cpu_runs[r].x_end     != rsp_runs[r].x_end ||
-                    cpu_runs[r].color5551 != rsp_runs[r].color5551) {
-                    if (first_row < 0) { first_row = y; first_run = r; }
-                    mism++;
-                }
-            }
-        }
-        if (mism > 0) {
-            rsp::v_mismatches += mism;
-            if (rsp::v_first_row < 0) {
-                rsp::v_first_row  = first_row;
-                rsp::v_first_byte = first_run;  // repurposed: first mismatching run index
-            }
-        }
-        if ((rsp::s_frame % 60) == 0) {
-            debugf("hwroad_rdp_rsp: validate mism=%lu first=(row=%d,run=%d)\n",
-                   (unsigned long)rsp::v_mismatches,
-                   rsp::v_first_row, rsp::v_first_byte);
-        }
-    }
 
     if ((rsp::s_frame % 60) == 0 && display_get_fps() < 30.0f) {
         debugf("hwroad_rdp_rsp: wait=%lu cpu=%lu kick=%lu\n",
