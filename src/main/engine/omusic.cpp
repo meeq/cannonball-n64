@@ -214,7 +214,7 @@ void OMusic::setup_sprite5()
 // Source: 0xB768
 void OMusic::check_start()
 {
-    if (ostats.credits && input.has_pressed(Input::START))
+    if (ostats.credits && (input.has_pressed(Input::START) || input.has_pressed(Input::ACCEL)))
     {
         outrun.game_state = GS_INIT_GAME;
         ologo.disable();

@@ -17,7 +17,6 @@
 #include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
 #include "hwroad_rdp_rsp.hpp"
-#include "tile_cache_rsp.hpp"
 #include "../hwvideo/hwroad.hpp"
 #include "../hwvideo/hwsprites.hpp"
 
@@ -800,8 +799,6 @@ int main(int /*argc*/, char* /*argv*/[])
     n64::hwroad_rsp::init();
     n64::hwroad_rdp::init();
     n64::hwroad_rdp_rsp::init();
-
-    n64::tile_cache_rsp::init();
 
     // Pre-flush the libdragon mixer's lazy per-channel sample buffers as
     // the LAST init step, so every other large alloc (video atlas/cache,

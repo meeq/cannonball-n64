@@ -47,17 +47,6 @@ public:
                                uint8_t priority_draw,
                                int x_offset, int y_offset);
 
-    // Engine hook — call from any path that writes tile_ram. The BG/FG
-    // tile_cache holds a CI4-rendered snapshot of the tilemap keyed only
-    // by (EffPage, tile_banks); writes that modify tile_ram WITHOUT
-    // changing those keys (e.g. Time Trials' music-select state filling
-    // in animated cells over a static page) would silently leave the
-    // cache showing the pre-write tilemap. This sets a dirty flag that
-    // update_and_blit checks alongside the shadow keys, forcing a rebuild
-    // on the next render frame. Cheap (one bool write) so it's fine to
-    // call from every per-cell tile_ram write site.
-    static void mark_tile_cache_dirty();
-
 private:
     int16_t x_clamp;
     

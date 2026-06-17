@@ -5,7 +5,6 @@
 #include "romloader.hpp"
 #include "hwvideo/hwtiles.hpp"
 #include "frontend/config.hpp"
-#include "n64/tile_cache_rsp.hpp"
 #include <cstring>
 
 namespace n64_profile {
@@ -144,357 +143,6 @@ namespace {
     }
 }
 
-// ============================================================================
-// Per-layer pre-render cache (Expansion Pak only). One instance per BG/FG
-// layer; both run the same code with different EffPage/scroll inputs.
-//
-// Background per [[project-tbg-chunks-bound]]: tbg pass-2 costs ~14 ms in
-// heavy scenes from emitting ~150 per-cell texture_rectangles for BG+FG
-// tile layers, each carrying ~20 us of RDP+RSP setup. Tile_ram content is
-// effectively static in steady-state gameplay (0 dirty cells per frame
-// across the attract loop) — the parallax effect is done by scrolling the
-// camera over a fixed panorama, not by rewriting tile_ram.
-//
-// Pre-rendering each layer's 1024×512 logical tilemap into a CI4 surface
-// lets each frame emit ONE wrap-aware tex_blit per layer (~1-3 ms typical)
-// instead of ~75 individual texture_rectangles per layer. CI4 storage
-// means TLUT changes don't invalidate the cache; only EffPage/tile_banks
-// changes do.
-//
-// Gated behind is_memory_expanded() per [[feedback-n64-expansion-pak]]
-// (4 MiB baseline can't afford 512 KB; 8 MiB unlocks the consistent 30 fps
-// path). 4 MiB users keep the per-cell emit fallback unchanged.
-namespace tile_cache {
-    constexpr int CACHE_W_PX        = 1024;
-    constexpr int CACHE_H_PX        = 512;
-    constexpr int CACHE_STRIDE      = CACHE_W_PX / 2;  // CI4
-    constexpr int CACHE_BYTES       = CACHE_STRIDE * CACHE_H_PX;  // 262144
-    constexpr int CACHE_CELLS_X     = 128;
-    constexpr int CACHE_CELLS_Y     = 64;
-
-    struct Layer {
-        uint8_t*  buf;
-        surface_t surface;
-
-        // Per-layer TLUT scratch — must be PER-LAYER because rdpq_tex_upload
-        // _tlut is async: CPU writes here, issues a queued upload command,
-        // RDP DMAs from this address later. If BG and FG shared one scratch
-        // buffer, FG's overwrite would race with BG's pending DMA → both
-        // layers end up reading the SAME (FG) palette. Manifests as
-        // alternating-frame flicker (BG cache appears to use FG's palette).
-        alignas(8) uint16_t scratch_tlut[16];
-
-        // Invalidation shadow.
-        uint16_t  shadow_effpage;
-        uint8_t   shadow_tile_banks[2];
-        bool      shadow_valid;
-
-        // Dominant palette + coverage from the last render.
-        uint8_t   palette_idx;       // 0xff = nothing rendered yet
-        uint16_t  cells_in;          // cells matching dominant
-        uint16_t  cells_out;         // cells with other palettes
-
-        // Telemetry.
-        uint32_t  renders;
-        uint32_t  blits;
-        uint32_t  subrects;
-    };
-
-    Layer s_bg = {};     // page=1
-    Layer s_fg = {};     // page=0
-    bool  s_enabled = false;
-    // Set whenever Video::write_tile* / clear_tile_ram modifies tile_ram.
-    // update_and_blit AND-checks this against shadow_matches before
-    // skipping the rebuild — if dirty, the cache is stale even though
-    // EffPage / tile_banks match. Cleared after each render() call.
-    bool  s_dirty = false;
-
-    // Scratch cell list shared by BG and FG renders (their renders run
-    // sequentially per frame). Pass 1 walks every cell once, building both
-    // the palette histogram AND this list of every valid (priority-0,
-    // Code != 0) cell. Pass 2 then walks just this list — no second pass
-    // over tile_ram. Saves the ~3.3 ms tile_ram walk per layer.
-    //
-    // Worst-case fill: 128 * 64 = 8192 cells. We've measured up to 4080
-    // valid cells in heavy scenes (music select, both layers same data).
-    // Sizing for the full theoretical max keeps the bound assertion-clean.
-    struct CellEntry {
-        uint16_t pal_ix;     // 0..127, valid cell-colour palette index
-        uint16_t Code;       // tile_banks-remapped, masked to NUM_TILES-1
-        uint32_t dst_offset; // byte offset into L.buf
-    };
-    constexpr int CELL_LIST_MAX = CACHE_CELLS_X * CACHE_CELLS_Y;  // 8192
-    CellEntry s_cell_list[CELL_LIST_MAX];
-
-    bool init_layer(Layer& L, const char* name)
-    {
-        // Uncached: CPU pass-2 writes go straight to RAM, bypassing the
-        // write-allocate fill that costs ~30 cycles per cache line on the
-        // R4300. For our stride-512 paste, every 4-byte write hits a
-        // different cache line, so write-allocate would otherwise fill
-        // 16 bytes per cell-row from RAM (~8 misses per cell) just to
-        // immediately overwrite 4 of them. RSP also writes via SP DMA
-        // (zero_async), which already bypasses CPU dcache — making the
-        // surface uncached keeps the two writers consistent and lets us
-        // drop the post-paste data_cache_hit_writeback entirely.
-        L.buf = (uint8_t*)malloc_uncached_aligned(64, CACHE_BYTES);
-        if (!L.buf) {
-            debugf("tile_cache(%s): malloc_uncached_aligned(64, %d) failed\n",
-                   name, CACHE_BYTES);
-            return false;
-        }
-        std::memset(L.buf, 0, CACHE_BYTES);
-        L.surface = surface_make_linear(L.buf, FMT_CI4, CACHE_W_PX, CACHE_H_PX);
-        L.shadow_valid = false;
-        L.palette_idx = 0xff;
-        debugf("tile_cache(%s): enabled — %d KiB at %p (uncached)\n",
-               name, CACHE_BYTES >> 10, L.buf);
-        return true;
-    }
-
-    bool init()
-    {
-        if (s_bg.buf && s_fg.buf) return s_enabled;
-        if (!is_memory_expanded()) {
-            s_enabled = false;
-            return false;
-        }
-        if (!init_layer(s_bg, "bg")) { s_enabled = false; return false; }
-        if (!init_layer(s_fg, "fg")) { s_enabled = false; return false; }
-        s_enabled = true;
-        return true;
-    }
-
-    bool is_enabled() { return s_enabled; }
-
-    void mark_dirty() { s_dirty = true; }
-
-    inline bool shadow_matches(const Layer& L, uint16_t effpage,
-                               uint8_t bank0, uint8_t bank1)
-    {
-        return L.shadow_valid
-            && L.shadow_effpage == effpage
-            && L.shadow_tile_banks[0] == bank0
-            && L.shadow_tile_banks[1] == bank1;
-    }
-
-    // ----- Cold-render path (called on EffPage / tile_banks invalidation).
-    //
-    // Pass 1: walk all 8192 cells, count palette usage among priority-0
-    // cells with non-zero Code. Pick the most common palette ("dominant")
-    // — that's the one the cache surface will be baked against.
-    //
-    // Pass 2: re-walk the cells, memcpy pixels into the cache surface only
-    // for cells whose Colour matches dominant. Cells with other palettes
-    // stay as the memset-0 background (alpha-transparent at blit time) and
-    // are emitted per-cell by the regular tbg loop.
-    //
-    // The same code handles BG and FG — caller supplies the appropriate
-    // EffPage and the Layer& whose surface receives the baked cells.
-    void render(Layer& L, uint8_t* tile_ram, uint16_t EffPage,
-                const uint8_t* tile_banks, uint32_t tiles_pi_addr,
-                const char* dbg_name)
-    {
-        const uint64_t t_kick = get_ticks_us();
-        // Kick the RSP-side zero of L.buf BEFORE Pass 1 so its SP DMA fill
-        // (~0.7 ms for 256 KiB at the measured 368 MB/s) hides behind the
-        // CPU's tile-ram walk + histogram (~0.5 ms). We sync below right
-        // before Pass 2 first writes to L.buf. SP DMA writes bypass the
-        // CPU dcache, so no zeroing-side writeback is needed here — only
-        // the post-Pass-2 writeback of the CPU-side cell pastes remains.
-        n64::tile_cache_rsp::zero_async(L.buf, CACHE_BYTES);
-        const uint64_t t_p1 = get_ticks_us();
-
-        // Pass 1 — single walk: build the palette histogram AND the
-        // cell list of every valid (priority-0, Code != 0) cell. Pass 2
-        // below replays that list instead of re-walking tile_ram, saving
-        // ~3.3 ms per layer.
-        uint16_t palette_count[128] = {};
-        int cell_count = 0;
-        for (int my = 0; my < CACHE_CELLS_Y; my++)
-        {
-            const bool my_top = my < 32;
-            const uint32_t my_offset = (2 * 64 * my) & 0xfff;
-            const uint32_t base_L =
-                64 * 32 * 2 * ((EffPage >> (my_top ? 0 : 8)) & 0x0f) + my_offset;
-            const uint32_t base_R =
-                64 * 32 * 2 * ((EffPage >> (my_top ? 4 : 12)) & 0x0f) + my_offset;
-
-            const uint32_t cell_row_byte_base =
-                (uint32_t)my * 8 * CACHE_STRIDE;
-
-            for (int mx = 0; mx < CACHE_CELLS_X; mx++)
-            {
-                const uint32_t base = (mx < 64) ? base_L : base_R;
-                const uint32_t TileIndex = base + ((2 * mx) & 0x7f);
-                const uint16_t Data =
-                    (tile_ram[TileIndex + 0] << 8) | tile_ram[TileIndex + 1];
-                if (((Data >> 15) & 1) != 0) continue;  // priority-1
-                uint32_t Code = Data & 0x1fff;
-                Code = tile_banks[Code / 0x1000] * 0x1000 + Code % 0x1000;
-                Code &= 0x1fff;  // NUM_TILES - 1, mirrored from hwtiles.hpp
-                if (Code == 0) continue;
-                const uint16_t pal_ix = (Data >> 6) & 0x7f;
-                palette_count[pal_ix]++;
-                CellEntry& e = s_cell_list[cell_count++];
-                e.pal_ix     = pal_ix;
-                e.Code       = (uint16_t)Code;
-                e.dst_offset = cell_row_byte_base + (uint32_t)mx * 4;
-            }
-        }
-        assertf(cell_count <= CELL_LIST_MAX,
-                "tile_cache: cell_list overflow %d > %d",
-                cell_count, CELL_LIST_MAX);
-        int dom_palette = 0;
-        int dom_count   = 0;
-        int total_count = 0;
-        for (int i = 0; i < 128; i++) {
-            total_count += palette_count[i];
-            if (palette_count[i] > dom_count) {
-                dom_count   = palette_count[i];
-                dom_palette = i;
-            }
-        }
-        L.palette_idx = (uint8_t)dom_palette;
-        L.cells_in    = (uint16_t)dom_count;
-        L.cells_out   = (uint16_t)(total_count - dom_count);
-
-        const uint64_t t_p1_done = get_ticks_us();
-        // Sync the kicked-off RSP zero before Pass 2 starts writing cells.
-        // If the SP DMA finished during Pass 1 (typical), this is ~free.
-        n64::tile_cache_rsp::zero_sync();
-        const uint64_t t_sync = get_ticks_us();
-
-        // Pass 2 — replay the cell list, paste cells matching dom_palette.
-        // No tile_ram walk: the cell_list already contains every valid
-        // cell's (Code, dst_offset), so this is purely a list scan + fetch
-        // + write per matching cell.
-        for (int i = 0; i < cell_count; i++)
-        {
-            const CellEntry& e = s_cell_list[i];
-            if (e.pal_ix != dom_palette) continue;
-            const uint32_t* src = hwtiles_fetch_tile(tiles_pi_addr, e.Code);
-            uint8_t* dst = L.buf + e.dst_offset;
-            for (int r = 0; r < 8; r++) {
-                *(uint32_t*)(dst + r * CACHE_STRIDE) = src[r];
-            }
-        }
-
-        const uint64_t t_p2 = get_ticks_us();
-        // No writeback: L.buf is uncached, so CPU writes have already
-        // landed in RAM. RDP reads via SP DMA (which bypasses CPU cache)
-        // see the correct bytes immediately.
-        L.renders++;
-        debugf("tile_cache(%s): rebuilt — dom=0x%02x in=%u out=%u  "
-               "p1=%lu sync=%lu p2=%lu (us)\n",
-               dbg_name, (unsigned)dom_palette, L.cells_in, L.cells_out,
-               (unsigned long)(t_p1_done - t_p1),
-               (unsigned long)(t_sync   - t_p1_done),
-               (unsigned long)(t_p2     - t_sync));
-        (void)t_kick;
-    }
-
-    // Emit a wrap-aware CI4 blit of the visible 320×224 window. tex_blit
-    // strip-walks CI4 automatically; up to 4 sub-blits handle X+Y wrap.
-    // TLUT slot is bound by the caller (palette-cycle-safe).
-    void blit_window(Layer& L, int dst_x, int dst_y,
-                     int src_x, int src_y)
-    {
-        // Wrap math against cache dims (1024 × 512).
-        int x_left  = src_x;
-        int y_top   = src_y;
-        int w_a     = CACHE_W_PX - x_left; if (w_a > 320) w_a = 320;
-        int h_a     = CACHE_H_PX - y_top;  if (h_a > 224) h_a = 224;
-        int w_b     = 320 - w_a;
-        int h_b     = 224 - h_a;
-
-        auto emit_one = [&](int sx, int sy, int sw, int sh,
-                            int dx, int dy)
-        {
-            if (sw <= 0 || sh <= 0) return;
-            rdpq_blitparms_t parms = {};
-            parms.s0     = sx;
-            parms.t0     = sy;
-            parms.width  = sw;
-            parms.height = sh;
-            rdpq_tex_blit(&L.surface, (float)dx, (float)dy, &parms);
-            L.subrects++;
-        };
-
-        emit_one(x_left, y_top, w_a, h_a, dst_x,         dst_y);
-        if (w_b > 0)
-            emit_one(0,      y_top, w_b, h_a, dst_x + w_a, dst_y);
-        if (h_b > 0)
-            emit_one(x_left, 0,     w_a, h_b, dst_x,         dst_y + h_a);
-        if (w_b > 0 && h_b > 0)
-            emit_one(0,      0,     w_b, h_b, dst_x + w_a, dst_y + h_a);
-
-        L.blits++;
-    }
-
-    // Public entry: render the cache if state changed, then emit the blit.
-    // Called twice per render_rdp_tile_layers — once for BG before any other
-    // RDP work, once for FG after BG per-cell emits complete (so layering
-    // BG-cache → BG-per-cell-non-dom → FG-cache → FG-per-cell-non-dom is
-    // preserved). x_clamp mirrors the value the per-cell loop uses to map
-    // (xScroll → tilemap-pixel origin); both must agree.
-    void update_and_blit(Layer& L, const char* dbg_name,
-                         uint8_t* tile_ram, uint16_t effpage,
-                         const uint8_t* tile_banks, uint32_t tiles_pi_addr,
-                         const uint16_t* tile_tlut,
-                         int16_t x_clamp,
-                         uint16_t xscroll, uint16_t yscroll,
-                         int dst_x, int dst_y)
-    {
-        // Rebuild when keys differ OR when tile_ram was written since
-        // the last render. The dirty flag catches the case where the
-        // engine animates content within a static EffPage (Time Trials
-        // music select — see [[ttrial-music-select-cache-dirty]]).
-        if (s_dirty || !shadow_matches(L, effpage, tile_banks[0], tile_banks[1])) {
-            render(L, tile_ram, effpage, tile_banks, tiles_pi_addr, dbg_name);
-            L.shadow_effpage       = effpage;
-            L.shadow_tile_banks[0] = tile_banks[0];
-            L.shadow_tile_banks[1] = tile_banks[1];
-            L.shadow_valid         = true;
-        }
-
-        // If the cache rendered zero cells (no content this layer for this
-        // scene), skip the blit — nothing to draw.
-        if (L.cells_in == 0) return;
-
-        // RDP state for the cache blit. Mode + alpha-compare must match the
-        // tile emit path so the cache pixels alpha-test the same way per-cell
-        // emits do (CI4 index 0 = transparent).
-        rdpq_set_mode_standard();
-        rdpq_mode_tlut(TLUT_RGBA16);
-        rdpq_mode_alphacompare(1);
-
-        // Upload the dominant palette to TMEM TLUT slot 0, with entry 0's
-        // alpha forced to 0 (transparent). Cache cells we didn't paste
-        // (priority-1, Code==0, or non-dominant palette) are memset to CI4
-        // index 0 and MUST alpha-test out so layers below show through.
-        // Use the Layer's *own* scratch_tlut buffer — rdpq_tex_upload_tlut
-        // is async and a shared static buffer would race when BG and FG
-        // emit in the same frame.
-        const uint16_t* src_tlut = &tile_tlut[(uint32_t)L.palette_idx * 16];
-        for (int i = 0; i < 16; i++) L.scratch_tlut[i] = src_tlut[i];
-        L.scratch_tlut[0] &= 0xfffe;
-        data_cache_hit_writeback(L.scratch_tlut, sizeof(L.scratch_tlut));
-        rdpq_tex_upload_tlut(L.scratch_tlut, 0, 16);
-
-        // Bind TILE0 to CI4 + palette slot 0.
-        rdpq_tileparms_t parms = {};
-        parms.palette = 0;
-        rdpq_set_tile(TILE0, FMT_CI4, 0, CACHE_STRIDE, &parms);
-
-        // Source X must mirror the per-cell loop's `ox = (x_clamp - xScroll)
-        // & 0x3ff` — same tilemap-pixel offset for the same screen position.
-        // Y has no clamp transform; just wrap mod 512.
-        const int src_x = ((int)x_clamp - (int)xscroll) & 0x3ff;
-        const int src_y = yscroll & 0x1ff;
-        blit_window(L, dst_x, dst_y, src_x, src_y);
-    }
-}
 
 hwtiles::hwtiles(void)
     : tiles_pi_addr(0)
@@ -537,11 +185,6 @@ void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
         std::memset(s_tile_cache_tag, 0xff, TILE_CACHE_SLOTS * sizeof(uint16_t));
     }
 
-    // Per-layer BG/FG caches (Expansion Pak only). Runs after the tile pixel
-    // cache alloc above because cache fills read through hwtiles_fetch_tile,
-    // which requires s_tile_cache_pix.
-    tile_cache::init();
-
     // The legacy SDL build dispatched CPU rendering through
     // render8x8_tile_mask{,_clip} function pointers (lores/hires variants).
     // N64 uses RDP-based render_rdp_tile_layers / render_rdp_text_layer
@@ -557,11 +200,6 @@ void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
 // dropped to save 256 KiB BSS — both methods are stubs so the OMusic
 // gate stays the single source of truth.
 void hwtiles::patch_tiles(RomLoader*) {}
-
-void hwtiles::mark_tile_cache_dirty()
-{
-    tile_cache::mark_dirty();
-}
 void hwtiles::restore_tiles() {}
 
 // Set Tilemap X Clamp
@@ -691,17 +329,8 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     n64_profile::tile_call_dma_misses  = 0;
     const uint64_t pass1_t0 = get_ticks_us();
 
-    // ---- BG + FG caches (Expansion Pak) -----------------------------------
-    // When enabled, the dominant-palette BG and FG cells are pre-rendered
-    // to CI4 cache surfaces and emitted as wrap-aware blits — BG at the
-    // top of the function (under everything), FG between BG-per-cell and
-    // FG-per-cell emits in pass 2 (so the layer order BG-cache → BG-rest →
-    // FG-cache → FG-rest matches the original BG-then-FG painter order).
-    // priority_draw=0 only — text/HUD layer takes the per-cell path.
-    const bool use_cache = (priority_draw == 0) && tile_cache::is_enabled();
-
-    // Pre-resolve scroll for both layers (used by both cache blits and to
-    // avoid duplicating the text_ram override logic).
+    // Resolve per-layer scroll, with the text_ram override for
+    // per-row parallax (engine-specific addresses).
     uint16_t bg_xs = scroll_x[1], bg_ys = scroll_y[1];
     if ((bg_xs & 0x8000) != 0)
         bg_xs = (text_ram[0xf80 + 0x40] << 8) | text_ram[0xf80 + 0x41];
@@ -712,18 +341,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         fg_xs = (text_ram[0xf80 + 0] << 8) | text_ram[0xf80 + 1];
     if ((fg_ys & 0x8000) != 0)
         fg_ys = (text_ram[0xf16 + 0] << 8) | text_ram[0xf16 + 1];
-
-    if (use_cache) {
-        // BG cache blit goes first — drawn under everything else.
-        tile_cache::update_and_blit(
-            tile_cache::s_bg, "bg",
-            tile_ram, page[1], tile_banks, tiles_pi_addr, tile_tlut,
-            x_clamp, bg_xs, bg_ys, x_offset, y_offset);
-    }
-    const uint8_t bg_cached_palette =
-        use_cache ? tile_cache::s_bg.palette_idx : (uint8_t)0xff;
-    const uint8_t fg_cached_palette =
-        use_cache ? tile_cache::s_fg.palette_idx : (uint8_t)0xff;
 
     // ---- Pass 1: collect visible tiles + build atlas chunks ---------------
     int n_visible = 0;
@@ -822,16 +439,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
                 if (Code == 0) continue;
 
                 // BG/FG cache: skip cells already drawn by their layer's
-                // cache blit. BG cache emitted before this function starts;
-                // FG cache emitted in pass 2 between BG and FG per-cell
-                // emits. Cells whose Colour doesn't match dominant fall
-                // through to the per-cell path.
-                if (use_cache) {
-                    const uint8_t cell_col = (Data >> 6) & 0x7f;
-                    if (page_index == 1 && cell_col == bg_cached_palette) continue;
-                    if (page_index == 0 && cell_col == fg_cached_palette) continue;
-                }
-
                 // BG-extent audit. Only count BG (page_index==1) cells —
                 // FG cache decision is separate. Cheap O(1) bitmap ops.
                 if (page_index == 1) {
@@ -898,24 +505,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         const int pass_vis = n_visible - pass_vis_start;
         if (pass == 0) n_vis_bg = pass_vis; else n_vis_fg = pass_vis;
 
-        // When the per-layer cache is on, force chunk closure between BG
-        // (pass=0) and FG (pass=1) so chunks don't span layers. Pass 2 can
-        // then cleanly emit the FG cache blit between BG and FG chunks
-        // without re-binding mid-chunk state.
-        if (use_cache && pass == 0 && n_unique > 0
-            && n_chunks < MAX_CHUNKS_PER_CALL)
-        {
-            chunk_vis_end[n_chunks] = n_visible;
-            chunk_uniq   [n_chunks] = n_unique;
-            chunk_ring_ix[n_chunks] = s_ring_ix;
-            n_chunks++;
-            for (int k = 0; k < n_unique; k++)
-                s_code_to_slot[s_used_codes[k]] = 0xffff;
-            n_unique = 0;
-            s_ring_ix = (uint8_t)((s_ring_ix + 1) % K_ATLAS_RING);
-            atlas_cur = s_atlas_ring[s_ring_ix];
-        }
-
         if (overflow_hit) break;
     }
 
@@ -950,15 +539,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     const uint64_t pass2_t0 = get_ticks_us();
     n64_profile::tile_call_pass1_us = (uint32_t)(pass2_t0 - pass1_t0);
     if (n_chunks == 0) {
-        // No per-cell chunks, but the FG cache may still need to be emitted
-        // (case: all FG content fell into the dominant palette → no FG
-        // visibles in the per-cell list, but the cache surface holds them).
-        if (use_cache) {
-            tile_cache::update_and_blit(
-                tile_cache::s_fg, "fg",
-                tile_ram, page[0], tile_banks, tiles_pi_addr, tile_tlut,
-                x_clamp, fg_xs, fg_ys, x_offset, y_offset);
-        }
         n64_profile::tile_call_pass2_us    = 0;
         n64_profile::tile_call_vis         = (uint32_t)n_visible;
         n64_profile::tile_call_uniq_total  = 0;
@@ -1005,40 +585,10 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     int      prev_slot   = 0;
 
     int vis_start = 0;
-    bool fg_cache_emitted = false;
     for (int c = 0; c < n_chunks; c++)
     {
         const int n_uniq_c       = chunk_uniq[c];
         const int vis_end        = chunk_vis_end[c];
-
-        // Before processing the first chunk that contains FG visibles,
-        // emit the FG cache blit. Chunks are forced to align with the
-        // BG/FG boundary up in pass 1 when use_cache is on, so the check
-        // here is just `chunk's vis_start >= n_vis_bg`. Also re-establish
-        // the FG-chunk's TILE0/TILE1 state below because the cache blit
-        // overwrites them.
-        if (use_cache && !fg_cache_emitted && vis_start >= n_vis_bg) {
-            tile_cache::update_and_blit(
-                tile_cache::s_fg, "fg",
-                tile_ram, page[0], tile_banks, tiles_pi_addr, tile_tlut,
-                x_clamp, fg_xs, fg_ys, x_offset, y_offset);
-            fg_cache_emitted = true;
-            // Re-bind TILE0/TILE1/TILE2 base state — the FG cache blit
-            // clobbered them. Match the original setup at the top of pass 2.
-            rdpq_set_tile(TILE0, FMT_CI4,    0, ATLAS_PITCH, NULL);
-            rdpq_set_tile(TILE1, FMT_RGBA16, 0, 0,           NULL);
-            rdpq_tileparms_t parms2 = {};
-            parms2.s.mask = 3;
-            rdpq_set_tile(TILE2, FMT_CI4, 0, ATLAS_PITCH, &parms2);
-            // Bypass the LRU's cached state — slot 0 now holds the FG
-            // cache palette, and cur_tile_palette is no longer aligned
-            // with what's on TILE0. Force the next bind_tile0 (whatever
-            // palette) to re-issue set_tile.
-            cur_tile_palette  = -1;
-            cur_tile2_palette = -1;
-            for (int s = 0; s < N_TLUT_SLOTS; s++) tlut_colour[s] = -1;
-            prev_colour = -1;
-        }
 
         const int atlas_h_c      = n_uniq_c * ATLAS_TILE_H;   // one tile per 8 lines
         const int atlas_bytes_c  = n_uniq_c * ATLAS_TILE_BYTES;
@@ -1127,20 +677,6 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
         }
         vis_start = vis_end;
     }
-
-    // Final FG cache emit. Covers the case where all chunks were BG and
-    // no chunk-start ever crossed n_vis_bg (i.e. zero FG visibles after
-    // the cache's dominant-palette skip).
-    if (use_cache && !fg_cache_emitted) {
-        tile_cache::update_and_blit(
-            tile_cache::s_fg, "fg",
-            tile_ram, page[0], tile_banks, tiles_pi_addr, tile_tlut,
-            x_clamp, fg_xs, fg_ys, x_offset, y_offset);
-    }
-    // Both BG and FG have had their chance to rebuild from the current
-    // tile_ram contents — clear the dirty flag so subsequent frames
-    // with no tile_ram writes can skip the rebuild.
-    if (use_cache) tile_cache::s_dirty = false;
 
     // Per-call telemetry — consumed by the outlier logger in n64main to
     // diagnose tbg cost variance. Sum chunk uniques (atlas LOAD work) and
