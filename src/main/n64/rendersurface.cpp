@@ -290,7 +290,17 @@ bool Render::finalize_frame()
     // wait_us hides this; we need the raw minimum.
     if (raw_wait < n64_profile::min_wait_us) n64_profile::min_wait_us = raw_wait;
 
-    rdpq_attach(disp, NULL);
+    // Clear to black. Some scenes (music select, tunnels w/ skip-mode rows)
+    // leave pixels above the road bands unpainted — no rbg fill (data&0x800
+    // not set), no tile_bg paint (engine forces every tile palette slot 0
+    // to RGBA=0, see convert_palette), and sprites/text don't cover the
+    // sky region. Without an explicit clear those pixels keep whatever
+    // was in the framebuffer from the previous frame — typically the
+    // splash-screen white, hence "white sky on music select". The clear
+    // costs ~150 µs (one full-screen fill rect) but eliminates a whole
+    // class of cross-scene staleness bugs.
+    
+    rdpq_attach_clear(disp, NULL);
 
     // TEMP-PROBE: reset RDP perf counters at frame start. Read at end of
     // frame (post-rspq_wait) to compute pipe-busy / clock ratio. Answers

@@ -274,12 +274,14 @@ void Video::clear_tile_ram()
 {
     for (uint32_t i = 0; i <= 0xFFFF; i++)
         tile_layer->tile_ram[i] = 0;
+    hwtiles::mark_tile_cache_dirty();
 }
 
 void Video::write_tile8(uint32_t addr, const uint8_t data)
 {
     tile_layer->tile_ram[addr & 0xFFFF] = data;
-} 
+    hwtiles::mark_tile_cache_dirty();
+}
 
 void Video::write_tile16(uint32_t* addr, const uint16_t data)
 {
@@ -287,13 +289,15 @@ void Video::write_tile16(uint32_t* addr, const uint16_t data)
     tile_layer->tile_ram[(*addr+1) & 0xFFFF] = data & 0xFF;
 
     *addr += 2;
+    hwtiles::mark_tile_cache_dirty();
 }
 
 void Video::write_tile16(uint32_t addr, const uint16_t data)
 {
     tile_layer->tile_ram[addr & 0xFFFF] = (data >> 8) & 0xFF;
     tile_layer->tile_ram[(addr+1) & 0xFFFF] = data & 0xFF;
-}   
+    hwtiles::mark_tile_cache_dirty();
+}
 
 void Video::write_tile32(uint32_t* addr, const uint32_t data)
 {
@@ -303,6 +307,7 @@ void Video::write_tile32(uint32_t* addr, const uint32_t data)
     tile_layer->tile_ram[(*addr+3) & 0xFFFF] = data & 0xFF;
 
     *addr += 4;
+    hwtiles::mark_tile_cache_dirty();
 }
 
 void Video::write_tile32(uint32_t addr, const uint32_t data)
@@ -311,6 +316,7 @@ void Video::write_tile32(uint32_t addr, const uint32_t data)
     tile_layer->tile_ram[(addr+1) & 0xFFFF] = (data >> 16) & 0xFF;
     tile_layer->tile_ram[(addr+2) & 0xFFFF] = (data >> 8) & 0xFF;
     tile_layer->tile_ram[(addr+3) & 0xFFFF] = data & 0xFF;
+    hwtiles::mark_tile_cache_dirty();
 }
 
 uint8_t Video::read_tile8(uint32_t addr)

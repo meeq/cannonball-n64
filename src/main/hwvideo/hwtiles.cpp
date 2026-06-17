@@ -203,6 +203,11 @@ namespace tile_cache {
     Layer s_bg = {};     // page=1
     Layer s_fg = {};     // page=0
     bool  s_enabled = false;
+    // Set whenever Video::write_tile* / clear_tile_ram modifies tile_ram.
+    // update_and_blit AND-checks this against shadow_matches before
+    // skipping the rebuild — if dirty, the cache is stale even though
+    // EffPage / tile_banks match. Cleared after each render() call.
+    bool  s_dirty = false;
 
     // Scratch cell list shared by BG and FG renders (their renders run
     // sequentially per frame). Pass 1 walks every cell once, building both
@@ -261,6 +266,8 @@ namespace tile_cache {
     }
 
     bool is_enabled() { return s_enabled; }
+
+    void mark_dirty() { s_dirty = true; }
 
     inline bool shadow_matches(const Layer& L, uint16_t effpage,
                                uint8_t bank0, uint8_t bank1)
@@ -439,7 +446,11 @@ namespace tile_cache {
                          uint16_t xscroll, uint16_t yscroll,
                          int dst_x, int dst_y)
     {
-        if (!shadow_matches(L, effpage, tile_banks[0], tile_banks[1])) {
+        // Rebuild when keys differ OR when tile_ram was written since
+        // the last render. The dirty flag catches the case where the
+        // engine animates content within a static EffPage (Time Trials
+        // music select — see [[ttrial-music-select-cache-dirty]]).
+        if (s_dirty || !shadow_matches(L, effpage, tile_banks[0], tile_banks[1])) {
             render(L, tile_ram, effpage, tile_banks, tiles_pi_addr, dbg_name);
             L.shadow_effpage       = effpage;
             L.shadow_tile_banks[0] = tile_banks[0];
@@ -546,6 +557,11 @@ void hwtiles::init(uint8_t* /*src_tiles*/, const bool hires)
 // dropped to save 256 KiB BSS — both methods are stubs so the OMusic
 // gate stays the single source of truth.
 void hwtiles::patch_tiles(RomLoader*) {}
+
+void hwtiles::mark_tile_cache_dirty()
+{
+    tile_cache::mark_dirty();
+}
 void hwtiles::restore_tiles() {}
 
 // Set Tilemap X Clamp
@@ -1121,6 +1137,10 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
             tile_ram, page[0], tile_banks, tiles_pi_addr, tile_tlut,
             x_clamp, fg_xs, fg_ys, x_offset, y_offset);
     }
+    // Both BG and FG have had their chance to rebuild from the current
+    // tile_ram contents — clear the dirty flag so subsequent frames
+    // with no tile_ram writes can skip the rebuild.
+    if (use_cache) tile_cache::s_dirty = false;
 
     // Per-call telemetry — consumed by the outlier logger in n64main to
     // diagnose tbg cost variance. Sum chunk uniques (atlas LOAD work) and
