@@ -814,11 +814,29 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         if (numbanks) bank %= numbanks;
         if (vzoom < 0x40) vzoom = 0x40;
 
-        atlas_get_or_extract(
+        const AtlasEntry* warmed = atlas_get_or_extract(
             (uint16_t)bank, (uint16_t)addr,
             (uint16_t)height, (int16_t)pitch, flip != 0,
             (uint16_t)vzoom, /*drain_on_overflow=*/false);
+        // Pass 1 must succeed: the pool was sized to absorb a full priority's
+        // working set with the no-drain reset path. A null here means the pool
+        // is mis-sized or atlas extraction broke. Don't silently continue —
+        // pass 2 would assert anyway but the failure mode is murkier without
+        // the pass-1 context. See [[feedback-never-silent-drop-content]].
+        assertf(warmed,
+                "hwsprites: pass-1 atlas miss for enabled sprite slot %u "
+                "(bank=%u addr=0x%04x h=%d pitch=%d flip=%d vzoom=%d)",
+                (unsigned)(data / 8),
+                (unsigned)bank, (unsigned)addr, (int)height,
+                (int)pitch, (int)flip, (int)vzoom);
     }
+
+    // After pass 1 the atlas should hold every sprite for this priority. If
+    // pass 2 below sees ANY further overflow, the working set exceeds the
+    // pool — drain + reset evicts entries pass 2 had every reason to expect
+    // would still be live, and we silently render with wrong CI4 data. Snap
+    // the counter and assert no change at end-of-pass-2.
+    const uint32_t overflows_before_pass2 = atlas_overflows;
 
     // -------------------------------------------------------------------
     // Pass 2 — emit. Same walk + parse, but now also computes screen
@@ -884,6 +902,15 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 (unsigned)(data / 8),
                 (unsigned)bank, (unsigned)addr, (int)height,
                 (int)pitch, (int)flip, (int)vzoom);
+        // Non-null isn't enough — an entry with zero geometry or a null CI4
+        // pointer would silently render an empty rect. Catch the extractor
+        // bug rather than the downstream "missing sprite" symptom.
+        assertf(e->w > 0 && e->h > 0 && e->ci4 != nullptr,
+                "hwsprites: pass-2 atlas entry corrupt slot %u "
+                "(bank=%u addr=0x%04x w=%u h=%u ci4=%p)",
+                (unsigned)(data / 8),
+                (unsigned)bank, (unsigned)addr,
+                (unsigned)e->w, (unsigned)e->h, (const void*)e->ci4);
 
         // Shadow pass is a 2-cycle RDP operation (darken blender). If this
         // sprite carries no shadow silhouette in its CI4 data, the pass
@@ -1300,6 +1327,17 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         }
     }
 
+
+    // Pass 1 is supposed to absorb any overflow; pass 2's drain reset is a
+    // safety net but if it fires it has just evicted entries pass 2 itself
+    // queued LOAD_BLOCKs against earlier in this same loop — silent wrong-
+    // pixels. The pool size was tuned to cover the per-priority working set
+    // on real ROM data; bumping into this means the working set grew (new
+    // descriptor variants, larger zoom range, etc.) and the pool needs to
+    // grow too. See [[project-spr-spike-atlas-overflow]].
+    assertf(atlas_overflows == overflows_before_pass2,
+            "hwsprites: pass-2 atlas overflow (working set > pool); "
+            "pool exhaustion during emit will silently corrupt sprites");
 
     n64_profile::spr_call_vis          = spr_vis;
     n64_profile::spr_call_loads        = spr_loads;
