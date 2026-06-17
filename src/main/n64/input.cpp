@@ -2,18 +2,18 @@
     N64 Input — libdragon joypad backing.
 
     Mapping (P1, JOYPAD_PORT_1):
-      A      → ACCEL
-      B      → BRAKE
-      L      → GEAR1 (low gear)
-      R      → GEAR2 (high gear)
-      START  → START (also credits up in freeplay mode)
-      D-pad  → directional UP/DOWN/LEFT/RIGHT
-      Stick  → analog steering / accelerator when analog enabled
-      Z      → VIEWPOINT
-      C-Up    → COIN (insert credit — relevant when freeplay is off)
-      C-Down  → MENU
+      A       → ACCEL
+      B       → BRAKE
+      Z       → BRAKE
+      L       → BRAKE
+      R       → GEAR (toggle)
+      C-Down  → GEAR (toggle)
+      C-Up    → VIEWPOINT
       C-Left  → MUSIC_PREV (in-game music cycle backward)
       C-Right → MUSIC_NEXT (in-game music cycle forward)
+      START   → START (also credits up in freeplay mode; opens pause menu)
+      D-pad   → directional UP/DOWN/LEFT/RIGHT
+      Stick   → analog steering / accelerator when analog enabled
 ***************************************************************************/
 
 #include "input.hpp"
@@ -61,21 +61,24 @@ void Input::poll()
     joypad_buttons_t held    = joypad_get_buttons(JOYPAD_PORT_1);
     joypad_inputs_t  inputs  = joypad_get_inputs(JOYPAD_PORT_1);
 
+    const bool brake = held.b || held.z || held.l;
+    const bool gear  = held.r || held.c_down;
+
     keys[LEFT]      = held.d_left  || inputs.stick_x < -40;
     keys[RIGHT]     = held.d_right || inputs.stick_x >  40;
     keys[UP]        = held.d_up    || inputs.stick_y >  40;
     keys[DOWN]      = held.d_down  || inputs.stick_y < -40;
     keys[ACCEL]     = held.a;
-    keys[BRAKE]     = held.b;
-    keys[GEAR1]     = held.l;
-    keys[GEAR2]     = held.r;
+    keys[BRAKE]     = brake;
+    keys[GEAR1]     = gear;
+    keys[GEAR2]     = false;
     keys[START]     = held.start;
-    keys[COIN]      = held.c_up;
-    keys[VIEWPOINT] = held.z;
+    keys[COIN]      = false;
+    keys[VIEWPOINT] = held.c_up;
     keys[PAUSE]     = false;
     keys[STEP]      = false;
     keys[TIMER]     = false;
-    keys[MENU]      = held.c_down;
+    keys[MENU]      = false;
     keys[MUSIC_PREV] = held.c_left;
     keys[MUSIC_NEXT] = held.c_right;
 
@@ -89,7 +92,7 @@ void Input::poll()
         a_wheel = wheel;
 
         a_accel = held.a ? 0xFF : 0;
-        a_brake = held.b ? 0xFF : 0;
+        a_brake = brake   ? 0xFF : 0;
     }
 }
 
