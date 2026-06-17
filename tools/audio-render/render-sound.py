@@ -158,6 +158,11 @@ def main():
         if args.kind == "music_loop":
             loop_off = int(round(args.intro * args.wav64_rate))
             cmd += ["--wav-loop", "true", "--wav-loop-offset", str(loop_off)]
+        # Pause-menu resume calls wav64_seek; VADPCM can only land on encoded
+        # skip points, so without these the music restarts from 0. Music kinds
+        # get a dense table (every 0.25s); fx oneshots are too short to matter.
+        if args.kind in ("music_loop", "music_oneshot"):
+            cmd += ["--wav-seek", "0.25"]
         cmd.append(encoder_input)
         run(cmd)
 
