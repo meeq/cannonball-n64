@@ -60,7 +60,7 @@ static TTrial g_ttrial(config.ttrial.best_times);
 // CANNONBALL_LOG_PROFILE: dump per-frame timing breakdown to debugf on every
 // FPS dip below 30 (post-warmup). Set to 0 to silence the USB log during
 // extended play sessions. Cost is one display_get_fps() + a branch per frame.
-#define CANNONBALL_LOG_PROFILE 1
+#define CANNONBALL_LOG_PROFILE 0
 
 // Warm up the engine before the first render. The OutRun attract sequence
 // fades the sky palette in via opalette.cycle_sky_palette over several
