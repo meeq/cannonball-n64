@@ -82,10 +82,15 @@ void Input::poll()
     keys[MUSIC_PREV] = held.c_left;
     keys[MUSIC_NEXT] = held.c_right;
 
-    // Analog steering: stick_x range roughly [-80, +80] → wheel 0..0xFF
+    // Analog steering: stick_x range roughly [-80, +80] → wheel 0..0xFF.
+    // D-pad left/right overrides the stick to full deflection so the digital
+    // pad steers in analog mode too — OInputs::tick reads only a_wheel when
+    // (analog && gamepad) and would otherwise ignore keys[LEFT/RIGHT].
     if (analog)
     {
         int x = inputs.stick_x;
+        if (held.d_left)       x = -80;
+        else if (held.d_right) x =  80;
         if (x < -80) x = -80;
         if (x >  80) x =  80;
         wheel   = CENTRE + (x * (CENTRE - 1) / 80);
