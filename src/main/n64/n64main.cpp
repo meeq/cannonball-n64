@@ -14,7 +14,6 @@
 #include "splash.hpp"
 #include "boot_menu.hpp"
 #include "rendersurface.hpp"
-#include "hwroad_rsp.hpp"
 #include "hwroad_rdp.hpp"
 #include "hwroad_rdp_rsp.hpp"
 #include "../hwvideo/hwroad.hpp"
@@ -787,10 +786,6 @@ int main(int /*argc*/, char* /*argv*/[])
     }
 #endif
 
-    // Bring up the hwroad RSP overlay. Cheap (one rspq_overlay_register +
-    // a 14 KB malloc) — leave the runtime switch off so the CPU path stays
-    // the default. Toggle n64::hwroad_rsp::enabled to A/B test.
-    n64::hwroad_rsp::init();
     n64::hwroad_rdp::init();
     n64::hwroad_rdp_rsp::init();
 

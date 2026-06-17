@@ -54,12 +54,7 @@ private:
     void render_foreground_lores(uint16_t* dst_rgba, const uint16_t* rgb_lut);
     void render_foreground_hires(uint16_t* dst_rgba, const uint16_t* rgb_lut);
 
-    // RSP foreground rasteriser — same signature/contract as
-    // render_foreground_lores. Caller must invoke n64::hwroad_rsp::init()
-    // once at startup before this is safe to use.
 public:
-    void render_foreground_lores_rsp(uint16_t* dst_rgba, const uint16_t* rgb_lut);
-
     // RDP foreground rasteriser — handles all 4 (road_control & 3) values.
     // Split into two phases so the CPU mask-build doesn't fight RDP DMA
     // traffic for the RDRAM bus:

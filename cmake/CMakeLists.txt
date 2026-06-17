@@ -145,7 +145,6 @@ set(src_n64
     "${main_cpp_base}/n64/save.hpp"
     "${main_cpp_base}/n64/splash.hpp"
     "${main_cpp_base}/n64/boot_menu.hpp"
-    "${main_cpp_base}/n64/hwroad_rsp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp.hpp"
     "${main_cpp_base}/n64/hwroad_rdp_internal.hpp"
     "${main_cpp_base}/n64/hwroad_rdp_rsp.hpp"
@@ -158,7 +157,6 @@ set(src_n64
     "${main_cpp_base}/n64/save.cpp"
     "${main_cpp_base}/n64/splash.cpp"
     "${main_cpp_base}/n64/boot_menu.cpp"
-    "${main_cpp_base}/n64/hwroad_rsp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp.cpp"
     "${main_cpp_base}/n64/hwroad_rdp_rsp.cpp"
 )
@@ -183,11 +181,6 @@ set_target_properties(cannonball PROPERTIES SUFFIX ".elf")
 
 include_directories(${main_cpp_base})
 n64_setup_linking(cannonball)
-
-# RSP overlay: per-scanline hwroad foreground rasterizer. Source basename
-# matches the rsp_ucode_t symbol used by DEFINE_RSP_UCODE in hwroad_rsp.cpp.
-n64_add_rsp_ucode(cannonball
-    "${main_cpp_base}/n64/rsp_hwroad.S")
 
 # RSP overlay: per-scanline mask packer that backs the hwroad_rdp build
 # phase. Source basename matches DEFINE_RSP_UCODE(rsp_hwroad_rdp) in

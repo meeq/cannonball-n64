@@ -14,7 +14,6 @@
 #include "frontend/config.hpp"
 #include "engine/oroad.hpp"
 #include "n64/rendersurface.hpp"
-#include "n64/hwroad_rsp.hpp"
 #include "n64/hwroad_rdp.hpp"
 #include "n64/hwroad_rdp_rsp.hpp"
 #include <libdragon.h>
@@ -199,9 +198,6 @@ void Video::prepare_frame()
             else
                 hwroad.build_foreground_lores_rdp(renderer->rgb_lut());
         }
-        else if (n64::hwroad_rsp::enabled)
-            hwroad.render_foreground_lores_rsp(renderer->scratch_uc(),
-                                               renderer->rgb_lut());
         else
             (hwroad.*hwroad.render_foreground)(renderer->scratch_uc(),
                                                renderer->rgb_lut());
