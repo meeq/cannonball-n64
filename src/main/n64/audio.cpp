@@ -685,7 +685,14 @@ void Audio::stop_audio()  { sound_enabled = false; }
 double Audio::adjust_speed() { return 1.0; }
 
 void Audio::load_wav(const char* /*filename*/) {}
-void Audio::clear_wav() {}
+
+// Called at every state transition that prepares for a fresh game-side
+// audio context (end-of-stage, music-select back, pause-retry, pause-quit).
+// Clears the pause-flag side effect of Audio::pause_audio so the next
+// Audio::tick advances the Z80 stream and runs mixer_poll. Without this,
+// PAUSE_RETRY and PAUSE_QUIT both leave paused=true and the next run is
+// silent.
+void Audio::clear_wav() { paused = false; }
 
 void Audio::pause_audio()
 {

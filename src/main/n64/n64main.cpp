@@ -274,7 +274,6 @@ namespace
                             // engine rev / traffic noise on resume.
                             cannonball::audio.pause_audio();
                             osoundint.queue_sound(sound::FM_RESET);
-                            cannonball::audio.clear_wav();
                             pause_cursor = PAUSE_CONTINUE;
                             blit_pause_overlay(pause_cursor);
                             input.frame_done();
