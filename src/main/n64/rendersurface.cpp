@@ -75,7 +75,8 @@ namespace n64_profile
 }
 
 Render::Render()
-    : rgb{}, tile_tlut{}, sprite_tlut{}, src_width(0), src_height(0),
+    : rgb{}, tile_tlut{}, sprite_tlut{}, tile_tlut_stage{},
+      sprite_tlut_stage{}, src_width(0), src_height(0),
       shadow_multi(0), y_offset(0), initialized(false)
 {
 }
@@ -248,15 +249,28 @@ bool Render::finalize_frame()
     
     rdpq_attach_clear(disp, NULL);
 
-    // TEMP-PROBE: reset RDP perf counters at frame start. Read at end of
-    // frame (post-rspq_wait) to compute pipe-busy / clock ratio. Answers
-    // whether the RDP rasterizer is saturated (fps-floor is RDP-bound) or
-    // idle (fps-floor is CPU/RSP feed-bound). ares doesn't emulate these
-    // counters; valid only on real hardware.
-    *DP_STATUS = DP_WSTATUS_RESET_CLOCK_COUNTER
-               | DP_WSTATUS_RESET_PIPE_COUNTER
-               | DP_WSTATUS_RESET_CMD_COUNTER
-               | DP_WSTATUS_RESET_TMEM_COUNTER;
+    // Snapshot the TLUT caches for this frame's RDP consumption. The engine
+    // tick rewrites tile_tlut / sprite_tlut (convert_palette) while the
+    // *previous* frame's queued load_tlut commands may still be pending —
+    // the RDP DMAs them from RDRAM at command-execution time, so handing it
+    // the live arrays lets a palette write from frame N leak into frame
+    // N-1's draw (nondeterministic one-frame-early palettes during fades).
+    // The staging copies are only ever written here, after display_get():
+    // with FB_COUNT == 2 that call blocks until the previous frame is on
+    // screen, which requires its RSP+RDP work to have fully drained — so
+    // nothing in flight can still be reading them. The same guarantee is
+    // what makes the sprite-atlas pool and TMEM scratch recycling in the
+    // render calls below safe without an explicit rspq syncpoint. (The
+    // road-RSP input buffers are written earlier, in prepare_frame, and
+    // carry their own rspq_wait at build entry.)
+    static_assert(n64::FB_COUNT == 2,
+                  "cross-frame RDP-read safety relies on display_get() "
+                  "draining the previous frame; a deeper swapchain needs an "
+                  "explicit rspq syncpoint instead");
+    memcpy(tile_tlut_stage, tile_tlut, sizeof(tile_tlut));
+    memcpy(sprite_tlut_stage, sprite_tlut, sizeof(sprite_tlut));
+    data_cache_hit_writeback(tile_tlut_stage, sizeof(tile_tlut_stage));
+    data_cache_hit_writeback(sprite_tlut_stage, sizeof(sprite_tlut_stage));
 
     const int x = (disp->width - src_width) / 2;
 
@@ -280,17 +294,14 @@ bool Render::finalize_frame()
         (n64_profile::sub_us[n64_profile::SUB_ROAD_BG] * 7
          + (uint32_t)(rbg_t1 - rbg_t0)) >> 3;
 
-    // Tile background + foreground: writeback the TLUT cache (the engine
-    // updates it from cached convert_palette writes) so the RDP TLUT load
-    // DMAs see fresh bytes, then walk both tilemap pages in one shared
-    // atlas/draw pass. BG (page 1) draws under FG (page 0), and both sit
-    // under the engine composite, which still owns road_fg/sprites/text via
-    // pixels[]. priority=1 tiles stay on the CPU (drawn in front of sprites
-    // at engine layer-5).
-    data_cache_hit_writeback(tile_tlut, sizeof(tile_tlut));
-
+    // Tile background + foreground: walk both tilemap pages in one shared
+    // atlas/draw pass, reading palettes from the frame-stable TLUT snapshot
+    // (copied + written back above). BG (page 1) draws under FG (page 0),
+    // and both sit under the engine composite, which still owns
+    // road_fg/sprites/text via pixels[]. priority=1 tiles stay on the CPU
+    // (drawn in front of sprites at engine layer-5).
     uint64_t tbg_t0 = get_ticks_us();
-    video.tile_layer->render_rdp_tile_layers(tile_tlut, 0, x, y_offset);
+    video.tile_layer->render_rdp_tile_layers(tile_tlut_stage, 0, x, y_offset);
     uint64_t tbg_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_TILE_BG] = (uint32_t)(tbg_t1 - tbg_t0);
     n64_profile::sub_us[n64_profile::SUB_TILE_BG] =
@@ -316,48 +327,29 @@ bool Render::finalize_frame()
     // Sprite layer via RDP: opaque sprites are one blit each, shadow-flagged
     // sprites get a darken pass + body pass. Lives above the composite (so it
     // occludes road_fg) and below text.
-    data_cache_hit_writeback(sprite_tlut, sizeof(sprite_tlut));
     uint64_t spr_t0 = get_ticks_us();
-    video.sprite_layer->render_rdp(8, sprite_tlut, x, y_offset);
+    video.sprite_layer->render_rdp(8, sprite_tlut_stage, x, y_offset);
     uint64_t spr_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_SPRITE] = (uint32_t)(spr_t1 - spr_t0);
     n64_profile::sub_us[n64_profile::SUB_SPRITE] =
         (n64_profile::sub_us[n64_profile::SUB_SPRITE] * 7
          + (uint32_t)(spr_t1 - spr_t0)) >> 3;
 
-    // Text layer sits on top of everything. Uses the same TLUT cache as the
-    // tile layers (Colour is 3-bit here, only slots 0..7 are touched).
+    // Text layer sits on top of everything. Uses the same TLUT snapshot as
+    // the tile layers (Colour is 3-bit here, only slots 0..7 are touched).
     uint64_t txt_t0 = get_ticks_us();
-    video.tile_layer->render_rdp_text_layer(tile_tlut, 1, x, y_offset);
+    video.tile_layer->render_rdp_text_layer(tile_tlut_stage, 1, x, y_offset);
     uint64_t txt_t1 = get_ticks_us();
     n64_profile::raw_sub_us[n64_profile::SUB_TEXT] = (uint32_t)(txt_t1 - txt_t0);
     n64_profile::sub_us[n64_profile::SUB_TEXT] =
         (n64_profile::sub_us[n64_profile::SUB_TEXT] * 7
          + (uint32_t)(txt_t1 - txt_t0)) >> 3;
 
-
-    // TEMP-PROBE: drain queue + read RDP busy counters. One line per 60
-    // frames. Valid on real hardware only.
-    {
-        rspq_wait();
-        const uint32_t dp_clock = *DP_CLOCK;
-        const uint32_t dp_pipe  = *DP_PIPE_BUSY;
-        const uint32_t dp_cmd   = *DP_BUSY;
-        const uint32_t dp_tmem  = *DP_TMEM_BUSY;
-        static uint32_t s_probe_frame = 0;
-        if ((s_probe_frame++ % 60) == 0) {
-            const uint32_t pipe_pct = dp_clock ? (uint32_t)((uint64_t)dp_pipe * 100u / dp_clock) : 0;
-            const uint32_t cmd_pct  = dp_clock ? (uint32_t)((uint64_t)dp_cmd  * 100u / dp_clock) : 0;
-            const uint32_t tmem_pct = dp_clock ? (uint32_t)((uint64_t)dp_tmem * 100u / dp_clock) : 0;
-            debugf("RDPbusy[%5lu] clock=%lu pipe=%lu (%lu%%) cmd=%lu (%lu%%) tmem=%lu (%lu%%)\n",
-                   (unsigned long)s_probe_frame,
-                   (unsigned long)dp_clock,
-                   (unsigned long)dp_pipe, (unsigned long)pipe_pct,
-                   (unsigned long)dp_cmd,  (unsigned long)cmd_pct,
-                   (unsigned long)dp_tmem, (unsigned long)tmem_pct);
-        }
-    }
-
+    // No drain before present: the RDP keeps grinding this frame's queue
+    // while the CPU moves on to audio + the next engine tick. Cross-frame
+    // buffer-recycle safety is covered by the display_get() double-buffer
+    // guarantee (see the TLUT-snapshot comment above) and the road build's
+    // entry rspq_wait in prepare_frame.
     rdpq_detach_show();
     return true;
 }

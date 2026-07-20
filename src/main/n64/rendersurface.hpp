@@ -66,7 +66,7 @@ namespace n64_profile
     // Per-call telemetry for hwsprites::render_rdp. Set at end of call,
     // consumed by the outlier logger to diagnose why spr peaks at ~6.5 ms
     // (down from ~5-6 ms baseline after the 14-slot TLUT cache landed —
-    // [[project-hwsprites-tlut-cache]]). vis is the post-filter sprite count
+    // [[sprite-atlas-state]]). vis is the post-filter sprite count
     // that actually emitted; prims includes shadow's mask+body second rect
     // so prims > vis on shadow-heavy frames. loads is LOAD_BLOCK count
     // (atlas surface change); tlut_uploads is rdpq_tex_upload_tlut count
@@ -164,6 +164,14 @@ private:
     static constexpr int SPRITE_TLUT_SLOT_SIZE = 16;
     static constexpr uint32_t SPRITE_PAL_BASE = 0x800;
     alignas(8) uint16_t sprite_tlut[SPRITE_TLUT_SLOTS * SPRITE_TLUT_SLOT_SIZE];
+
+    // Per-frame snapshots of the two TLUT caches, taken in finalize_frame
+    // after display_get(). The RDP DMAs TLUTs from RDRAM at command-
+    // execution time, so it must read arrays the engine tick can't touch:
+    // convert_palette keeps rewriting tile_tlut/sprite_tlut while the
+    // previous frame's load_tlut commands may still be in flight.
+    alignas(8) uint16_t tile_tlut_stage[TILE_TLUT_SLOTS * TILE_TLUT_SLOT_SIZE];
+    alignas(8) uint16_t sprite_tlut_stage[SPRITE_TLUT_SLOTS * SPRITE_TLUT_SLOT_SIZE];
 
     // Source S16 buffer dimensions (eg. 320x224).
     int src_width, src_height;
