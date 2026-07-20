@@ -42,7 +42,7 @@ public:
     // provided). hwsprites::SPRITE_RAM_SIZE grew to 256 slots in lockstep.
     // Hard cap is the 12-bit write_sprite16 address mask (0xfff = 4096
     // bytes = 256 sprite slots = SPRITE_ENTRIES <= 0xE7). See
-    // [[assertions-over-logs]] — any further pool exhaustion will fire
+    // [[feedback-never-silent-drop-content]] — any further pool exhaustion will fire
     // the assert in OLevelObjs::setup_sprites with the precise context.
 	const static uint8_t SPRITE_ENTRIES = 0xC0;
     

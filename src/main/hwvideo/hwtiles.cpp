@@ -97,7 +97,7 @@ namespace n64_profile {
  *******************************************************************************************/
 
 // RAM-resident tile pixel cache. tile graphics live cart-side
-// ([[project-hwtiles-cart-side]]); a fresh PI-DMA per unique tile costs
+// ([[tile-pipeline-state]]); a fresh PI-DMA per unique tile costs
 // ~22 us of setup latency, so ~150 fetches per frame in OUT ≈ 3-4 ms of
 // pass 1. Direct-mapped cache lets repeat tile codes skip the bus.
 //
@@ -270,7 +270,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     constexpr int ATLAS_BYTES      = ATLAS_MAX * ATLAS_TILE_BYTES; // 2048
     // Atlas ring: each chunk packs into one of K_RING buffers and rotates.
     // BG+FG share the ring across one call. K leaves no in-flight buffer
-    // exposed to clobbering. See [[rdp-deferred-dma-static-source]].
+    // exposed to clobbering. See [[dma-cache-coherency]].
     //
     // Music-select uses fg_psel=bg_psel=0xFFFF (all four quadrants map to the
     // music-select tilemap in page F) so the renderer walks page F in both
@@ -279,7 +279,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // unique-code count per call doubled vs the paired layout. 32 chunks
     // restores the headroom 16 had at 64 tiles/chunk. The overflow path
     // below now counts + reports drops so a future ATLAS_MAX change won't
-    // silently re-bite (see [[feedback-silent-overflow-break]]).
+    // silently re-bite (see [[feedback-never-silent-drop-content]]).
     constexpr int K_ATLAS_RING = 32;
     constexpr int MAX_CHUNKS_PER_CALL = 32;
 
@@ -308,7 +308,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // per-row) and reported via a periodic debugf below. Non-zero in steady
     // state means MAX_CHUNKS_PER_CALL is too low for the current scene and
     // tiles are being silently dropped — see music-select regression
-    // history in [[project-music-select-dashboard-missing]].
+    // history in [[cross-layer-paint]].
     static uint32_t s_overflow_drops = 0;
     bool overflow_hit = false;
 
@@ -340,7 +340,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     int n_visible = 0;
     int n_unique  = 0;
     // Per-sub-layer visible counts so we can scope a BG-cache strategy
-    // ([[project-tbg-chunks-bound]]). Captures the BG/FG ratio inside this
+    // ([[rdp-perf-model]]). Captures the BG/FG ratio inside this
     // call's 246-vis / 154-prim total; the prim breakdown isn't strictly
     // additive (coalescing crosses pages) but the vis ratio is a strong
     // signal for where the bigger win lives.
@@ -461,7 +461,7 @@ void hwtiles::render_rdp_tile_layers(const uint16_t* tile_tlut,
     // Periodic report when the cap is being exceeded. Cadence (every 32nd
     // call seen with non-zero drops) keeps the debugf out of the per-frame
     // hot path; non-zero output means MAX_CHUNKS_PER_CALL needs bumping
-    // again. See [[feedback-silent-overflow-break]].
+    // again. See [[feedback-never-silent-drop-content]].
     if (overflow_hit) {
         static uint32_t s_overflow_probe = 0;
         if ((++s_overflow_probe & 31) == 0) {
