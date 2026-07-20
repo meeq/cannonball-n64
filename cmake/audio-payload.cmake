@@ -19,7 +19,8 @@
 # Pipeline per row:
 #   audio-render (host C++) --> raw WAV (44100 Hz)
 #        |
-#        v  music_loop only: ffmpeg trims to sample-exact (intro+loop)
+#        v  music_loop only: ffmpeg trims to sample-exact (intro+loop),
+#        |  optional loop-wrap crossfade baked into the tail (fade column)
 #        |
 #   audioconv64 --> VADPCM wav64 (22050 Hz, loop offset set for music_loop)
 #        |
@@ -112,6 +113,9 @@ function(_audio_payload_add KIND ID FILENAME)
 
     if(KIND STREQUAL "music_loop")
         list(APPEND _args --intro "${ARGV3}" --loop "${ARGV4}")
+        if(ARGC GREATER 5)
+            list(APPEND _args --fade "${ARGV5}")
+        endif()
     else()
         list(APPEND _args --duration "${ARGV3}")
     endif()
@@ -164,12 +168,17 @@ foreach(_line IN LISTS _SOUND_LINES)
     list(GET _tokens 2 _filename)
 
     if(_kind STREQUAL "music_loop")
-        if(NOT _n EQUAL 5)
-            message(FATAL_ERROR "audio manifest: music_loop row needs intro + loop: ${_line}")
+        if(NOT _n EQUAL 5 AND NOT _n EQUAL 6)
+            message(FATAL_ERROR "audio manifest: music_loop row needs intro + loop [+ fade]: ${_line}")
         endif()
         list(GET _tokens 3 _intro)
         list(GET _tokens 4 _loop)
-        _audio_payload_add(${_kind} ${_id} ${_filename} ${_intro} ${_loop})
+        if(_n EQUAL 6)
+            list(GET _tokens 5 _fade)
+            _audio_payload_add(${_kind} ${_id} ${_filename} ${_intro} ${_loop} ${_fade})
+        else()
+            _audio_payload_add(${_kind} ${_id} ${_filename} ${_intro} ${_loop})
+        endif()
     elseif(_kind STREQUAL "music_oneshot" OR _kind STREQUAL "fx")
         if(NOT _n EQUAL 4)
             message(FATAL_ERROR "audio manifest: ${_kind} row needs duration: ${_line}")

@@ -9,7 +9,7 @@
 #             music_oneshot: PCM+YM mix; wav64 plays once and stops
 #             fx:            YM-only;    wav64 plays once and stops
 #   filename  output basename under audio/raw and audio/wav64
-#   params    music_loop:    intro_seconds  loop_seconds
+#   params    music_loop:    intro_seconds  loop_seconds  [fade_seconds]
 #             other kinds:   duration_seconds
 #
 # Loop selection methodology:
@@ -19,21 +19,25 @@
 # 60 s preview (30 s pre-wrap + 30 s post-wrap) and the winner is the pair
 # where the music continues across the splice on the right musical phrase
 # and one period captures the full song's melodic content. Musical phrasing
-# is prioritised over splice silence, so a small residual click at the wrap
-# is accepted.
+# is prioritised over splice silence. Rows with a fade_seconds column get a
+# crossfade of that length baked into the file tail so the wrap lands
+# sample-exactly on the loop point (an intro shorter than the fade is
+# shifted past the fade window, which leaves the period and the audible
+# result unchanged); rows without it wrap bare.
 #
-# Splice quality at the chosen (intro, period) (50 ms window RMS):
+# Raw splice quality at the chosen (intro, period), before any baked
+# crossfade (50 ms window RMS):
 #   BREEZE  intro= 89.2780s  period=199.6790s  ->  -15.6 dB RMS
 #   SPLASH  intro=  0.0000s  period=337.9200s  ->  -19.5 dB RMS
-#   MAGICAL intro= 59.5160s  period=238.0830s  ->  -12.4 dB RMS
+#   MAGICAL intro= 36.4780s  period=222.7190s  ->  -22.5 dB RMS
 #
 # Render durations are auto-derived: (intro + loop) for music_loop, the
 # explicit value for the other kinds.
 
 # --- Music tracks (long, looping; mix includes PCM drum channels) -----------
-0x81  music_loop      music_breeze.wav       89.2780  199.679
+0x81  music_loop      music_breeze.wav       89.2780  199.679  0.100
 0x82  music_loop      music_splash.wav        0.0000  337.920
-0x85  music_loop      music_magical.wav      59.5160  238.083
+0x85  music_loop      music_magical.wav      36.4780  222.719  0.100
 
 # LASTWAVE is one-shot — the game re-dispatches it to repeat.
 0xA5  music_oneshot   music_lastwave.wav    95
