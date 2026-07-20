@@ -156,7 +156,12 @@ def main():
             "--wav-compress", "1",
         ]
         if args.kind == "music_loop":
-            loop_off = int(round(args.intro * args.wav64_rate))
+            # audioconv64 interprets --wav-loop-offset in input-file samples
+            # and scales it by the resample ratio, so pass it at the render
+            # rate. Quantise to the wav64 rate first so the scaled offset is
+            # exact.
+            step = args.render_rate // args.wav64_rate
+            loop_off = int(round(args.intro * args.wav64_rate)) * step
             cmd += ["--wav-loop", "true", "--wav-loop-offset", str(loop_off)]
         # Pause-menu resume calls wav64_seek; VADPCM can only land on encoded
         # skip points, so without these the music restarts from 0. Music kinds
