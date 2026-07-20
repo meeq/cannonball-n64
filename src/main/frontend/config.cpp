@@ -22,8 +22,6 @@ Config config;
 
 Config::Config(void)
 {
-    data.cfg_file = "./config.xml";
-    
     // Setup default sounds
     music_t magical, breeze, splash;
     magical.title = "MAGICAL SOUND SHOWER";
@@ -46,29 +44,15 @@ Config::~Config(void)
 }
 
 
-// Set Path to load and save config to
-void Config::set_config_file(const std::string& file)
-{
-    data.cfg_file = file;
-}
-
 // Hardcoded defaults. Save data persistence is delegated to the platform
 // layer (see src/main/n64/save.cpp).
 void Config::load()
 {
-    // Data Settings — platform layer overrides rom_path/res_path/save_path
-    // after load() if defaults aren't right (eg. libdragon DFS "rom:/" prefix).
+    // Data Settings — platform layer overrides rom_path/res_path after
+    // load() if defaults aren't right (eg. libdragon DFS "rom:/" prefix).
     data.rom_path  = "./roms/";
     data.res_path  = "./res/";
-    data.save_path = "./";
     data.crc32     = 0;         // filename mode by default (no dirent assumed)
-
-    data.file_scores      = data.save_path + "hiscores.xml";
-    data.file_scores_jap  = data.save_path + "hiscores_jap.xml";
-    data.file_ttrial      = data.save_path + "hiscores_timetrial.xml";
-    data.file_ttrial_jap  = data.save_path + "hiscores_timetrial_jap.xml";
-    data.file_cont        = data.save_path + "hiscores_continuous.xml";
-    data.file_cont_jap    = data.save_path + "hiscores_continuous_jap.xml";
 
     // Menu — boot straight into attract on first cut
     menu.enabled           = 0;

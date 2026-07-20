@@ -350,8 +350,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     uint16_t vzoom, bool drain_on_overflow)
 {
     // Hard fail on any condition that would silently drop a sprite. Callers
-    // are responsible for filtering hidden/zero-height slots upstream — see
-    // [[feedback-never-silent-drop-content]].
+    // are responsible for filtering hidden/zero-height slots upstream.
     assertf(atlas_pool,
             "hwsprites::atlas_get_or_extract called before atlas_init "
             "(bank=%u addr=0x%04x h=%u pitch=%d flip=%u vzoom=%u)",
@@ -435,8 +434,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
     // first frame of any scene. The original "static bake → PI-DMA the
     // pre-decoded blob" path was removed because it required us to find
     // every descriptor offline, including runtime-y_adj-computed addresses
-    // that don't appear in rom0 as stored sub-descriptors — see the
-    // hwsprites discussion in 1a974f7.
+    // that don't appear in rom0 as stored sub-descriptors.
     assertf(sprites_pi_addr,
             "hwsprites: spillover invoked before atlas_init resolved "
             "sprites_native.bin");
@@ -491,7 +489,7 @@ const hwsprites::AtlasEntry* hwsprites::atlas_get_or_extract(
         int64_t dma_hi = want_max > BLOB_LAST_WORD ? BLOB_LAST_WORD : want_max;
         // Caller asked for a fully-out-of-blob slice — that's a real bug:
         // every bank/addr the engine emits should land inside the 1 MiB
-        // ROM. See [[feedback-never-silent-drop-content]].
+        // ROM.
         assertf(dma_lo <= dma_hi,
                 "hwsprites: slice fully outside blob (bank=%u addr=%u h=%u "
                 "pitch=%d flip=%u want=[%lld..%lld])",
@@ -825,7 +823,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         // working set with the no-drain reset path. A null here means the pool
         // is mis-sized or atlas extraction broke. Don't silently continue —
         // pass 2 would assert anyway but the failure mode is murkier without
-        // the pass-1 context. See [[feedback-never-silent-drop-content]].
+        // the pass-1 context.
         assertf(warmed,
                 "hwsprites: pass-1 atlas miss for enabled sprite slot %u "
                 "(bank=%u addr=0x%04x h=%d pitch=%d flip=%d vzoom=%d)",
@@ -897,8 +895,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
         // No `if (!e) continue;` — atlas_get_or_extract is contractually
         // required to produce an entry for every enabled sprite slot the
         // engine emits. Silently skipping here would drop content (e.g.
-        // overpass scenery sub-sprites) without any visible signal. See
-        // [[feedback-never-silent-drop-content]].
+        // overpass scenery sub-sprites) without any visible signal.
         assertf(e,
                 "hwsprites: pass-2 atlas miss for enabled sprite slot %u "
                 "(bank=%u addr=0x%04x h=%d pitch=%d flip=%d vzoom=%d)",
@@ -1148,18 +1145,15 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
 
         // ---- Custom strip walker (sprite too big to fit one TMEM strip)
         //
-        // We used to call rdpq_tex_blit here. It silently failed to emit
-        // any primitives for some big CI4 sprites with scale + no flip
-        // (overpass top-beam right half on stage 1, Japan), causing
-        // visible holes in scenery. Rather than try to localize the
-        // libdragon bug, we walk strips manually: LOAD_BLOCK as many full
-        // rows as fit in 2 KB of TMEM, then emit one rdpq_texture_
+        // rdpq_tex_blit silently fails to emit any primitives for some big
+        // CI4 sprites with scale + no flip (overpass top-beam right half on
+        // stage 1, Japan), so we walk strips manually instead: LOAD_BLOCK as
+        // many full rows as fit in 2 KB of TMEM, then emit one rdpq_texture_
         // rectangle_scaled per strip — the exact pattern the bypass path
         // uses, just repeated across the sprite. Uses the same LRU TLUT
         // cache as the bypass path so there's no palette-zero collision.
         //
-        // [[feedback-never-silent-drop-content]] — this path must not
-        // silently no-op for any (w, h) tuple.
+        // This path must not silently no-op for any (w, h) tuple.
         const uint32_t fb_pre_prims = n64_profile::prim_count;
         const uint32_t rows_per_strip = 2048u / ci4_stride;
         assertf(rows_per_strip > 0,
@@ -1348,7 +1342,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // pixels. The pool size was tuned to cover the per-priority working set
     // on real ROM data; bumping into this means the working set grew (new
     // descriptor variants, larger zoom range, etc.) and the pool needs to
-    // grow too. See [[sprite-atlas-state]].
+    // grow too.
     assertf(atlas_overflows == overflows_before_pass2,
             "hwsprites: pass-2 atlas overflow (working set > pool); "
             "pool exhaustion during emit will silently corrupt sprites");

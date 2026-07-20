@@ -1,8 +1,7 @@
 /***************************************************************************
     N64 EEPROM-backed save layer.
 
-    16 Kbit EEPROM via libdragon eepfs. Layout matches
-    project_eeprom_save_layout in CLAUDE memory:
+    16 Kbit EEPROM via libdragon eepfs. Layout:
 
       file              backup  on-disk
       scores            yes     528 B

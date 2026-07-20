@@ -49,20 +49,20 @@ bool Roms::load_revb_roms(bool fixed_rom)
     status += LOAD(rom1, ("epr-10330a.57", 0x20001, 0x10000, 0xba9ec82a, RomLoader::INTERLEAVE2, VERBOSE));
 
     // Tile ROMs are not loaded on N64. The bake-sprites tool pre-decodes
-    // them into /tiles/tiles_native.bin (DFS), and hwtiles::init no longer
-    // reads src_tiles. Keeping the 192 KiB blob out of RAM frees that much
-    // from the load-time peak (was OOM on the 4 MiB base console).
+    // them into /tiles/tiles_native.bin (DFS), and hwtiles::init does not
+    // read src_tiles (see hwtiles.cpp). Keeping the 192 KiB blob out of RAM
+    // is required to fit the 4 MiB base console's load-time budget.
 
     // Load Non-Interleaved Road ROMs (2 identical roms, 1 for each road)
     road.init(0x10000);
     status += LOAD(road, ("opr-10185.11", 0x000000, 0x08000, 0x22794426, RomLoader::NORMAL, VERBOSE));
     status += LOAD(road, ("opr-10186.47", 0x008000, 0x08000, 0x22794426, RomLoader::NORMAL, VERBOSE));
 
-    // Sprite ROMs are not loaded on N64. The bake-sprites tool emits both
-    // a pre-decoded atlas (sprite_atlas.bin) and a native byte-swapped blob
-    // (sprites_native.bin) for the EOR-walk spillover path; hwsprites::init
-    // no longer reads src_sprites. Skipping the 1 MiB blob is the single
-    // biggest reclaim on the 4 MiB base console's load-time peak.
+    // Sprite ROMs are not loaded on N64. The bake-sprites tool emits a
+    // native byte-swapped blob (sprites_native.bin) consumed by the
+    // EOR-walk spillover path (see hwsprites::atlas_get_or_extract);
+    // hwsprites::init does not read src_sprites. Skipping the 1 MiB blob is
+    // the single biggest reclaim on the 4 MiB base console's load-time peak.
 
     // Load Z80 Sound ROM
     // Note: This is a deliberate decision to double the Z80 ROM Space to accomodate extra FM based music

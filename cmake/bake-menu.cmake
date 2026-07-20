@@ -34,8 +34,9 @@ file(MAKE_DIRECTORY "${_MENU_BUILD_DIR}")
 file(MAKE_DIRECTORY "${_MENU_STAGE_DIR}")
 
 # CONFIGURE_DEPENDS so adding / removing a PNG re-runs cmake automatically
-# at next build instead of silently using a stale glob (which previously
-# crashed boot with "rom:/menu/off.sprite: No such file or directory").
+# at next build instead of silently using a stale glob — a PNG added
+# without a reconfigure would leave its .sprite out of the DFS payload and
+# boot_menu.cpp would fail to open it at boot.
 file(GLOB _MENU_PNGS CONFIGURE_DEPENDS "${_MENU_SRC_DIR}/*.png")
 set(MENU_STAGED_SPRITES)
 

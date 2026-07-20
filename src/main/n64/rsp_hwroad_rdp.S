@@ -7,12 +7,10 @@
 # emit_foreground_lores_rdp) walks the run list and emits one
 # rdpq_fill_rectangle per visible run.
 #
-# This file replaces the previous CI4-mask packer. The scan is scalar
-# for now — a vectorised lpv/vne/cfc2 inner loop was prototyped but
-# hit a correctness issue, and the perf budget for case-0/3 (single-
-# road frames) is comfortably met by the scalar path running async
-# behind the rest of prepare_frame. The win over the CPU build comes
-# from the async dispatch alone, not from per-byte throughput.
+# The scan is scalar: the win over the CPU build comes from async RSP
+# dispatch, not per-byte throughput, so the perf budget for case-0/3
+# (single-road frames) is comfortably met by this straight-line byte
+# loop running behind the rest of prepare_frame.
 #
 # Command 0 — HWRoadRDP_BuildRuns:
 #   a0 = num_scanlines (low 16 bits)          — cmd word top byte stripped
@@ -37,8 +35,7 @@
 #
 # Frame state layout (128 bytes total, padded):
 #   0x00  u8   ctrl
-#   0x01  u8   oob_pair       (legacy, unused on runs path)
-#   0x02  u16  _pad
+#   0x01  u8[3] _pad
 #   0x04  u32  n_runs_phys    RDRAM phys of u16[MAX_LINES] writeback
 #   0x08  u8[8]  slot8r0      merged_idx[(p<<3)|3] for p in 0..7
 #   0x10  u8[8]  slot8r1      merged_idx[(3<<3)|p] for p in 0..7
@@ -120,7 +117,7 @@ RSPQ_EndSavedState
 .align 4
 DESC:        .space 32          # current per-row descriptor
 .align 4
-FRAME_STATE: .space 128         # ctrl + oob_pair + n_runs_phys + slot8r0/r1 + merged_idx
+FRAME_STATE: .space 128         # ctrl + n_runs_phys + slot8r0/r1 + merged_idx
 .align 4
 TLUT_DMEM:   .space 32          # per-row 16-entry RGBA5551 TLUT
 .align 8
@@ -222,7 +219,6 @@ N_RUNS_DMEM = N_RUNS_OUT
 
 # Frame state field offsets.
 #define FS_CTRL          0x00
-#define FS_OOB_PAIR      0x01
 #define FS_N_RUNS_PHYS   0x04
 #define FS_SLOT8R0       0x08
 #define FS_SLOT8R1       0x10
@@ -292,7 +288,8 @@ scanline_loop:
     li      t0, 3
     beq     s5, t0, do_case3
     nop
-    # ctrl=1/2 — stub. Falls through to do_case12.
+    # ctrl=1/2 — dual-road path; falls through to do_case12 (piece-wise
+    # pair/single-road scan, see header).
     j       do_case12
     nop
 
@@ -1288,7 +1285,8 @@ er_run_loop:
     lhu     t5, 2(t3)                    # color
 
     # Skip cases that paint nothing: colour matches Phase 2a's coob fill,
-    # vestigial transparent CI4 slot (color == 0), or zero-width.
+    # never-selected TLUT slot (color == 0 — real colors always have the
+    # RGBA5551 alpha bit set; see hwroad_rdp_internal.hpp), or zero-width.
     beq     t5, s8, er_run_advance
     nop
     beqz    t5, er_run_advance

@@ -44,7 +44,7 @@ private:
     // We grew to 256 slots after JUMP_ENTRIES_TOTAL in osprites bumped
     // past 128 to fix overpass scenery silent drops. Cap is the 12-bit
     // write_sprite16 address mask in video.cpp (& 0xfff = 4096 bytes =
-    // 256 sprite slots). See [[feedback-never-silent-drop-content]] / SPRITE_ENTRIES.
+    // 256 sprite slots). See SPRITE_ENTRIES.
     static const uint16_t SPRITE_RAM_SIZE = 256 * 8;
     static const uint32_t SPRITES_LENGTH = 0x100000 >> 2;
     static const uint16_t COLOR_BASE = 0x800;

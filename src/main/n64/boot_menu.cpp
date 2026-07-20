@@ -10,13 +10,13 @@
         with prim = white, which leaves the RGBA16 chrome untouched.
       * One caret sprite (▲) re-used for ▶ ◀ ▲ ▼ via rdpq_blitparms_t.theta.
 
-    Heap discipline matters: the rdpq_text engine got us OOM at pcm.init the
-    last time round (~25 KiB static cost), and we run on a 4 MiB cart with
-    only ~69 KiB of headroom after ROM load. Sprite blitting + sprite_load
-    is already linked for the engine renderer, so this path adds essentially
-    no new static budget. Sprites are loaded for one screen at a time and
-    freed before the next screen swap, so transient cost peaks at the larger
-    of the two sets (~options, ≈210 KiB).
+    Heap discipline matters: the 4 MiB cart has ~69 KiB of heap headroom
+    after ROM load, and an rdpq_text-based menu would add ~25 KiB of static
+    footprint on its own. Sprite blitting via sprite_load is already linked
+    for the engine renderer, so this path adds essentially no new static
+    budget. Sprites are loaded for one screen at a time and freed before
+    the next screen swap, so transient cost peaks at the larger of the two
+    sets (~options, ≈210 KiB).
 ***************************************************************************/
 
 #include "boot_menu.hpp"
@@ -112,9 +112,9 @@ namespace
         T_COUNT
     };
 
-    // REGION (jap/world toggle) is always available — Roms::load_japanese_roms
-    // overwrites rom0 / rom1 in place rather than allocating a second set, so
-    // the 512 KiB cost the old guard worried about is now zero.
+    // REGION (jap/world toggle) is always available: Roms::load_japanese_roms
+    // overwrites rom0/rom1 in place rather than allocating a second set, so
+    // switching regions costs no extra ROM memory.
     enum opt_row_t
     {
         O_REGION = 0,
@@ -257,10 +257,9 @@ namespace
         g_title.options     = load_named("options");
     }
 
-    // rdpq_detach_show is async (RDP may still be reading the last frame's
-    // textures); drain before sprite_free or we pull glyph data out from
-    // under in-flight commands. Same gotcha as the rdpq_font path that bit
-    // us earlier — see feedback_rdpq_free_needs_drain.
+    // rdpq_detach_show is async — the RDP may still be reading the last
+    // frame's textures. Drain before sprite_free or the RDP can read
+    // pixel/palette data that's already been freed.
     void free_title_sprites()
     {
         rspq_wait();
@@ -352,10 +351,10 @@ namespace
 
     // ===== EEPROM <-> live config ==========================================
 
-    // Same projection used by the old rdpq_text menu — the on-disk record
-    // schema hasn't changed. Every field is serialised so dropped UI rows
-    // (Prototype / Sound / FPS / Freeze Timer / Disable Traffic / Cont
-    // Traffic / TT Traffic) still round-trip through their defaults.
+    // seed_record serialises every field of saved_settings_v1, including
+    // rows not exposed in this menu (Prototype / Sound / FPS / Freeze Timer
+    // / Disable Traffic / Cont Traffic / TT Traffic), so they round-trip
+    // through their defaults intact.
     void seed_record(saved_settings_v1& s)
     {
         std::memset(&s, 0, sizeof(s));

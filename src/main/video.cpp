@@ -152,14 +152,15 @@ void Video::prepare_frame()
     N64_PROFILE_PHASE_BEGIN();
     if (n64::hwroad_rdp::should_render_road_fg())
     {
-        // RDP road_fg overlay: build the CI4 mask + per-line TLUTs here, in
-        // prepare_frame, so the writes happen with no RDP DMA traffic on the
-        // RDRAM bus (the previous frame has long since finished; this frame
-        // hasn't queued anything yet). build_ also rspq_waits at entry as
-        // a safety net against overwriting buffers the RDP still references.
-        // emit_foreground_lores_rdp in finalize_frame replays the prebuilt
-        // state into the framebuffer. RSP packs the per-pixel CI4 mask;
-        // CPU still builds TLUT + spans + descriptor + pre-fill.
+        // RDP road_fg overlay: build the per-line TLUTs + run-list
+        // descriptors here, in prepare_frame, so the writes happen with no
+        // RDP DMA traffic on the RDRAM bus (the previous frame has long
+        // since finished; this frame hasn't queued anything yet). build_
+        // also rspq_waits at entry as a safety net against overwriting
+        // buffers the RDP still references. emit_foreground_lores_rdp in
+        // finalize_frame replays the prebuilt state into the framebuffer.
+        // RSP scans each row's source bytes into a run list; CPU builds
+        // the TLUT + spans + descriptor table that drives it.
         hwroad.build_foreground_lores_rdp_rsp(renderer->rgb_lut());
     }
     N64_PROFILE_PHASE_END(n64_profile::SUB_ROAD_FG);

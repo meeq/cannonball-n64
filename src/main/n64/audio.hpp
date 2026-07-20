@@ -1,11 +1,12 @@
 /***************************************************************************
     N64 / libdragon Audio.
 
-    Same public class shape as src/main/sdl2/audio.hpp so engine and frontend
-    code is platform-agnostic. Phase 4c routes SegaPCM through libdragon's
-    RSP mixer (one channel per voice) and dispatches pre-rendered VADPCM
-    wav64 files for the eleven YM2151-driven music + FM SFX commands; the
-    YM2151 emulator is retained for its cheap register interface only.
+    Public interface for the Audio class used by engine and frontend code.
+    Routes SegaPCM through libdragon's RSP mixer via a pooled set of mixer
+    channels (dynamically bound to active voices, not one per voice — see
+    audio.cpp) and dispatches pre-rendered VADPCM wav64 files for the eleven
+    YM2151-driven music + FM SFX commands; the YM2151 emulator is retained
+    for its cheap register interface only.
 ***************************************************************************/
 
 #pragma once
@@ -65,6 +66,13 @@ public:
     // just-queued exit jingle plays out instead of dying after the one
     // mixer_poll it got on the tick that queued it.
     void   drain_wav(uint32_t max_ms);
+
+    // Diagnostic counters for the SegaPCM voice-pool (see the pool_evictions
+    // / pcm_bad_length comments in audio.cpp). Read by n64main.cpp's OUT
+    // outlier log and CANNONBALL_LOG_PROFILE dip log; both should stay at 0
+    // in normal play.
+    uint32_t pool_eviction_count()  const;
+    uint32_t pcm_bad_length_count() const;
 
 private:
     wav_t wavfile{};

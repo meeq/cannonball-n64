@@ -65,10 +65,9 @@ namespace n64_profile
     extern uint32_t tile_call_dma_misses;   // PI-DMA actually issued (cache misses)
 
     // Per-call telemetry for hwsprites::render_rdp. Set at end of call,
-    // consumed by the outlier logger to diagnose why spr peaks at ~6.5 ms
-    // (down from ~5-6 ms baseline after the 14-slot TLUT cache landed —
-    // [[sprite-atlas-state]]). vis is the post-filter sprite count
-    // that actually emitted; prims includes shadow's mask+body second rect
+    // consumed by the outlier logger to diagnose why spr_call_us peaks
+    // around 6.5 ms in shadow-heavy frames. vis is the post-filter sprite
+    // count that actually emitted; prims includes shadow's mask+body second rect
     // so prims > vis on shadow-heavy frames. loads is LOAD_BLOCK count
     // (atlas surface change); tlut_uploads is rdpq_tex_upload_tlut count
     // (palette cache miss + shadow scratch refresh).

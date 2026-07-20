@@ -110,8 +110,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // load_revb_roms() no longer loads sprite/tile ROMs (the N64 runtime
-    // consumes them as DFS blobs emitted by this tool). Load them here.
+    // load_revb_roms() does not load sprite/tile ROMs — the N64 runtime
+    // consumes them as DFS blobs emitted by this tool — so load them here.
     roms.sprites.init(0x100000);
     int status = 0;
     status += roms.sprites.load_rom("mpr-10371.9",  0x000000, 0x20000, 0x7cc86208, RomLoader::INTERLEAVE4, true);

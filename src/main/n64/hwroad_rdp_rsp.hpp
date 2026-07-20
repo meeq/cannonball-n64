@@ -1,23 +1,22 @@
 /***************************************************************************
     RSP-build variant of the hwroad RDP foreground path.
 
-    Same on-frame contract as HWRoad::build_foreground_lores_rdp:
-    populates the shared CI4 mask + per-line TLUT + LineState arrays in
-    n64::hwroad_rdp so emit_foreground_lores_rdp can paint the frame
-    untouched. The split:
+    Same on-frame contract as HWRoad::build_foreground_lores_rdp: populates
+    the shared per-line TLUT + LineState arrays in n64::hwroad_rdp so
+    emit_foreground_lores_rdp can paint the frame untouched. The split:
 
-      * CPU still computes per-row state (data0/data1, color_idx, hpos,
-        src pointers, span coords, 16-entry TLUT) and writes a compact
-        descriptor table.
-      * CPU pre-fills mask rows with oob_pair via uncached 4-byte stores
-        so OOB regions are already correct on RSP entry.
-      * RSP DMAs per row's source rows in, scalar-packs the in-span
-        nibble pairs into the mask, DMAs the mask back. Double-buffered
-        so per-row DMA hides behind compute.
+      * CPU computes per-row state (data0/data1, color_idx, hpos, src
+        pointers, span coords, 16-entry TLUT) and writes a compact
+        per-row descriptor table.
+      * RSP overlay (rsp_hwroad_rdp.S) DMAs each row's source bytes in,
+        scans them to build a per-row run list ({x_end, color5551}) —
+        adjacent same-colour pixels collapse into one run — and DMAs
+        the run list back to RDRAM. Double-buffered so per-row DMA hides
+        behind compute.
+      * CPU emit pass (emit_foreground_lores_rdp) converts each row's run
+        list into RDP fill rectangles.
 
-    This file ships with the RSP path stubbed (acks command, does no
-    pack work) — visual contract is "uniform OOB-coloured road area"
-    so the wiring is verifiable end-to-end before the real pack lands.
+    See hwroad_rdp_rsp.cpp:11-22 for the full per-frame protocol.
 ***************************************************************************/
 
 #pragma once
@@ -65,7 +64,9 @@ namespace hwroad_rdp_rsp
     // written by the BuildRuns DMAOut) and the per-row runs[][] from the
     // shared runs_buf. Walks each row's runs, emitting SET_FILL_COLOR +
     // FILL_RECTANGLE pairs for runs whose colour differs from c_oob (Phase 2a
-    // already paints those) and is non-zero (vestigial CI4 transparent slot).
+    // already paints those) and is non-zero (0x0000 marks never-selected TLUT
+    // slots, unreachable for real colors — see the Run comment in
+    // hwroad_rdp_internal.hpp).
     // Must be queued AFTER dispatch_coob_fill so the c_oob backstop lands
     // first in the RDP command stream.
     void dispatch_emit_runs(int x_off, int y_off);

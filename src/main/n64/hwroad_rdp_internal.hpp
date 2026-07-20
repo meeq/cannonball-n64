@@ -19,13 +19,20 @@ namespace detail
     constexpr int MAX_SPAN_PX  = 320;           // s16 active width
     constexpr int TLUT_ENTRIES = 16;
 
-    // Per-row run list — replaces the CI4 mask + TLUT pair for the CPU
-    // build/emit path. Each Run describes a span of identical RGBA5551
-    // color that ends at x_end (exclusive). The implicit start is either
-    // line[y].s_start (for runs[0]) or the previous run's x_end. Runs are
-    // contiguous and cover [s_start, s_end). Emit skips any run whose
-    // color equals c_oob because Phase 2a already paints the row with
-    // c_oob via a single fill_rectangle.
+    // Per-row run list consumed by the emit path. Each Run describes a
+    // span of identical RGBA5551 color that ends at x_end (exclusive).
+    // The implicit start is either line[y].s_start (for runs[0]) or the
+    // previous run's x_end. Runs are contiguous and cover [s_start,
+    // s_end). Emit skips any run whose color equals c_oob because Phase
+    // 2a already paints the row with c_oob via a single fill_rectangle.
+    // Emit also skips color 0x0000: every populated TLUT slot holds a
+    // pack_rgba5551 value with the alpha LSB set (black is 0x0001, and
+    // the road TLUT indexes rgb_lut at color_offset1/2 ^ ..., never the
+    // engine's index-0 transparency sentinel), so 0x0000 only appears in
+    // the six zero-filled TLUT slots (4-6 / 12-14) that no pixel value
+    // can select — road pixels are 0-3, or 7 for the stripe area. The
+    // zero check is a guard against those never-selected slots; it can
+    // never drop a legitimate color.
     struct Run
     {
         uint16_t x_end;
@@ -33,30 +40,22 @@ namespace detail
     };
     constexpr int MAX_RUNS_PER_ROW = 64;
 
-    // SKIP / OOB_ONLY behave as before. DRAW = run list in runs_buf row.
-    // DRAW_DIRECT_R0 was used by the CI4 path; retained as an enum value
-    // for ABI compatibility with hwroad_rdp_rsp.cpp but no longer emitted.
+    // SKIP / OOB_ONLY need no run list; DRAW = run list in runs_buf row.
     enum LineKind : uint8_t
     {
         SKIP            = 0,
         OOB_ONLY        = 1,
         DRAW            = 2,
-        DRAW_DIRECT_R0  = 3,
     };
 
     struct LineState
     {
         uint8_t  kind;
         // s_start/s_end is the union span. CPU path also uses s_start as
-        // the implicit start of runs[0]. tex_start/tex_end and src_phys/
-        // src_s_offset are vestigial from the CI4 path — kept for the RSP
-        // overlay file's LineState layout compatibility.
+        // the implicit start of runs[0].
         uint16_t s_start, s_end;
-        uint16_t tex_start, tex_end;
         uint16_t c_oob;
         uint16_t n_runs;
-        uint32_t src_phys;
-        uint8_t  src_s_offset;
     };
 
     // Defined in hwroad_rdp.cpp. Uncached aliases (KSEG1) — writes go

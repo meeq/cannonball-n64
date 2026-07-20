@@ -34,16 +34,14 @@ public:
 		ENABLE = 0x80,	        // Bit 7: Toggle sprite visibility
 	};
 
-    // Note, the original game has 0x4F entries.
-    // Cannonball bumped this to 0x62 to fix the broken arches on Gateway.
-    // For N64 we bumped to 0xC0 (192) after 0x62 (98) and 0x67 (103)
-    // both asserted during Japan stage 1 attract (the second overpass
-    // needs more scenery oentries than the arcade hardware ever
-    // provided). hwsprites::SPRITE_RAM_SIZE grew to 256 slots in lockstep.
-    // Hard cap is the 12-bit write_sprite16 address mask (0xfff = 4096
-    // bytes = 256 sprite slots = SPRITE_ENTRIES <= 0xE7). See
-    // [[feedback-never-silent-drop-content]] — any further pool exhaustion will fire
-    // the assert in OLevelObjs::setup_sprites with the precise context.
+    // Note, the original game has 0x4F entries. Cannonball bumped this to
+    // 0x62 to fix the broken arches on Gateway. N64 uses 0xC0 (192) to hold
+    // the worst-case scenery count (Japan stage 1's second overpass);
+    // hwsprites::SPRITE_RAM_SIZE must grow in lockstep. Hard cap is the
+    // 12-bit write_sprite16 address mask (0xfff = 4096 bytes = 256 sprite
+    // slots = SPRITE_ENTRIES <= 0xE7). Any further pool exhaustion will
+    // fire the assert in OLevelObjs::setup_sprites with the precise
+    // context.
 	const static uint8_t SPRITE_ENTRIES = 0xC0;
     
     // This is initalized based on the config

@@ -1,13 +1,6 @@
 /***************************************************************************
     CPU-side dispatch for the hwroad_rdp_rsp overlay.
 
-    Step 1 — overlay scaffold + CPU descriptor build + pre-fill. The RSP
-    overlay started as a stub: the mask region was left in the all-OOB
-    state the pre-fill writes, so the visual contract was "road region
-    paints a uniform OOB colour through the RDP". That validated the
-    build/emit wiring before step 2 added the actual scalar pack loop
-    in rsp_hwroad_rdp.S.
-
     Per-frame protocol:
 
       1. CPU: same per-row math the CPU-only build does (data0/data1
@@ -15,7 +8,7 @@
          TLUT). Writes are: hwroad_rdp::detail::tlut_buf (per-row),
          hwroad_rdp::detail::line (LineState), and a per-row entry in
          the descriptor table here.
-      2. CPU: rspq_write(HWRoadRDP_BuildMasks, desc_base, state_base).
+      2. CPU: rspq_write(HWRoadRDP_BuildRuns, desc_base, state_base).
       3. RSP: per row, async DMA src0+src1 in, scalar pack, DMA runs[y]
          out. Caller (emit_foreground_lores_rdp) issues rspq_wait
          before reading runs_buf via RDP DMA.
@@ -40,7 +33,7 @@ namespace n64
 namespace hwroad_rdp_rsp
 {
 
-// RSP packer for the road_fg CI4 mask. Handles all ctrl values (0/1/2/3);
+// RSP packer for the road_fg run list. Handles all ctrl values (0/1/2/3);
 // ctrl=1/2 dual-road frames are scanned piece-wise inside do_case12.
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
@@ -52,8 +45,8 @@ namespace
     // Per-row descriptor handed to the RSP overlay. Layout mirrors
     // rsp_hwroad_rdp.S DESC_* offsets — keep in sync. 32 bytes exact.
     //
-    // The RSP overlay no longer packs a CI4 mask; it emits a Run list
-    // ({x_end, color5551}). Per row it needs:
+    // The RSP overlay emits a run list ({x_end, color5551}). Per row it
+    // needs:
     //   * the 16-entry RGBA5551 TLUT (tlut_phys, 32B) so it can resolve
     //     slot -> colour without a frame-wide TLUT cache;
     //   * the src bytes (src0_phys / src1_phys, single-road may zero
@@ -86,8 +79,7 @@ namespace
     struct alignas(16) FrameStateRDP
     {
         uint8_t  ctrl;
-        uint8_t  oob_pair;      // (oob_slot << 4) | oob_slot — legacy, unused by runs path
-        uint16_t _pad0;
+        uint8_t  _pad0[3];
         uint32_t n_runs_phys;   // RDRAM phys of u16[MAX_LINES] write-back
         uint8_t  slot8r0[8];    // merged_idx[(p<<3) | 3] for p in 0..7
         uint8_t  slot8r1[8];    // merged_idx[(3<<3) | p] for p in 0..7
@@ -258,16 +250,16 @@ void dispatch_emit_runs(int x_off, int y_off)
 // HWRoad::build_foreground_lores_rdp_rsp
 //
 // Same on-frame contract as build_foreground_lores_rdp: populates the
-// shared mask + TLUT + LineState arrays in n64::hwroad_rdp::detail.
-// Replaces the CPU mask-pack inner loop with a descriptor table consumed
-// by the RSP overlay.
-//
-// STEP 1: the RSP overlay is a no-op. The mask is left in the all-OOB
-// pre-fill state, so the road region paints a uniform OOB colour. That
-// validates the dispatch wiring. The CPU TLUT + state + descriptor +
-// pre-fill cost should be ~1.5-2 ms — i.e. the floor for what this path
-// can ever beat (the existing CPU-only build at 13 ms minus the missing
-// per-pixel pack work).
+// shared TLUT + LineState arrays in n64::hwroad_rdp::detail. Per row it
+// computes the same data0/data1 skip flags, colour indices, spans and
+// 16-entry TLUT as the CPU-only build, then writes a DescriptorRDP entry
+// (and the per-row coob_fill_uc / emit_row_uc emit state) instead of
+// packing pixels itself. Once every row is described it kicks the
+// HWRoadRDP_BuildRuns overlay and returns without waiting — the RSP scans
+// each row's source bytes into a run list in parallel with the rest of
+// the frame's CPU work. Callers must go through sync_runs() (or the
+// RSP-side EmitCoobFill/EmitRuns dispatch) before consuming this frame's
+// run lists.
 // ---------------------------------------------------------------------------
 void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
 {
@@ -331,11 +323,9 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
         slot8r1[p] = merged_idx[(3 << 3) | p];
     }
     const uint8_t oob_slot = merged_idx[(3 << 3) | 3];
-    const uint8_t oob_pair = (uint8_t)((oob_slot << 4) | oob_slot);
 
     // Frame-level state into the RSP-shared buffer (uncached).
     rsp::state_uc->ctrl     = ctrl;
-    rsp::state_uc->oob_pair = oob_pair;
     for (int i = 0; i < 8; i++) {
         rsp::state_uc->slot8r0[i] = slot8r0[i];
         rsp::state_uc->slot8r1[i] = slot8r1[i];
@@ -442,8 +432,6 @@ void HWRoad::build_foreground_lores_rdp_rsp(const uint16_t* rgb_lut)
 
         line[y].s_start   = (uint16_t)span_start;
         line[y].s_end     = (uint16_t)span_end;
-        line[y].tex_start = (uint16_t)span_start;
-        line[y].tex_end   = (uint16_t)span_end;
         line[y].c_oob     = c_oob;
 
         // The coob fill sees OOB_ONLY and DRAW rows identically — both paint

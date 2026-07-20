@@ -1,9 +1,9 @@
 /***************************************************************************
     Cannonball N64 entry point.
 
-    Replaces src/main/main.cpp on libdragon builds. Drives the engine via
-    direct polling: there is no event queue, joypad is sampled once per
-    frame, and the renderer always blocks on vsync via display_get().
+    The sole entry point for libdragon builds. Drives the engine via direct
+    polling: there is no event queue, joypad is sampled once per frame, and
+    the renderer always blocks on vsync via display_get().
 ***************************************************************************/
 
 #include <libdragon.h>
@@ -115,7 +115,6 @@ namespace
         // load() left rom_path = "./roms/" — point it at DFS instead.
         config.data.rom_path  = "rom:/roms/";
         config.data.res_path  = "rom:/res/";
-        config.data.save_path = "/";   // EEPROM-backed, no filesystem write
         config.data.crc32     = 0;     // filename mode (no DFS dirent)
 
         // Cartridge / console port: skip the coin-up cycle. Outrun's
@@ -130,9 +129,11 @@ namespace
         // scroll interpolate on off-tick render frames (outrun.tick(false)).
         config.video.fps = 1;
 
-        // Phase 4a audio: CPU-mixed YM2151 + SegaPCM → libdragon audio_push.
-        // 22050 Hz keeps the chip emulators' per-frame cost manageable at the
-        // 30 fps engine target; raise once budget permits.
+        // Audio: SegaPCM is RSP-mixed and YM2151-driven music/SFX are
+        // pre-rendered wav64s (see n64/audio.cpp). 22050 Hz matches the
+        // wav64s' baked sample rate (see WAV64_MAX_RATE in n64/audio.cpp's
+        // Audio::init) and keeps the RSP mixer's per-channel buffers small
+        // on the 4 MiB build.
         config.sound.enabled = 1;
         config.sound.rate    = 22050;
 
@@ -226,16 +227,17 @@ namespace
         frame++;
 
         // Wall-clock decouple: engine ticks at exactly 30 Hz of real time
-        // regardless of render fps. The original frame-skip path (frame & 1
-        // when config.fps == 60) assumed the loop was vsync-locked at 60 Hz;
-        // when render dips to 30 the engine would drop to 15 Hz (half-speed
-        // gameplay), when it floats back to 60 the engine pops to 30 (feels
-        // like fast-forward). Accumulator-driven scheduling makes engine
-        // speed independent of render rate. State handlers below still
-        // override tick_frame=true for warmup transitions; that's fine, the
-        // accumulator phase carries through and resyncs on next steady-state
-        // iteration. Long stalls (boot menu, blocking loads) clamp the
-        // accumulator to avoid catch-up bursts on resume.
+        // regardless of render fps. A naive frame&1 skip (halving 60→30)
+        // assumes the render loop is vsync-locked at 60 Hz: dipping to
+        // 30 fps would then halve engine rate to 15 Hz (half-speed
+        // gameplay), and recovering to 60 fps would pop it back to 30
+        // (feels like fast-forward). Accumulator-driven scheduling ties
+        // engine speed to wall-clock only, independent of render rate.
+        // State handlers below still override tick_frame=true for warmup
+        // transitions; that's fine, the accumulator phase carries through
+        // and resyncs on next steady-state iteration. Long stalls (boot
+        // menu, blocking loads) clamp the accumulator to avoid catch-up
+        // bursts on resume.
         {
             static uint64_t last_us = 0;
             static uint64_t accum_us = 0;
@@ -936,7 +938,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 debugf("OUT total=%5lu  tick=%4lu prep=%5lu rend=%5lu "
                        "aud=%5lu wait=%5lu  "
                        "rbg=%4lu tbg=%5lu rfg=%5lu spr=%5lu txt=%5lu  "
-                       "z80=%4lu pcm=%4lu mix=%4lu strv=%lu\n",
+                       "z80=%4lu pcm=%4lu mix=%4lu strv=%lu pevt=%lu pbad=%lu\n",
                        (unsigned long)frame_total_us,
                        (unsigned long)tick_us,
                        (unsigned long)prepare_us,
@@ -951,7 +953,9 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::raw_aud_z80_us,
                        (unsigned long)n64_profile::raw_aud_pcm_us,
                        (unsigned long)n64_profile::raw_aud_mix_us,
-                       (unsigned long)n64_profile::aud_starve);
+                       (unsigned long)n64_profile::aud_starve,
+                       (unsigned long)audio.pool_eviction_count(),
+                       (unsigned long)audio.pcm_bad_length_count());
                 // Sprite-cache state at the outlier — flagging an atlas reset
                 // (ovf bumped vs the prior outlier) immediately tells us the
                 // spike came from cache cold-start instead of normal load.
@@ -1003,6 +1007,8 @@ int main(int /*argc*/, char* /*argv*/[])
         {
             static int log_n = 0;
             static int pulse_n = 0;
+            static uint32_t snap_pool_evictions = 0;
+            static uint32_t snap_pcm_bad_length  = 0;
             float fps = display_get_fps();
             const bool dip   = (fps > 10.0f && fps < 30.0f
                                 && ((++log_n & 7) == 0));
@@ -1051,8 +1057,11 @@ int main(int /*argc*/, char* /*argv*/[])
                 const uint32_t cur_tile_upl = n64_profile::tile_tlut_uploads;
                 const uint32_t cur_text_upl = n64_profile::text_tlut_uploads;
                 const uint32_t cur_starve   = n64_profile::aud_starve;
+                const uint32_t cur_pool_evt = audio.pool_eviction_count();
+                const uint32_t cur_pcm_bad  = audio.pcm_bad_length_count();
                 debugf("    drop=%3lu/%3lu min_wait=%5lu max_total=%5lu  "
-                       "spr.ext=%4lu hit=%5lu ovf=%2lu  tile.upl=%4lu txt.upl=%3lu strv=%lu\n",
+                       "spr.ext=%4lu hit=%5lu ovf=%2lu  tile.upl=%4lu txt.upl=%3lu strv=%lu "
+                       "pevt=%lu pbad=%lu\n",
                        (unsigned long)n64_profile::dropped_frames,
                        (unsigned long)wf,
                        (unsigned long)mw,
@@ -1062,7 +1071,9 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)(cur_spr_ovf - n64_profile::snap_spr_overflows),
                        (unsigned long)(cur_tile_upl - n64_profile::snap_tile_tlut_uploads),
                        (unsigned long)(cur_text_upl - n64_profile::snap_text_tlut_uploads),
-                       (unsigned long)(cur_starve - n64_profile::snap_aud_starve));
+                       (unsigned long)(cur_starve - n64_profile::snap_aud_starve),
+                       (unsigned long)(cur_pool_evt - snap_pool_evictions),
+                       (unsigned long)(cur_pcm_bad - snap_pcm_bad_length));
                 // Last-call tile.call values — baseline reference when fps is
                 // healthy. Compare against the OUT log to see how vis/uniq/
                 // chunks/evicts move on slow frames.
@@ -1098,6 +1109,8 @@ int main(int /*argc*/, char* /*argv*/[])
                 n64_profile::snap_tile_tlut_uploads = cur_tile_upl;
                 n64_profile::snap_text_tlut_uploads = cur_text_upl;
                 n64_profile::snap_aud_starve        = cur_starve;
+                snap_pool_evictions                 = cur_pool_evt;
+                snap_pcm_bad_length                 = cur_pcm_bad;
             }
         }
 #endif

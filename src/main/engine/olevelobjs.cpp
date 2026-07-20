@@ -138,7 +138,7 @@ void OLevelObjs::setup_sprites(uint32_t z)
     }
     // Jump-table pool exhausted. Original cannonball dropped this silently
     // (commented-out cout). On N64 it's the silent root cause of missing
-    // overpass pillars / posts. Hard fail — see [[feedback-never-silent-drop-content]].
+    // overpass pillars / posts. Hard fail.
 #ifdef __mips__
     assertf(0,
             "olevelobjs: setup_sprites pool exhausted — no free jump_table "

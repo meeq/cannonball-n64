@@ -1,29 +1,33 @@
 /***************************************************************************
-    N64 Audio — Phase 4c (RSP mixer + wav64 dispatch).
+    N64 Audio — RSP mixer + wav64 dispatch.
 
     Everything audible runs through libdragon's RSP audio mixer.
 
-    SegaPCM voices map 1:1 onto mixer channels 0..15: each is a custom 8-bit
-    mono waveform_t that streams bytes out of the (in-place-converted-to-
-    signed) PCM ROM. Per-frame, reconcile_pcm() scans the SegaPCM register
-    file via osoundint.pcm_ram and translates Z80 writes into mixer state
-    (play/stop, freq, volume, loop). Engine tone and traffic noise live on
-    these channels too (engine_process / traffic_process write straight
-    into pcm_ram).
+    SegaPCM exposes 16 hardware voices; rather than dedicate a mixer channel
+    to each (memory-expensive on the 4 MiB build), an 8-slot channel pool is
+    dynamically bound to whichever voices are actually active, with LRU
+    eviction under pressure. Each bound slot is a custom 8-bit mono
+    waveform_t that streams bytes out of the (in-place-converted-to-signed)
+    PCM ROM. Per-frame, reconcile_pcm() scans the SegaPCM register file via
+    osoundint.pcm_ram, translates Z80 writes into mixer state (play/stop,
+    freq, volume, loop), and claims/releases pool slots as voices key
+    on/off. Engine tone and traffic noise live on these channels too
+    (engine_process / traffic_process write straight into pcm_ram). See the
+    mixer channel layout comment below for the exact pool/slot numbering.
 
     The eleven YM2151-driven sounds — four music tracks, two music-channel
     jingles, five FM SFX — were pre-rendered host-side to VADPCM wav64 and
     bake into the DFS payload. Their sound::* IDs are intercepted at the
     Z80 queue (OSoundInt::add_to_queue → wav64_intercept) and dispatched
-    onto mixer channels 16–17 (music + jingles, stereo pair) and 18–19
+    onto mixer channels 8–9 (music + jingles, stereo pair) and 10–11
     (FM SFX, stereo pair) directly, bypassing the YM2151 emulator entirely.
     The YM2151 chip object stays allocated so OSound's cheap register-poll
     calls (read_status, write_reg) keep working, but stream_update() is
     never invoked.
 
     SegaPCM::stream_update() is also never called on N64; its 16-voice C++
-    mix loop was the dominant chip-side CPU cost and the RSP path replaces
-    it wholesale.
+    mix loop is the CPU-expensive path; the RSP path replaces it wholesale
+    on N64.
 ***************************************************************************/
 
 #include "audio.hpp"
@@ -61,7 +65,7 @@ namespace
     // channels — the second is flagged CH_FLAGS_STEREO_SUB and may not be
     // played independently. So each wav64 slot reserves a pair.
     //
-    // YM2151 has no audible channel any more: every sound the Z80 would
+    // YM2151 has no audible channel on N64: every sound the Z80 would
     // have routed to YM is intercepted at the queue and replaced with a
     // wav64. The YM2151 object stays allocated so OSound can still call
     // ym->read_status() / ym->write_reg() (both cheap), but its
@@ -116,18 +120,21 @@ namespace
     };
     PcmTrack pcm_track[N_PCM_CH];
 
-    // Counter for the dip log: how often did the pool overflow and force
-    // an eviction of an already-active voice? Should stay 0 in normal
-    // play (census peak = 7, pool = 8); non-zero means the pool is too
-    // small and the audible loss is real.
+    // How often did the pool overflow and force an eviction of an
+    // already-active voice? Should stay 0 in normal play (census peak = 7,
+    // pool = 8); non-zero means the pool is too small and the audible loss
+    // is real. Surfaced via Audio::pool_eviction_count(), printed as
+    // pevt= in n64main.cpp's OUT outlier log and CANNONBALL_LOG_PROFILE
+    // dip log.
     uint32_t pool_evictions = 0;
 
     // Count of voices whose register state implied a non-forward sample
     // (length <= 0 in MAME's "addr_hi reaches end" interpretation). These
     // are transient or unused-voice states — see comment at the check site.
-    // Surfaced via pool_evictions's diagnostic path; high counts in steady
-    // state would mean some voice is being key-on'd with bad regs and the
-    // user is hearing a dropout.
+    // Surfaced via Audio::pcm_bad_length_count(), printed as pbad= in
+    // n64main.cpp's OUT outlier log and CANNONBALL_LOG_PROFILE dip log;
+    // high counts in steady state would mean some voice is being key-on'd
+    // with bad regs and the user is hearing a dropout.
     uint32_t pcm_bad_length = 0;
 
     int8_t pcm_pool_claim(int voice, uint64_t now_us)
@@ -205,8 +212,8 @@ namespace
     // called on N64 and nothing else reads roms.pcm.rom. The conversion
     // must wait until roms.load_revb_roms() has run, which happens *after*
     // audio.init() — so do it lazily on the first reconcile that finds the
-    // ROM loaded. Skipping this gate meant pcm_rom_len stayed 0 and every
-    // play attempt was silently rejected by the bank+length guard.
+    // ROM loaded. Without this gate, pcm_rom_len stays 0 and every play
+    // attempt is silently rejected by the bank+length guard.
     void pcm_rom_signed_ensure()
     {
         if (pcm_rom_signed || !roms.pcm.loaded) return;
@@ -267,11 +274,6 @@ namespace
                 // partial state, and on legitimate voices mid-update if the
                 // Z80 set the active flag before finishing addr/end writes.
                 // Treat as quiescent: drop any bound slot and skip key-on.
-                // Distinct from the previous-version silent `continue` that
-                // also masked length<=0 from pcm_rom_len=0, because here we
-                // still assert the bound check below if length WAS positive
-                // — and we count the case so a regression that floods this
-                // path is visible in the dip log.
                 if (length <= 0)
                 {
                     pcm_bad_length++;
@@ -286,9 +288,9 @@ namespace
                     pcm_track[v].prev_end     = end;
                     continue;
                 }
-                // base+length overrunning pcm_rom_len IS a real bug — it's
-                // what the original silent-drop comment was protecting
-                // against (pcm_rom_len=0 from init-order). Keep loud.
+                // base+length overrunning pcm_rom_len IS a real bug —
+                // pcm_rom_len=0 from init-order would otherwise mask every
+                // play silently. Keep loud.
                 assertf((int)(base + length) <= pcm_rom_len,
                         "pcm v=%d: sample [%lu..%lu) past ROM end %d",
                         v, (unsigned long)base,
@@ -756,6 +758,11 @@ void Audio::drain_wav(uint32_t max_ms)
         }
     }
 }
+
+// Diagnostic accessors — see the pool_evictions / pcm_bad_length comments
+// above reconcile_pcm for what each counts and why it matters.
+uint32_t Audio::pool_eviction_count()  const { return pool_evictions;  }
+uint32_t Audio::pcm_bad_length_count() const { return pcm_bad_length; }
 
 void Audio::resume_audio()
 {

@@ -27,8 +27,7 @@
 // counters at end of frame for pipe/cmd/TMEM utilisation. Serializing CPU
 // and RDP kills frame-rate while enabled — attribution builds only, never
 // shipping. The DP counters are hardware-only (ares reads them as 0).
-// Override via -DN64_PROFILE_RDP_DRAIN=1; per-pass history and how to read
-// the numbers live in the rdp-perf-model memory note.
+// Override via -DN64_PROFILE_RDP_DRAIN=1 for attribution builds only.
 #ifndef N64_PROFILE_RDP_DRAIN
 #define N64_PROFILE_RDP_DRAIN 0
 #endif
@@ -357,9 +356,10 @@ bool Render::finalize_frame()
         (n64_profile::sub_us[n64_profile::SUB_TILE_BG] * 7
          + (uint32_t)(tbg_t1 - tbg_t0)) >> 3;
 
-    // RDP road_fg overlay. prepare_frame ran build_foreground_lores_rdp_rsp;
-    // here we sync the RSP-written n_runs back and emit the prebuilt mask +
-    // per-line TLUTs into rdpq, painting straight into the framebuffer.
+    // RDP road_fg overlay. The build pass (Video::prepare_frame, CPU or RSP)
+    // produces per-row runs; here we sync the RSP-written n_runs back and
+    // the emit pass converts those runs into RDP fill rectangles, painting
+    // straight into the framebuffer.
     //
     // should_render_road_fg() mirrors the build-side predicate at
     // video.cpp's prepare_frame: when the engine suppresses road_fg (e.g.

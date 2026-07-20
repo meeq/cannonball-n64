@@ -387,7 +387,7 @@ void run()
     }
 
     // Drain RDP before freeing the disclaimer's pixel buffer — same hazard
-    // as the splash end (see feedback_rdpq_free_needs_drain memory).
+    // as the splash end.
     rspq_wait();
     sprite_free(disc_sprite);
 
@@ -542,9 +542,9 @@ void run()
         if (skip) break;
     }
 
-    // rdpq_detach_show is async (see feedback_rdpq_free_needs_drain memory):
-    // sprite_free before the last frame's RDP work completes would hand the
-    // palette pages back to the heap while the RDP is still DMA-ing them.
+    // rdpq_detach_show is async: sprite_free before the last frame's RDP
+    // work completes would hand the palette pages back to the heap while
+    // the RDP is still DMA-ing them.
     rspq_wait();
     sprite_free(fade_sprite);
     sprite_free(sweep_sprite);

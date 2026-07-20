@@ -199,8 +199,7 @@ add_custom_command(TARGET cannonball PRE_BUILD
 # CONFIGURE_DEPENDS so adding/removing a ROM file re-runs cmake at the next
 # build instead of silently staging a stale DFS payload — without it,
 # load_revb_roms fails at boot and the console halts on a black screen with
-# only a debugf. (Same footgun previously hit by the menu sprites; see the
-# comment in bake-menu.cmake.) The glob runs unconditionally, not behind
+# only a debugf. The glob runs unconditionally, not behind
 # if(EXISTS): a roms/ directory created after the first configure changes
 # the (empty) glob result and triggers the reconfigure, whereas an EXISTS
 # guard evaluated once at configure time would never notice it appeared.

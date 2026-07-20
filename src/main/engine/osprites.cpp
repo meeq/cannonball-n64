@@ -368,7 +368,7 @@ void OSprites::map_palette(oentry* spr)
 void OSprites::do_spr_order_shadows(oentry* input)
 {
     // Pool exhausted — silently dropping a sprite here loses scenery
-    // content. See [[feedback-never-silent-drop-content]].
+    // content.
 #ifdef __mips__
     assertf(spr_cnt_main + spr_cnt_shadow < JUMP_ENTRIES_TOTAL,
             "osprites: do_spr_order_shadows MAIN-add pool exhausted "
@@ -399,7 +399,7 @@ void OSprites::do_spr_order_shadows(oentry* input)
     if (!(input->control & SHADOW)) return;
 
     // Pool exhausted — silently dropping a shadow sprite hides scenery
-    // shadows. See [[feedback-never-silent-drop-content]].
+    // shadows.
 #ifdef __mips__
     assertf(spr_cnt_main + spr_cnt_shadow < JUMP_ENTRIES_TOTAL,
             "osprites: do_spr_order_shadows SHADOW-add pool exhausted "

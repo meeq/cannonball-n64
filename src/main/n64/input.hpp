@@ -2,8 +2,8 @@
     N64 / libdragon Input.
 
     Mirrors the public surface of src/main/sdl2/input.hpp so engine and
-    frontend code (engine/oinputs.cpp, engine/outrun.cpp, frontend/ttrial.cpp,
-    frontend/cabdiag.cpp) is platform-agnostic.
+    frontend code (engine/oinputs.cpp, engine/outrun.cpp, frontend/ttrial.cpp)
+    is platform-agnostic.
 
     The SDL backend was event-driven (handle_key_*, handle_joy_*). On N64 we
     poll libdragon's joypad once per frame from n64main.cpp via Input::poll().
@@ -65,10 +65,6 @@ public:
     // Use analog controls
     int analog;
 
-    // Latch last key press for redefines — unused on N64 but kept for API parity
-    int key_press;
-    int16_t joy_button;
-
     // Analog Controls (signed 16-bit space, 0x80 centre matches SDL backend)
     int wheel, a_wheel;
     int a_accel;
@@ -91,8 +87,6 @@ public:
     bool is_pressed(presses p);
     bool is_pressed_clear(presses p);
     bool has_pressed(presses p);
-    void reset_axis_config();
-    int  get_axis_config();
     void set_rumble(bool enable, float strength = 1.0f);
 
     // N64-only: poll libdragon joypad and update keys[]. Called once per

@@ -1,7 +1,9 @@
 /***************************************************************************
     RDP path for HWRoad foreground rasteriser — all 4 road_control cases.
 
-    Two phases per frame, both called under finalize_frame:
+    Two phases per frame: the CPU/RSP build pass runs from
+    Video::prepare_frame; the RDP emit pass runs later under
+    Render::finalize_frame.
 
       1. CPU build pass. For each scanline:
            - Replay the same color_offset / data0 / hpos / color_table
@@ -47,7 +49,6 @@ namespace n64
 namespace hwroad_rdp
 {
 
-uint32_t last_us = 0;
 static uint32_t s_frame = 0;
 
 // Shared with hwroad_rdp_rsp.cpp via the internal header.
@@ -75,8 +76,10 @@ using detail::runs_ptr;
 
 namespace
 {
-    // Per-line CI4 TLUT — written by the CPU build (or RSP build via
-    // hwroad_rdp_rsp) and read by RDP at emit time via TILE0 palette load.
+    // Per-line RGBA5551 TLUT — written by the CPU build (or RSP build via
+    // hwroad_rdp_rsp) and consumed while building the run list to resolve
+    // each merged slot to a colour; never bound to the RDP as a texture
+    // palette.
     constexpr size_t TLUT_BUF_BYTES = (size_t)MAX_LINES * TLUT_ENTRIES * 2;
 
     // Per-line run lists. 224 * 64 * 4 = 56 KB.
@@ -182,10 +185,11 @@ void shutdown()
 
 bool should_render_road_fg()
 {
-    // Mirrors the engine-side suppression check formerly inlined at
-    // video.cpp's prepare_frame and applied (until now) only there.
-    // OMusic::enable sets horizon_base = HORIZON_OFF to drop the road on
-    // the music-select screen; with fix_bugs on we honour that. Without
+    // Single source of truth for the engine-side suppression check,
+    // consulted by both the build side (video.cpp's prepare_frame) and
+    // the emit side (rendersurface.cpp). OMusic::enable sets
+    // horizon_base = HORIZON_OFF to drop the road on the music-select
+    // screen; with fix_bugs on we honour that. Without
     // fix_bugs (legacy SDL behaviour) we keep rendering road_fg so the
     // change is a no-op outside the bug-fix path.
     return !config.engine.fix_bugs ||

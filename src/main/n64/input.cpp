@@ -22,7 +22,7 @@
 
 Input::Input()
     : keys{}, keys_old{}, motor_limits{}, gamepad(false),
-      rumble_supported(0), analog(0), key_press(-1), joy_button(-1),
+      rumble_supported(0), analog(0),
       wheel(CENTRE), a_wheel(CENTRE), a_accel(0), a_brake(0), a_motor(0)
 {
 }
@@ -109,9 +109,6 @@ void Input::frame_done()
 bool Input::is_pressed(presses p)       { return keys[p]; }
 bool Input::is_pressed_clear(presses p) { bool r = keys[p]; keys[p] = false; return r; }
 bool Input::has_pressed(presses p)      { return keys[p] && !keys_old[p]; }
-
-void Input::reset_axis_config() {}
-int  Input::get_axis_config()   { return 0; }
 
 void Input::set_rumble(bool enable, float /*strength*/)
 {
