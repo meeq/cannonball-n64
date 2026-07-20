@@ -143,6 +143,13 @@ endfunction()
 # -----------------------------------------------------------------------------
 set(AUDIO_PAYLOAD_STAGED_FILES "")
 
+# file(STRINGS) does not register the manifest as a configure dependency,
+# so a row added to sounds.txt would otherwise get no build rule until the
+# next manual reconfigure — the runtime tolerates the missing wav64 (probes
+# dfs_open before wav64_open) but the track silently doesn't play.
+set_property(DIRECTORY APPEND PROPERTY
+    CMAKE_CONFIGURE_DEPENDS "${_AUDIO_MANIFEST}")
+
 file(STRINGS "${_AUDIO_MANIFEST}" _SOUND_LINES ENCODING UTF-8)
 foreach(_line IN LISTS _SOUND_LINES)
     string(REGEX REPLACE "#.*$" "" _line "${_line}")

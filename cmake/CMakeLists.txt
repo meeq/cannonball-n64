@@ -198,13 +198,19 @@ add_custom_command(TARGET cannonball PRE_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${N64_DFS_ROOT}/res"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${N64_DFS_ROOT}/audio"
 )
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../roms")
-    file(GLOB CANNONBALL_ROMS "${CMAKE_CURRENT_SOURCE_DIR}/../roms/*")
-    foreach(rom ${CANNONBALL_ROMS})
-        get_filename_component(rom_name ${rom} NAME)
-        configure_file(${rom} "${N64_DFS_ROOT}/roms/${rom_name}" COPYONLY)
-    endforeach()
-endif()
+# CONFIGURE_DEPENDS so adding/removing a ROM file re-runs cmake at the next
+# build instead of silently staging a stale DFS payload — without it,
+# load_revb_roms fails at boot and the console halts on a black screen with
+# only a debugf. (Same footgun previously hit by the menu sprites; see the
+# comment in bake-menu.cmake.) The glob runs unconditionally, not behind
+# if(EXISTS): a roms/ directory created after the first configure changes
+# the (empty) glob result and triggers the reconfigure, whereas an EXISTS
+# guard evaluated once at configure time would never notice it appeared.
+file(GLOB CANNONBALL_ROMS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../roms/*")
+foreach(rom ${CANNONBALL_ROMS})
+    get_filename_component(rom_name ${rom} NAME)
+    configure_file(${rom} "${N64_DFS_ROOT}/roms/${rom_name}" COPYONLY)
+endforeach()
 configure_file(../res/tilemap.bin   "${N64_DFS_ROOT}/res/tilemap.bin"   COPYONLY)
 configure_file(../res/tilepatch.bin "${N64_DFS_ROOT}/res/tilepatch.bin" COPYONLY)
 
