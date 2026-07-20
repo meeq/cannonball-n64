@@ -25,17 +25,25 @@ endif()
 set(repo_root  "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(main_root  "${repo_root}/src/main")
 
-include_directories(${main_root})
+# This dir precedes ${main_root} so "hwaudio/ym2151.hpp" resolves to the
+# tool-local FULL emulator below, not the inert N64 stub in src/main.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${main_root})
 
 # Engine + chip emulator sources we need to drive the simulation.
 set(engine_audio
     "${main_root}/engine/audio/osound.cpp"
     "${main_root}/engine/audio/osoundint.cpp"
 )
+# The renderer needs the REAL YM2151 — src/main/hwaudio/ym2151.* was reduced
+# to a stub whose get_buffer() returns NULL once runtime playback moved to
+# pre-rendered wav64s (commit 5c7ce55), which segfaults every render and
+# leaves the wav64 payload impossible to regenerate. The pre-stub
+# Burczynski/MAME emulator is preserved under tools/audio-render/hwaudio/
+# for host builds only; the N64 target keeps the stub.
 set(hwaudio
     "${main_root}/hwaudio/segapcm.cpp"
     "${main_root}/hwaudio/soundchip.cpp"
-    "${main_root}/hwaudio/ym2151.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/hwaudio/ym2151.cpp"
 )
 set(romloader
     "${main_root}/roms.cpp"
