@@ -283,6 +283,13 @@ namespace
                             // engine rev / traffic noise on resume.
                             cannonball::audio.pause_audio();
                             osoundint.queue_sound(sound::FM_RESET);
+                            // The vibration logic (OOutputs::do_vibrate_*)
+                            // only runs from outrun.tick(), which is frozen
+                            // while paused — clear the motor bit so the
+                            // per-frame rumble reassert at the bottom of
+                            // tick_engine doesn't hold the Rumble Pak on
+                            // for the whole pause menu.
+                            outrun.outputs->clear_digital(OOutputs::D_MOTOR);
                             pause_cursor = PAUSE_CONTINUE;
                             blit_pause_overlay(pause_cursor);
                             input.frame_done();
@@ -346,8 +353,15 @@ namespace
                         }
                         else if (in_music)
                         {
-                            osoundint.queue_sound(sound::BEEP2);
+                            // FM_RESET first: both BEEP2 and FM_RESET route
+                            // through wav64_intercept onto the shared music
+                            // channel, and the intercept runs synchronously
+                            // at queue time. Queued the other way round,
+                            // FM_RESET's mixer_ch_stop kills BEEP2 before a
+                            // single mixer_poll can render it — the back-out
+                            // jingle is never heard.
                             osoundint.queue_sound(sound::FM_RESET);
+                            osoundint.queue_sound(sound::BEEP2);
                             cannonball::audio.clear_wav();
                             if (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
                             {
@@ -421,9 +435,12 @@ namespace
 
                     if (choice >= 0)
                     {
-                        osoundint.queue_sound(choice == PAUSE_CONTINUE
-                                                ? sound::BEEP2
-                                                : sound::COIN_IN);
+                        // COIN_IN for every confirm — it lives on the wav64
+                        // SFX channel. BEEP2 would route to the shared music
+                        // channel, where resume_audio()'s wav64_play below
+                        // retriggers the paused track before mixer_poll ever
+                        // renders a sample of the jingle, silencing it.
+                        osoundint.queue_sound(sound::COIN_IN);
                         // Targeted clear: only the cells the overlay wrote
                         // need wiping. A full clear_text_ram would also drop
                         // HUD labels (TIME/SCORE/LAP), which the engine only
@@ -608,6 +625,18 @@ namespace
             }
 
             case STATE_REENTER_BOOT_MENU:
+                // Let a just-queued exit jingle (TT-select back beep,
+                // pause-quit coin) finish before shutdown() tears the mixer
+                // down — it was queued on the previous tick and has had at
+                // most one mixer_poll's worth (~40 ms) of samples rendered.
+                cannonball::audio.drain_wav(1000);
+                // The Rumble Pak keeps whatever state it was last sent, and
+                // the per-frame reassert at the bottom of tick_engine won't
+                // run again until boot_menu::run() returns — clear the motor
+                // now so a rumble latched during attract/gameplay doesn't
+                // buzz through the entire menu.
+                outrun.outputs->clear_digital(OOutputs::D_MOTOR);
+                input.set_rumble(false, config.controls.rumble);
                 cannonball::audio.shutdown();
                 n64::boot_menu::run();
                 cannonball::audio.init();
@@ -817,6 +846,19 @@ int main(int /*argc*/, char* /*argv*/[])
                config.controls.keyconfig, config.controls.padconfig,
                config.controls.analog,    config.controls.axis,
                config.controls.invert,    config.controls.asettings);
+
+    // input.init() wiped keys_old, so a button still held from the boot-menu
+    // confirm (typically START/A) would read as a brand-new press inside
+    // STATE_INIT_GAME's warm-up ticks — where one stale press satisfies
+    // check_freeplay_start, tick_attract's credit check AND
+    // OMusic::check_start in a single tick, skipping attract and the
+    // music-select screen entirely. Re-sync the edge detector to the live
+    // pad state, and rearm the analog-accel debounce so is_analog_select
+    // doesn't fire on a held A either. Mirrors the suppression in
+    // STATE_INIT_TTRIAL_SELECT.
+    input.poll();
+    input.frame_done();
+    oinputs.reset_press_state();
 
     state = (outrun.cannonball_mode == Outrun::MODE_TTRIAL)
               ? STATE_INIT_TTRIAL_SELECT

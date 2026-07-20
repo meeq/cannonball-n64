@@ -730,6 +730,33 @@ void Audio::pause_audio()
     paused = true;
 }
 
+void Audio::drain_wav(uint32_t max_ms)
+{
+    if (!dac_initialised || !sound_enabled) return;
+    const int blen = audio_get_buffer_length();
+    if (blen <= 0) return;
+
+    // One-shot wav64s auto-stop their channel at waveform end, so the
+    // playing check terminates naturally; the deadline is the backstop
+    // against a looping track still sitting on the music channel.
+    const uint64_t deadline = get_ticks_us() + (uint64_t)max_ms * 1000;
+    while ((mixer_ch_playing(WAV64_MUS_CH) || mixer_ch_playing(WAV64_SFX_CH))
+           && get_ticks_us() < deadline)
+    {
+        if (audio_can_write())
+        {
+            int16_t* buf = audio_write_begin();
+            mixer_poll(buf, blen);
+            audio_write_end();
+        }
+        else
+        {
+            // Queue full — the DAC drains it at ~25 buffers/sec.
+            wait_ms(1);
+        }
+    }
+}
+
 void Audio::resume_audio()
 {
     paused = false;

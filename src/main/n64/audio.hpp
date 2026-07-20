@@ -60,6 +60,12 @@ public:
     void   pause_audio();
     void   resume_audio();
 
+    // Block until both wav64 channels fall silent (or max_ms elapses),
+    // feeding the mixer the whole time. Used before shutdown() so a
+    // just-queued exit jingle plays out instead of dying after the one
+    // mixer_poll it got on the tick that queued it.
+    void   drain_wav(uint32_t max_ms);
+
 private:
     wav_t wavfile{};
     bool  dac_initialised = false;
