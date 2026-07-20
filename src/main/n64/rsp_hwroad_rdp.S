@@ -155,7 +155,10 @@ NB_SAVE:     .space 4
 # writes one u16 per row (0xFFFF = inactive, else RGBA5551). Sized for
 # MAX_LINES+1 entries with the trailing entry stamped 0xFFFF on the CPU
 # side so the walk's closing edge falls out naturally; rounded up to
-# 8-byte multiple for SP DMA (232 rows * 2 = 464).
+# 8-byte multiple for SP DMA ((224+1) rows * 2 = 450 -> 456). Keep in
+# lockstep with COOB_FILL_BYTES in hwroad_rdp_rsp.cpp (static_assert'd
+# there) — the DMAIn in EmitCoobFill reads exactly that many bytes
+# from the CPU-side allocation.
 #
 # Aliased onto N_RUNS_OUT — DMEM is tight and the two arrays never live
 # simultaneously: BuildRuns writes N_RUNS_OUT and DMAs it out before
@@ -1005,15 +1008,18 @@ hp_send_do_dma:
 ############################################################
 HWRoadRDP_EmitCoobFill:
     # ---- DMA the coob array in. -----------------------------
-    # COOB array is MAX_LINES+1 u16 = 464 bytes (CPU rounds and stamps a
-    # 0xFFFF sentinel at MAX_LINES so the loop's trailing close lands).
+    # COOB array is MAX_LINES+1 u16 = 450 bytes, rounded up to 456 for SP
+    # DMA — must match COOB_FILL_BYTES, the CPU-side allocation size
+    # (static_assert'd in hwroad_rdp_rsp.cpp); anything larger reads past
+    # the end of coob_fill_uc in RDRAM. The CPU stamps a 0xFFFF sentinel
+    # at MAX_LINES so the loop's trailing close lands.
     # Strip the rspq cmd byte from a0 via shift (andi's immediate is 16-bit
     # on MIPS, so 0xFFFFFF can't be encoded directly).
     sll     s0, a0, 8
     srl     s0, s0, 8                    # phys = a0 & 0x00FFFFFF
     li      s4, %lo(COOB_FILL_DMEM)
     jal     DMAIn
-    li      t0, DMA_SIZE(464, 1)
+    li      t0, DMA_SIZE(456, 1)
 
     # ---- Stash inputs in callee-saved regs. -----------------
     # x_off / y_off are sign-extended in case the caller hands us a

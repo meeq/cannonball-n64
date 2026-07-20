@@ -119,6 +119,10 @@ namespace
     // sentinel simplifies the RSP walk: walking to MAX_LINES+1 catches the
     // closing edge of a run that extends to the last drawn row.
     constexpr size_t COOB_FILL_BYTES = (((size_t)MAX_LINES + 1) * 2 + 7) & ~7;
+    static_assert(COOB_FILL_BYTES == 456,
+                  "HWRoadRDP_EmitCoobFill's DMAIn in rsp_hwroad_rdp.S "
+                  "hardcodes DMA_SIZE(456, 1) — update it in lockstep or "
+                  "the RSP reads past the end of coob_fill_uc");
     uint16_t* coob_fill_uc        = nullptr;
     bool      coob_fill_populated = false;
 
