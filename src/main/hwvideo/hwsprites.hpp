@@ -44,7 +44,7 @@ private:
     // We grew to 256 slots after JUMP_ENTRIES_TOTAL in osprites bumped
     // past 128 to fix overpass scenery silent drops. Cap is the 12-bit
     // write_sprite16 address mask in video.cpp (& 0xfff = 4096 bytes =
-    // 256 sprite slots). See [[assertions-over-logs]] / SPRITE_ENTRIES.
+    // 256 sprite slots). See [[feedback-never-silent-drop-content]] / SPRITE_ENTRIES.
     static const uint16_t SPRITE_RAM_SIZE = 256 * 8;
     static const uint32_t SPRITES_LENGTH = 0x100000 >> 2;
     static const uint16_t COLOR_BASE = 0x800;
@@ -129,8 +129,18 @@ private:
     // transparent and only the body pixels survive alpha-compare). The ring
     // wraps per-frame; rdpq reads from the physical address at execute time,
     // so we never reuse a slot within a single render_rdp() call.
+    //
+    // alignas(16) = one full VR4300 D-cache line: the CPU writes this array
+    // ONLY through an UncachedAddr alias (render_rdp's scratch_uc), so no
+    // cacheline it occupies may ever be shared with a cached-accessed member.
+    // At alignas(8) the array could start mid-line, putting its first entries
+    // on the same line as the atlas counters above — a cached counter write
+    // dirties that line, and its eventual writeback clobbers the uncached
+    // TLUT bytes (intermittently wrong colors in a shadow body's palette).
+    // The size is a multiple of 16, so an aligned start also keeps the
+    // members below off the array's last line.
     static constexpr uint32_t SHADOW_TLUT_RING = 128;
-    alignas(8) uint16_t shadow_body_tluts[SHADOW_TLUT_RING * 16];
+    alignas(16) uint16_t shadow_body_tluts[SHADOW_TLUT_RING * 16];
     uint32_t   shadow_body_ring_idx;
 
     void atlas_reset();

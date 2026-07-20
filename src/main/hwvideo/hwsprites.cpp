@@ -779,6 +779,9 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // overflow-recovery rspq_wait() drain is skipped here because no
     // LOAD_BLOCK has been queued against the pool yet — there is nothing
     // in flight that could be reading the about-to-be-recycled addresses.
+    // (That includes the *previous* frame's LOAD_BLOCKs: render_rdp runs
+    // after finalize_frame's display_get(), which with FB_COUNT=2 blocks
+    // until the prior frame's RSP+RDP work has fully drained.)
     // This is the whole point of the 2-pass split: on 4 MiB the 128 KiB
     // pool was overflowing ~1.2x per frame inside pass 2, and each drain
     // stalled the CPU on the full RDP queue. Pass 1 absorbs the overflow
@@ -1200,20 +1203,31 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
                 int strip_ty0 = 0;
                 int strip_ty1 = strip_h;
 
-                // Destination y-range for this strip in screen space.
-                const float dstrip_y0 = dst_y + (float)row       * scale_y;
-                const float dstrip_y1 = dst_y + (float)(row + strip_h) * scale_y;
-                // X range covers the requested sub-rect, scaled to screen.
-                const float dstrip_x0 = dst_x + (float)sx0 * scale_x;
-                const float dstrip_x1 = dst_x + (float)sx1 * scale_x;
-
-                float rx0 = dstrip_x0, rx1 = dstrip_x1;
-                float ry0 = dstrip_y0, ry1 = dstrip_y1;
-                if (mirror_x) { float t = rx0; rx0 = rx1; rx1 = t; }
-                if (mirror_y) { float t = ry0; ry0 = ry1; ry1 = t; }
+                // Destination extents for this strip. Mirroring must reverse
+                // the strip *placement* across the sprite's full span, not
+                // just each strip's contents — swapping the extents of a
+                // forward-placed rect only flips within itself, which is
+                // right for the single-rect bypass path but leaves strips in
+                // un-mirrored order here (early source rows must land at the
+                // far edge of the zoomed span). Mirrored coords measure from
+                // the far edge (dst + zoomed - src*scale), same convention
+                // as the shadow tight-bbox path above; the extents then come
+                // out swapped, which also flips the strip's own contents.
+                const float dstrip_y0 = mirror_y
+                    ? (dst_y + zoomed_h - (float)row * scale_y)
+                    : (dst_y + (float)row * scale_y);
+                const float dstrip_y1 = mirror_y
+                    ? (dst_y + zoomed_h - (float)(row + strip_h) * scale_y)
+                    : (dst_y + (float)(row + strip_h) * scale_y);
+                const float dstrip_x0 = mirror_x
+                    ? (dst_x + zoomed_w - (float)sx0 * scale_x)
+                    : (dst_x + (float)sx0 * scale_x);
+                const float dstrip_x1 = mirror_x
+                    ? (dst_x + zoomed_w - (float)sx1 * scale_x)
+                    : (dst_x + (float)sx1 * scale_x);
 
                 rdpq_texture_rectangle_scaled(
-                    TILE0, rx0, ry0, rx1, ry1,
+                    TILE0, dstrip_x0, dstrip_y0, dstrip_x1, dstrip_y1,
                     strip_sx0, strip_ty0, strip_sx1, strip_ty1);
                 n64_profile::prim_count++;
                 spr_loads++;
@@ -1334,7 +1348,7 @@ void hwsprites::render_rdp(uint8_t priority, const uint16_t* sprite_tlut,
     // pixels. The pool size was tuned to cover the per-priority working set
     // on real ROM data; bumping into this means the working set grew (new
     // descriptor variants, larger zoom range, etc.) and the pool needs to
-    // grow too. See [[project-spr-spike-atlas-overflow]].
+    // grow too. See [[sprite-atlas-state]].
     assertf(atlas_overflows == overflows_before_pass2,
             "hwsprites: pass-2 atlas overflow (working set > pool); "
             "pool exhaustion during emit will silently corrupt sprites");
