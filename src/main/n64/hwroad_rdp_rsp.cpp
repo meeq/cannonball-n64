@@ -44,7 +44,6 @@ namespace hwroad_rdp_rsp
 // ctrl=1/2 dual-road frames are scanned piece-wise inside do_case12.
 uint32_t last_us    = 0;
 uint32_t cpu_us     = 0;
-uint32_t rsp_us     = 0;
 
 namespace
 {

@@ -46,7 +46,6 @@ namespace hwroad_rdp_rsp
     // CPU descriptor-build phase that has to run before kicking.
     extern uint32_t last_us;
     extern uint32_t cpu_us;   // CPU descriptor build only
-    extern uint32_t rsp_us;   // RSP exec (measured via rspq_wait timing)
 
     // Per-row OOB-colour fill dispatch — RSP-side emit of vertically
     // coalesced fill_rectangles for the c_oob strip that backs every active

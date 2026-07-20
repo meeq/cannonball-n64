@@ -824,6 +824,13 @@ void Audio::tick()
         audio_write_end();
         polls++;
     }
+    // Queue-health probe: exiting the loop still hungry means ≥3 of the 4
+    // buffers were empty at tick start — the DAC is within one buffer
+    // (~40 ms) of an audible underrun. Cumulative; the OUT/PLS logs print
+    // per-window deltas. A burst at boot (queue starts empty) is normal;
+    // nonzero deltas during play mean poll cadence lost to frame time.
+    if (polls == MAX_POLLS_PER_TICK && audio_can_write())
+        n64_profile::aud_starve++;
     uint64_t t_mix_1 = get_ticks_us();
     smooth(n64_profile::aud_mix_us, t_mix_1 - t_mix_0);
     n64_profile::raw_aud_mix_us = (uint32_t)(t_mix_1 - t_mix_0);

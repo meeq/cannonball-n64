@@ -936,7 +936,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 debugf("OUT total=%5lu  tick=%4lu prep=%5lu rend=%5lu "
                        "aud=%5lu wait=%5lu  "
                        "rbg=%4lu tbg=%5lu rfg=%5lu spr=%5lu txt=%5lu  "
-                       "z80=%4lu pcm=%4lu mix=%4lu\n",
+                       "z80=%4lu pcm=%4lu mix=%4lu strv=%lu\n",
                        (unsigned long)frame_total_us,
                        (unsigned long)tick_us,
                        (unsigned long)prepare_us,
@@ -950,7 +950,8 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)n64_profile::raw_sub_us[n64_profile::SUB_TEXT],
                        (unsigned long)n64_profile::raw_aud_z80_us,
                        (unsigned long)n64_profile::raw_aud_pcm_us,
-                       (unsigned long)n64_profile::raw_aud_mix_us);
+                       (unsigned long)n64_profile::raw_aud_mix_us,
+                       (unsigned long)n64_profile::aud_starve);
                 // Sprite-cache state at the outlier — flagging an atlas reset
                 // (ovf bumped vs the prior outlier) immediately tells us the
                 // spike came from cache cold-start instead of normal load.
@@ -1049,8 +1050,9 @@ int main(int /*argc*/, char* /*argv*/[])
                                              ->atlas_overflow_count();
                 const uint32_t cur_tile_upl = n64_profile::tile_tlut_uploads;
                 const uint32_t cur_text_upl = n64_profile::text_tlut_uploads;
+                const uint32_t cur_starve   = n64_profile::aud_starve;
                 debugf("    drop=%3lu/%3lu min_wait=%5lu max_total=%5lu  "
-                       "spr.ext=%4lu hit=%5lu ovf=%2lu  tile.upl=%4lu txt.upl=%3lu\n",
+                       "spr.ext=%4lu hit=%5lu ovf=%2lu  tile.upl=%4lu txt.upl=%3lu strv=%lu\n",
                        (unsigned long)n64_profile::dropped_frames,
                        (unsigned long)wf,
                        (unsigned long)mw,
@@ -1059,7 +1061,8 @@ int main(int /*argc*/, char* /*argv*/[])
                        (unsigned long)(cur_spr_hit - n64_profile::snap_spr_hits),
                        (unsigned long)(cur_spr_ovf - n64_profile::snap_spr_overflows),
                        (unsigned long)(cur_tile_upl - n64_profile::snap_tile_tlut_uploads),
-                       (unsigned long)(cur_text_upl - n64_profile::snap_text_tlut_uploads));
+                       (unsigned long)(cur_text_upl - n64_profile::snap_text_tlut_uploads),
+                       (unsigned long)(cur_starve - n64_profile::snap_aud_starve));
                 // Last-call tile.call values — baseline reference when fps is
                 // healthy. Compare against the OUT log to see how vis/uniq/
                 // chunks/evicts move on slow frames.
@@ -1094,6 +1097,7 @@ int main(int /*argc*/, char* /*argv*/[])
                 n64_profile::snap_spr_overflows     = cur_spr_ovf;
                 n64_profile::snap_tile_tlut_uploads = cur_tile_upl;
                 n64_profile::snap_text_tlut_uploads = cur_text_upl;
+                n64_profile::snap_aud_starve        = cur_starve;
             }
         }
 #endif

@@ -41,6 +41,7 @@ namespace n64_profile
     extern uint32_t snap_spr_overflows;
     extern uint32_t snap_tile_tlut_uploads;
     extern uint32_t snap_text_tlut_uploads;
+    extern uint32_t snap_aud_starve;
     // Cumulative cache counters incremented at the call sites (hwtiles).
     // hwsprites exposes equivalents through public methods.
     extern uint32_t tile_tlut_uploads;
@@ -98,10 +99,19 @@ namespace n64_profile
     extern uint32_t raw_aud_pcm_us;
     extern uint32_t raw_aud_mix_us;
 
+    // Cumulative near-underrun events: Audio::tick filled its per-tick poll
+    // budget and the DAC queue STILL had a free buffer, i.e. ≥3 of the 4
+    // buffers were empty — within one buffer (~40 ms) of audible silence.
+    // Nonzero deltas in the OUT/PLS logs mean the mixer poll cadence lost
+    // to frame time and audio health needs attention.
+    extern uint32_t aud_starve;
+
     // Per-frame RDP primitive counter. Each rasterizer increments this at
     // every rdpq_*_rectangle / rdpq_tex_blit site (~1500/frame at peak,
-    // ~30us of L1 store traffic). Read by the per-call counters
-    // (spr_call_prims, tile_call_prims) for the outlier logger.
+    // ~30us of L1 store traffic — kept alive even when N64_PROFILE_RDP_DRAIN
+    // is off so flipping that flag immediately produces a per-pass prim
+    // breakdown). Also read by the per-call counters (spr_call_prims,
+    // tile_call_prims) for the outlier logger.
     extern uint32_t prim_count;
 }
 
