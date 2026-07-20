@@ -31,13 +31,6 @@ public:
     void init(int32_t rate, int32_t fps);
     void stream_update();
 
-    // Forward-evolving chip state — the only field not already captured by
-    // a pcm_ram snapshot is `low[16]`, the per-channel fractional read
-    // position (the integer part of the address is stored back into
-    // ram[0x84]/[0x85]). Used by find-song-loop alongside YM2151::state_view.
-    static constexpr size_t STATE_BYTES = 16;
-    void state_view(uint8_t* dst) const;
-
 private:
     // PCM Chip Emulation
     uint8_t* ram;

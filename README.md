@@ -62,8 +62,8 @@ Outputs land in `build/`:
 * `cannonball.elf` — the unstripped ELF, useful with `mips64-elf-gdb`.
 * `cannonball.dfs` — the DFS filesystem image embedded in the ROM.
 
-The audio tooling can also be built standalone (music-loop analysis tools,
-one-off renders):
+The audio renderer can also be built standalone for one-off WAV renders of
+any Z80 sound command:
 
     cmake -S tools/audio-render -B build-host/audio-render
     cmake --build build-host/audio-render

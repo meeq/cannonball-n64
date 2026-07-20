@@ -261,47 +261,6 @@ public:
     void init_fm_chip();
     void tick();
 
-    // Diagnostic: incremented every time the LOOP_FOREVER MML opcode fires
-    // on a given channel slot (0..15, indexed by (chan - chan_ram - 0x20)/0x20
-    // — so 0..7 are YM1..YM8 and 8..13 are PCM_DRUM1..PCM_DRUM6). The host
-    // tools/audio-render/detect_loop polls this after each tick to find
-    // music loop lengths from the source data, without needing to do signal
-    // analysis on rendered audio. Cost on the game build is one branch +
-    // increment per LOOP_FOREVER fire (a few per minute of music).
-    uint32_t loop_fires[16] = {0};
-
-    // Read-only view of chan_ram, exposed for offline music-loop detection
-    // (tools/audio-render/find-song-loop). The MML walker mutates chan_ram
-    // each tick and never reads back from the YM2151 chip, so the full
-    // music engine state is captured by (chan_ram, pcm_ram). When that
-    // tuple exactly repeats, the song loops. Cost on the game build: zero
-    // (inline accessor over an existing field).
-    const uint8_t* chan_ram_view() const { return chan_ram; }
-    static constexpr uint16_t CHAN_RAM_BYTES = 0x800;
-
-    // Small auxiliary scalars that mutate during ticks and feed back into
-    // OSound's behavior (counter1..4 round-robin PCM drum channels;
-    // sound_props gates PCM-sfx paths). Exposed for the same offline loop
-    // detection as chan_ram_view(). Only the low bits are functionally
-    // significant (e.g. counter1 & 1 picks a channel slot), but a full-byte
-    // copy keeps the snapshot byte-comparable.
-    struct AuxState
-    {
-        uint8_t counter1, counter2, counter3, counter4;
-        uint8_t sound_props;
-        uint8_t command_index;
-        uint8_t engine_counter;
-        uint8_t engine_channel;
-    };
-    AuxState aux_state() const
-    {
-        return AuxState{
-            counter1, counter2, counter3, counter4,
-            sound_props, command_index,
-            engine_counter, engine_channel
-        };
-    }
-
     // Clear sound_props BIT_0 (the start-line rev-sample gate set by the
     // REVS command). The Z80 case sound::SIGNAL2 normally does this when
     // the countdown ends — N64 wav64-intercepts SIGNAL2, so the platform

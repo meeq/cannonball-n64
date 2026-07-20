@@ -14,36 +14,18 @@
 #
 # Loop selection methodology:
 #
-# Loop points were chosen empirically by listening to 60s previews (30s
-# pre-wrap + 30s post-wrap) at many (intro, period) candidates and picking
-# the one where the music continues from end-of-loop to intro with the
-# right musical phrase and where the full song's melodic content (the
-# "meat") is captured in one period. The candidate periods were generated
-# from waveform/chroma autocorrelation peaks (find_all_loops.py /
-# find_song_structure.py), then narrowed by listening.
-#
-# All three tracks turned out to share the same loop period (184.32 s =
-# 6 * 30.72 = 3 * 61.44, both clean multiples of the chan_ram cycle), with
-# different intros: BREEZE needs ~2 minutes of intro before its loop body
-# begins; SPLASH loops on itself from the start; MAGICAL has a brief
-# 82-second intro.
-#
-# Earlier purely-algorithmic attempts failed: the chan_ram-byte-identical
-# matcher (find-music-loop) required 290-340 s intros to fully settle the
-# Z80 walker's nested-LOOP/CALL state, but the resulting loops perceived
-# as "5-min intro then 30-s repeating loop" rather than the song's actual
-# verse-and-chorus structure. The audio autocorrelation alone surfaced
-# many high-AC peaks but couldn't distinguish musical phrase boundaries.
+# Loop points were chosen empirically: candidate (intro, period) pairs came
+# from waveform/chroma autocorrelation peaks, then each was auditioned as a
+# 60 s preview (30 s pre-wrap + 30 s post-wrap) and the winner is the pair
+# where the music continues across the splice on the right musical phrase
+# and one period captures the full song's melodic content. Musical phrasing
+# is prioritised over splice silence, so a small residual click at the wrap
+# is accepted.
 #
 # Splice quality at the chosen (intro, period) (50 ms window RMS):
 #   BREEZE  intro= 89.2780s  period=199.6790s  ->  -15.6 dB RMS
 #   SPLASH  intro=  0.0000s  period=337.9200s  ->  -19.5 dB RMS
 #   MAGICAL intro= 59.5160s  period=238.0830s  ->  -12.4 dB RMS
-#
-# Splice clicks are louder than previous values because we now prioritise
-# musical phrasing over click silence. A future improvement would be a
-# short (~50ms) crossfade across the splice to mask the residual click
-# without changing the structural loop.
 #
 # Render durations are auto-derived: (intro + loop) for music_loop, the
 # explicit value for the other kinds.

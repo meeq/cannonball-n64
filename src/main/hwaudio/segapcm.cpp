@@ -152,8 +152,3 @@ void SegaPCM::stream_update()
         }
     }
 }
-
-void SegaPCM::state_view(uint8_t* dst) const
-{
-    std::memcpy(dst, low, STATE_BYTES);
-}

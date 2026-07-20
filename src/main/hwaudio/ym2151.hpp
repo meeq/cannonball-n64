@@ -1,5 +1,5 @@
 /***************************************************************************
-    YM2151 stub (N64 build) — see ym2151.cpp for the full story.
+    YM2151 stub (N64 build) — see ym2151.cpp for details.
 
     The Burczynski/MAME emulator is replaced wholesale by wav64 dispatch on
     N64. This shim preserves the SoundChip interface so engine/audio still
@@ -28,10 +28,4 @@ public:
     void stream_update();
     void write_reg(int r, int v);
     int read_status();
-
-    // Host-tool entry points (find-song-loop). Stubs on N64 — never called
-    // at runtime, but kept so the symbol resolves if anything references
-    // them.
-    static size_t state_bytes();
-    void state_view(uint8_t* dst) const;
 };

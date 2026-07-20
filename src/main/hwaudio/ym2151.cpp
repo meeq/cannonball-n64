@@ -18,9 +18,6 @@
     We return status = BIT_0 (timer A "overflowed", busy clear) so both
     gates pass. The Z80 code that follows the gates queues sounds, which
     audio.cpp's wav64 intercept catches before they reach the chip.
-
-    state_view / state_bytes are host-only (find-song-loop) and never called
-    on N64; stubs return 0 / write nothing so the vtable resolves.
 ***************************************************************************/
 
 #include "hwaudio/ym2151.hpp"
@@ -48,6 +45,3 @@ int YM2151::read_status()
     // fm_write_reg proceeds and is then no-op'd).
     return 0x01;
 }
-
-size_t YM2151::state_bytes() { return 0; }
-void   YM2151::state_view(uint8_t*) const {}
