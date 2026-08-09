@@ -187,9 +187,20 @@ namespace
     void pcm_voice_read(void* ctx_, samplebuffer_t* sbuf, int wpos, int wlen, bool /*seeking*/)
     {
         const PcmSlot* slot = (const PcmSlot*)ctx_;
-        uint8_t* dst = (uint8_t*)samplebuffer_append(sbuf, wlen);
         const int8_t* src = pcm_rom_signed + slot->base_byte + wpos;
-        memcpy(dst, src, wlen);
+        // The mixer can ask a read for more units than the samplebuffer's
+        // mirrored tail holds in one append (a round's window scales with
+        // voice frequency — e.g. 129 units against the default 128-unit
+        // margin). Each samplebuffer_append must stay within
+        // margin_units, so split into margin-sized chunks.
+        while (wlen > 0)
+        {
+            int n = wlen < SAMPLEBUFFER_MARGIN_UNITS ? wlen : SAMPLEBUFFER_MARGIN_UNITS;
+            uint8_t* dst = (uint8_t*)samplebuffer_append(sbuf, n);
+            memcpy(dst, src, n);
+            src += n;
+            wlen -= n;
+        }
     }
 
     // Silent read used only to prime mixer channel sample buffers at init.
